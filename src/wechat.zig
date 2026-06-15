@@ -25,6 +25,10 @@ const std = @import("std");
 const cache_mod = @import("cache/mod.zig");
 const officialaccount_mod = @import("officialaccount/mod.zig");
 const credential_mod = @import("credential/mod.zig");
+const work_mod = @import("work/mod.zig");
+const pay_mod = @import("pay/mod.zig");
+const miniprogram_mod = @import("miniprogram/mod.zig");
+const openplatform_mod = @import("openplatform/mod.zig");
 
 /// 顶层 Wechat 入口。
 ///
@@ -89,6 +93,62 @@ pub const Wechat = struct {
         };
         return officialaccount_mod.OfficialAccount.init(ctx);
     }
+
+    pub const GetWorkError = error{CacheUnavailable};
+
+    /// 获取企业微信实例。
+    ///
+    /// `cfg.cache` 为空时使用 `Wechat` 全局 cache；两者都为空则返回 `error.CacheUnavailable`。
+    pub fn getWork(
+        self: *Wechat,
+        allocator: std.mem.Allocator,
+        cfg: work_mod.Config,
+    ) (GetWorkError || anyerror)!work_mod.Work {
+        var resolved_cfg = cfg;
+        resolved_cfg.cache = cfg.cache orelse self.cache orelse return error.CacheUnavailable;
+        return work_mod.Work.newDefaultWork(resolved_cfg, allocator);
+    }
+
+    /// 获取微信支付实例。
+    ///
+    /// 微信支付当前不依赖 cache，因此直接返回实例。
+    pub fn getPay(self: *Wechat, cfg: pay_mod.Config) pay_mod.Pay {
+        _ = self;
+        return pay_mod.Pay.init(cfg);
+    }
+
+    pub const GetMiniProgramError = error{CacheUnavailable};
+
+    /// 获取小程序实例。
+    ///
+    /// `default_access_token_factory` 与 `getOfficialAccount` 的工厂参数语义一致。
+    pub fn getMiniProgram(
+        self: *Wechat,
+        allocator: std.mem.Allocator,
+        cfg: miniprogram_mod.Config,
+        default_access_token_factory: *const fn (
+            cfg: miniprogram_mod.Config,
+            cache: cache_mod.Cache,
+        ) anyerror!credential_mod.AccessTokenHandle,
+    ) (GetMiniProgramError || anyerror)!miniprogram_mod.MiniProgram {
+        const resolved_cache = cfg.cache orelse self.cache orelse return error.CacheUnavailable;
+        var resolved_cfg = cfg;
+        resolved_cfg.cache = resolved_cache;
+        const handle = try default_access_token_factory(resolved_cfg, resolved_cache);
+        return miniprogram_mod.MiniProgram.init(allocator, resolved_cfg, handle);
+    }
+
+    pub const GetOpenPlatformError = error{CacheUnavailable};
+
+    /// 获取开放平台（第三方平台）实例。
+    pub fn getOpenPlatform(
+        self: *Wechat,
+        cfg: openplatform_mod.Config,
+    ) GetOpenPlatformError!openplatform_mod.OpenPlatform {
+        var resolved_cfg = cfg;
+        resolved_cfg.cache = cfg.cache orelse self.cache orelse return error.CacheUnavailable;
+        return openplatform_mod.OpenPlatform.newOpenPlatform(resolved_cfg);
+    }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -115,4 +175,39 @@ test "Wechat.setCache 缓存生效" {
 
     wc.setCache(mem.asCache());
     try std.testing.expect(wc.cache != null);
+}
+
+test "Wechat.getPay 返回 Pay 实例" {
+    var wc = Wechat.init();
+    const p = wc.getPay(.{ .app_id = "wx-pay", .mch_id = "123" });
+    try std.testing.expectEqualStrings("wx-pay", p.cfg.app_id);
+}
+
+test "Wechat.getOpenPlatform 注入全局 cache" {
+    const allocator = std.testing.allocator;
+    const mem = try cache_mod.Memory.create(allocator);
+    defer {
+        mem.deinit();
+        allocator.destroy(mem);
+    }
+    var wc = Wechat.init();
+    wc.setCache(mem.asCache());
+    const op = try wc.getOpenPlatform(.{ .app_id = "wx-op" });
+    try std.testing.expect(op.ctx.config.cache != null);
+}
+
+test "Wechat.getWork 无 cache 返回 CacheUnavailable" {
+    var wc = Wechat.init();
+    const result = wc.getWork(std.testing.allocator, .{ .corp_id = "ww" });
+    try std.testing.expectError(error.CacheUnavailable, result);
+}
+
+test "Wechat.getMiniProgram 无 cache 返回 CacheUnavailable" {
+    var wc = Wechat.init();
+    const result = wc.getMiniProgram(
+        std.testing.allocator,
+        .{ .app_id = "wx-mp" },
+        undefined,
+    );
+    try std.testing.expectError(error.CacheUnavailable, result);
 }

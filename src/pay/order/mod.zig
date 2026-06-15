@@ -53,6 +53,38 @@ pub const BridgeConfig = struct {
     pay_sign: []const u8,
 };
 
+/// 查询订单结果。
+pub const QueryOrderResult = struct {
+    return_code: []const u8 = "",
+    return_msg: []const u8 = "",
+    result_code: []const u8 = "",
+    err_code: []const u8 = "",
+    err_code_des: []const u8 = "",
+    trade_state: []const u8 = "",
+    out_trade_no: []const u8 = "",
+    transaction_id: []const u8 = "",
+};
+
+/// 关闭订单结果。
+pub const CloseOrderResult = struct {
+    return_code: []const u8 = "",
+    return_msg: []const u8 = "",
+    result_code: []const u8 = "",
+    err_code: []const u8 = "",
+    err_code_des: []const u8 = "",
+};
+
+/// APP 拉起支付配置。
+pub const AppConfig = struct {
+    appid: []const u8,
+    partnerid: []const u8,
+    prepayid: []const u8,
+    package: []const u8,
+    nonce_str: []const u8,
+    timestamp: []const u8,
+    sign: []const u8,
+};
+
 pub const Order = struct {
     cfg: Config,
 
@@ -111,6 +143,124 @@ pub const Order = struct {
             .mweb_url = doc.get("mweb_url") orelse "",
             .err_code = doc.get("err_code") orelse "",
             .err_code_des = doc.get("err_code_des") orelse "",
+        };
+    }
+
+    /// 查询订单（POST XML）。
+    pub fn queryOrder(self: *Self, allocator: std.mem.Allocator, out_trade_no: []const u8) !QueryOrderResult {
+        const nonce_str = try util_util.randomStr(allocator, 32);
+        defer allocator.free(nonce_str);
+
+        const params = [_]util_param.Param{
+            .{ .key = "appid", .value = self.cfg.app_id },
+            .{ .key = "mch_id", .value = self.cfg.mch_id },
+            .{ .key = "out_trade_no", .value = out_trade_no },
+            .{ .key = "nonce_str", .value = nonce_str },
+        };
+        const sign = try signMd5(allocator, &params, self.cfg.key);
+        defer allocator.free(sign);
+
+        const xml_body = try buildSimpleXml(allocator, "xml", &[_]util_xml.XmlElement{
+            .{ .key = "appid", .value = self.cfg.app_id },
+            .{ .key = "mch_id", .value = self.cfg.mch_id },
+            .{ .key = "out_trade_no", .value = out_trade_no },
+            .{ .key = "nonce_str", .value = nonce_str },
+            .{ .key = "sign", .value = sign },
+        });
+        defer allocator.free(xml_body);
+
+        var client = util_http.HttpClient.init(allocator);
+        defer client.deinit();
+        const body = try client.postXML("https://api.mch.weixin.qq.com/pay/orderquery", xml_body);
+        defer allocator.free(body);
+
+        var doc = try util_xml.parse(allocator, body);
+        defer doc.deinit();
+
+        return .{
+            .return_code = doc.get("return_code") orelse "",
+            .return_msg = doc.get("return_msg") orelse "",
+            .result_code = doc.get("result_code") orelse "",
+            .err_code = doc.get("err_code") orelse "",
+            .err_code_des = doc.get("err_code_des") orelse "",
+            .trade_state = doc.get("trade_state") orelse "",
+            .out_trade_no = doc.get("out_trade_no") orelse "",
+            .transaction_id = doc.get("transaction_id") orelse "",
+        };
+    }
+
+    /// 关闭订单（POST XML）。
+    pub fn closeOrder(self: *Self, allocator: std.mem.Allocator, out_trade_no: []const u8) !CloseOrderResult {
+        const nonce_str = try util_util.randomStr(allocator, 32);
+        defer allocator.free(nonce_str);
+
+        const params = [_]util_param.Param{
+            .{ .key = "appid", .value = self.cfg.app_id },
+            .{ .key = "mch_id", .value = self.cfg.mch_id },
+            .{ .key = "out_trade_no", .value = out_trade_no },
+            .{ .key = "nonce_str", .value = nonce_str },
+        };
+        const sign = try signMd5(allocator, &params, self.cfg.key);
+        defer allocator.free(sign);
+
+        const xml_body = try buildSimpleXml(allocator, "xml", &[_]util_xml.XmlElement{
+            .{ .key = "appid", .value = self.cfg.app_id },
+            .{ .key = "mch_id", .value = self.cfg.mch_id },
+            .{ .key = "out_trade_no", .value = out_trade_no },
+            .{ .key = "nonce_str", .value = nonce_str },
+            .{ .key = "sign", .value = sign },
+        });
+        defer allocator.free(xml_body);
+
+        var client = util_http.HttpClient.init(allocator);
+        defer client.deinit();
+        const body = try client.postXML("https://api.mch.weixin.qq.com/pay/closeorder", xml_body);
+        defer allocator.free(body);
+
+        var doc = try util_xml.parse(allocator, body);
+        defer doc.deinit();
+
+        return .{
+            .return_code = doc.get("return_code") orelse "",
+            .return_msg = doc.get("return_msg") orelse "",
+            .result_code = doc.get("result_code") orelse "",
+            .err_code = doc.get("err_code") orelse "",
+            .err_code_des = doc.get("err_code_des") orelse "",
+        };
+    }
+
+    pub fn prePayID(self: *Self, allocator: std.mem.Allocator, pre_order: PreOrder) (error{PrepayIdEmpty} || std.mem.Allocator.Error)![]u8 {
+        _ = self;
+        if (pre_order.prepay_id.len == 0) return error.PrepayIdEmpty;
+        return allocator.dupe(u8, pre_order.prepay_id);
+    }
+
+    /// 构造 APP 拉起支付参数。
+    pub fn bridgeAppConfig(self: *Self, allocator: std.mem.Allocator, pre_order: PreOrder) !AppConfig {
+        const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{std.time.timestamp()});
+        defer allocator.free(timestamp);
+
+        const nonce_str = try util_util.randomStr(allocator, 32);
+        defer allocator.free(nonce_str);
+
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(allocator);
+        try buf.writer.print(
+            "appid={s}&noncestr={s}&package=Sign=WXPay&partnerid={s}&prepayid={s}&timestamp={s}&key={s}",
+            .{ self.cfg.app_id, nonce_str, self.cfg.mch_id, pre_order.prepay_id, timestamp, self.cfg.key },
+        );
+        const raw = buf.items;
+        const sign_md5 = try util_crypto.calculateSign(allocator, raw, util_crypto.SignTypeMD5, "");
+        defer allocator.free(sign_md5);
+
+        return .{
+            .appid = try allocator.dupe(u8, self.cfg.app_id),
+            .partnerid = try allocator.dupe(u8, self.cfg.mch_id),
+            .prepayid = try allocator.dupe(u8, pre_order.prepay_id),
+            .package = "Sign=WXPay",
+            .nonce_str = try allocator.dupe(u8, nonce_str),
+            .timestamp = try allocator.dupe(u8, timestamp),
+            .sign = try allocator.dupe(u8, sign_md5),
         };
     }
 
@@ -187,6 +337,17 @@ fn buildUnifiedOrderXml(allocator: std.mem.Allocator, cfg: Config, p: Params, no
     return util_xml.serialize(allocator, "xml", elements.items);
 }
 
+fn buildSimpleXml(
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    elements: []const util_xml.XmlElement,
+) ![]u8 {
+    var list = std.ArrayList(util_xml.XmlElement).empty;
+    defer list.deinit(allocator);
+    try list.appendSlice(allocator, elements);
+    return util_xml.serialize(allocator, root, list.items);
+}
+
 test "Params 默认值" {
     const p = Params{
         .total_fee = "1",
@@ -203,4 +364,18 @@ test "Params 默认值" {
 test "PreOrder 默认值" {
     const o = PreOrder{};
     try std.testing.expectEqualStrings("", o.prepay_id);
+}
+
+test "Order.prePayID 返回 prepay_id" {
+    const allocator = std.testing.allocator;
+    var o = Order.init(.{ .app_id = "wx", .mch_id = "m", .key = "k" });
+    const id = try o.prePayID(allocator, .{ .prepay_id = "wx_prepay_123" });
+    defer allocator.free(id);
+    try std.testing.expectEqualStrings("wx_prepay_123", id);
+}
+
+test "Order.prePayID 空值返回错误" {
+    var o = Order.init(.{});
+    const result = o.prePayID(std.testing.allocator, .{});
+    try std.testing.expectError(error.PrepayIdEmpty, result);
 }

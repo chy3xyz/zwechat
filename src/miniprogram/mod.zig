@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const credential = @import("../credential/mod.zig");
-const Config = @import("config.zig").Config;
+pub const Config = @import("config.zig").Config;
 const Context = @import("context/mod.zig").Context;
 
 pub const Auth = @import("auth/mod.zig").Auth;

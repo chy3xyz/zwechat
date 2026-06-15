@@ -28,7 +28,22 @@ pub const credential = @import("credential/mod.zig");
 pub const util = @import("util/mod.zig");
 /// 微信公众号业务模块。
 pub const officialaccount = @import("officialaccount/mod.zig");
+/// 企业微信业务模块。
+pub const work = @import("work/mod.zig");
+/// 微信支付业务模块。
+pub const pay = @import("pay/mod.zig");
+/// 微信小程序业务模块。
+pub const miniprogram = @import("miniprogram/mod.zig");
+/// 微信开放平台业务模块。
+pub const openplatform = @import("openplatform/mod.zig");
 
 test "version 与 build.zig.zon 保持一致" {
     try std.testing.expectEqualStrings("0.0.1", version);
+}
+
+test "root 导出所有业务模块" {
+    try std.testing.expect(@hasDecl(@This(), "work"));
+    try std.testing.expect(@hasDecl(@This(), "pay"));
+    try std.testing.expect(@hasDecl(@This(), "miniprogram"));
+    try std.testing.expect(@hasDecl(@This(), "openplatform"));
 }
