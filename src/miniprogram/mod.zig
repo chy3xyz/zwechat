@@ -6,6 +6,8 @@ pub const Config = @import("config.zig").Config;
 const Context = @import("context/mod.zig").Context;
 
 pub const Auth = @import("auth/mod.zig").Auth;
+pub const qrcode = @import("qrcode/mod.zig");
+pub const urlscheme = @import("urlscheme/mod.zig");
 pub const MiniProgram = struct {
     ctx: Context,
     auth_instance: ?Auth = null,
@@ -29,10 +31,25 @@ pub const MiniProgram = struct {
     pub fn getAuth(self: *Self) Auth {
         return Auth.init(&self.ctx, self.allocator);
     }
+
+    /// 懒加载 QRCode 子模块。
+    pub fn getQRCode(self: *Self) qrcode.QRCode {
+        return qrcode.QRCode.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 URLScheme 子模块。
+    pub fn getURLScheme(self: *Self) urlscheme.URLScheme {
+        return urlscheme.URLScheme.init(&self.ctx, self.allocator);
+    }
 };
 
 test "MiniProgram.init 返回实例" {
     const allocator = std.heap.page_allocator;
     const mp = MiniProgram.init(allocator, .{ .app_id = "wx-mp" }, .{ .ptr = undefined, .vtable = undefined });
     try std.testing.expectEqualStrings("wx-mp", mp.ctx.config.app_id);
+}
+
+test "MiniProgram 暴露 qrcode / urlscheme 工厂" {
+    try std.testing.expect(@hasDecl(MiniProgram, "getQRCode"));
+    try std.testing.expect(@hasDecl(MiniProgram, "getURLScheme"));
 }

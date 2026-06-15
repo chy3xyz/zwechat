@@ -71,6 +71,8 @@ const mp_mod = @import("miniprogram/mod.zig");
 const mp_config = @import("miniprogram/config.zig");
 const mp_context = @import("miniprogram/context/mod.zig");
 const mp_auth = @import("miniprogram/auth/mod.zig");
+const mp_qrcode = @import("miniprogram/qrcode/mod.zig");
+const mp_urlscheme = @import("miniprogram/urlscheme/mod.zig");
 
 // —— work ——
 const work_mod = @import("work/mod.zig");
@@ -161,6 +163,8 @@ test "test_runner 编译门 — 强制所有模块被解析 (v2)" {
     _ = mp_config;
     _ = mp_context;
     _ = mp_auth;
+    _ = mp_qrcode;
+    _ = mp_urlscheme;
     _ = work_mod;
     _ = work_config;
     _ = work_context;
