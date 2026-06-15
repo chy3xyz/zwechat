@@ -4,6 +4,9 @@ zig-out/
 *.o
 *.obj
 
+# 上游 Go 参考代码（只读本地参考，不上传到 GitHub）
+_ref/
+
 # 代码图谱缓存
 .codegraph/
 
