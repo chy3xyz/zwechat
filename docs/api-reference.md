@@ -244,7 +244,7 @@ pub fn decodeWithCommonError(allocator, response, api_name) !?CommonError;
 pub fn rsaSign(allocator, content, private_key_pem) RsaError![]u8;
 pub fn rsaVerify(allocator, content, signature_b64, public_key_pem) RsaError!bool;
 
-// PKCS#12（暂未实现）
+// PKCS#12（已可用：PBES2 + PBKDF2-HMAC-SHA256 + AES-256-CBC）
 pub fn parseP12(allocator, p12_bytes, password) P12Error!struct { cert_pem, key_pem };
 pub fn p12Available() bool;
 

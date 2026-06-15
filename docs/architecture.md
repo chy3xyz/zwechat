@@ -373,7 +373,7 @@ test "test_runner 编译门 — 强制所有模块被解析" {
 | 运行时 | 零分配（除显式 `alloc` 调用外） |
 | 内存占用 | 单 OfficialAccount 实例 ~1KB |
 | HTTP 客户端 | 走 `std.http.Client`（libxev / io_uring / kqueue） |
-| 加密原语 | AES-256-CBC / MD5 / HMAC-SHA256 / **RSA-SHA256 PKCS#1 v1.5（纯 Zig）** / Ed25519（Zig stdlib 原生） |
+| 加密原语 | AES-256-CBC / MD5 / HMAC-SHA256 / **RSA-SHA256 PKCS#1 v1.5（纯 Zig）** / **PKCS#12（PBES2/PBKDF2/AES-256-CBC）** / Ed25519（Zig stdlib 原生） |
 | 并发 | `SpinMutex` + `std.Io` runtime |
 
 **生产环境建议**：
@@ -392,6 +392,8 @@ test "test_runner 编译门 — 强制所有模块被解析" {
 | `std.http.Client` + `std.Io.Threaded.global_single_threaded` | `util/http.zig` |
 | `std.json.parseFromSlice(... .{ .ignore_unknown_fields = true })` | 几乎所有 HTTP 响应解析 |
 | `std.crypto.sign.Ed25519` | `util/rsa.zig` |
+| `std.crypto.core.aes.Aes256` | `util/crypto.zig`, `util/pkcs12.zig` |
+| `std.crypto.pwhash.pbkdf2` | `util/pkcs12.zig` |
 | `std.crypto.utils.timingSafeEql` | `util/crypto.zig` |
 | `std.mem.Allocator.Error!T` | 所有 public API |
 | `std.testing.allocator` | 所有 inline test |
@@ -403,9 +405,8 @@ test "test_runner 编译门 — 强制所有模块被解析" {
 | 计划 | 优先级 |
 |---|---|
 | vendor 更快的 big-int 库（替换当前 `std.math.big.int.Managed` RSA 实现）| 低 |
-| vendor ASN.1 / PKCS#12 解析器（解锁 TLS 双向认证）| 高 |
+| `util/http.postXMLWithTLS` 与 `std.http.Client` 客户端证书对接 | 高 |
 | 完整 wire `work.jsapi.getConfig`（corp + agent ticket 切换）| 中 |
-| 添加 GitHub Actions CI（`zig build test` 自动化）| 中 |
 | `miniprogram/auth` 的 `verifyEncryptedData` 真实加密算法 | 中 |
 | 性能 benchmark（与 Go SDK 对照）| 低 |
 | 文档国际化（英文版）| 低 |

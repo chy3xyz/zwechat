@@ -15,6 +15,7 @@
 const std = @import("std");
 const ed25519 = std.crypto.sign.Ed25519;
 const rsa_impl = @import("rsa_impl.zig");
+const pkcs12 = @import("pkcs12.zig");
 
 /// RSA 签名错误集。
 pub const RsaError = error{
@@ -78,21 +79,25 @@ pub const P12Error = error{
     P12NotImplemented,
     InvalidP12File,
     BadPassword,
+    OutOfMemory,
 };
 
 pub fn parseP12(allocator: std.mem.Allocator, p12_bytes: []const u8, password: []const u8) P12Error!struct {
     cert_pem: []u8,
     key_pem: []u8,
 } {
-    _ = allocator;
-    _ = p12_bytes;
-    _ = password;
-    return error.P12NotImplemented;
+    const result = pkcs12.parse(allocator, p12_bytes, password) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.BadPassword => return error.BadPassword,
+        error.InvalidP12File => return error.InvalidP12File,
+        else => return error.P12NotImplemented,
+    };
+    return .{ .cert_pem = result.cert_pem, .key_pem = result.key_pem };
 }
 
-/// 检查 PKCS#12 是否可用（始终返回 false，因为尚未实现）。
+/// 检查 PKCS#12 是否可用（取决于 parseP12 是否成功）。
 pub fn p12Available() bool {
-    return false;
+    return true;
 }
 
 /// 提示：检测 PEM 格式是否看起来是 RSA 私钥。
@@ -179,10 +184,10 @@ test "rsaVerify 拒绝非法公钥 PEM" {
     try std.testing.expectError(error.InvalidPemKey, result);
 }
 
-test "parseP12 当前返回 P12NotImplemented" {
+test "parseP12 拒绝非法 P12 文件" {
     const result = parseP12(std.testing.allocator, "fake_p12", "pwd");
-    try std.testing.expectError(error.P12NotImplemented, result);
-    try std.testing.expect(!p12Available());
+    try std.testing.expectError(error.InvalidP12File, result);
+    try std.testing.expect(p12Available());
 }
 
 test "looksLikeRsaPrivateKeyPem 识别 PEM 格式" {

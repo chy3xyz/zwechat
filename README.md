@@ -7,8 +7,8 @@
 | | |
 |---|---|
 | Zig 版本 | ≥ 0.17.0 |
-| 测试覆盖 | 260 个内联测试，0 内存泄漏 |
-| 代码规模 | 79 个 Zig 文件，~12.3k 行 |
+| 测试覆盖 | 275 个内联测试，0 内存泄漏 |
+| 代码规模 | 80 个 Zig 文件，~12.5k 行 |
 | 许可证 | Apache-2.0（与上游一致） |
 | Git 仓库 | `c16d836`（首版 commit） |
 
@@ -158,11 +158,11 @@ zig build test --summary all
 ```
 Build Summary: 3/3 steps succeeded
 test success
-+- run test 260 pass (260 total)
++- run test 275 pass (275 total)
    +- compile test Debug native
 ```
 
-所有内联测试使用 `std.testing.allocator`，自动检测内存泄漏；运行结果应严格 **260/260 pass, 0 leak**。
+所有内联测试使用 `std.testing.allocator`，自动检测内存泄漏；运行结果应严格 **275/275 pass, 0 leak**。
 
 ---
 
@@ -178,12 +178,15 @@ src/
 │
 ├── cache/                    # 缓存抽象 + 内存实现
 ├── credential/               # 凭据管理（access_token + js_ticket × 2 种）
-├── util/                     # 通用工具（10 个文件）
+├── util/                     # 通用工具（12 个文件）
 │   ├── http.zig              # HTTP 客户端 + MockTransport + Transport 注入
 │   ├── crypto.zig            # AES / MD5 / HMAC-SHA256
 │   ├── signature.zig         # SHA1 sort-and-sign
 │   ├── xml.zig               # 微信消息 XML codec
-│   ├── rsa.zig               # RSA stub + Ed25519 native
+│   ├── rsa.zig               # RSA-SHA256 PKCS#1 v1.5 + Ed25519 + PKCS#12
+│   ├── rsa_impl.zig          # 纯 Zig RSA 实现
+│   ├── asn1.zig              # 最小 ASN.1 DER 解析器
+│   ├── pkcs12.zig            # PBES2/PBKDF2/AES-256-CBC P12 解析
 │   ├── error.zig, time.zig, param.zig, util.zig
 │
 ├── officialaccount/          # 公众号（1 顶层 + 14 子模块）
@@ -204,7 +207,7 @@ src/
 ## 已知限制
 
 1. **RSA 签名**：✅ 已在 `src/util/rsa_impl.zig` 实现纯 Zig 的 RSA-SHA256 PKCS#1 v1.5 签名/验签；支持 PKCS#1 `RSA PRIVATE KEY` 与 X.509 `PUBLIC KEY` PEM。使用 `std.math.big.int.Managed` + 二进制模幂，**功能正确但速度不及优化 big-int 库**（后续可替换为更快的实现）。
-2. **PKCS#12 / TLS 双向认证**：`util/http.postXMLWithTLS` 与 `util/rsa.parseP12` 仍为占位。生产支付（`pay/refund` + `pay/transfer`）需要 vendor ASN.1 / PKCS#12 解析器。
+2. **PKCS#12**：✅ 已在 `src/util/pkcs12.zig` 实现 PBES2 + PBKDF2-HMAC-SHA256 + AES-256-CBC 解析，支持从 `.p12` 导出证书/私钥 PEM。`util/rsa.parseP12` 已接入；`util/http.postXMLWithTLS` 仍需与 `std.http.Client` TLS 客户端证书接口对接。
 3. **`WorkJsTicket` 已就绪但 work.JsAPI 子模块尚未完整 wire** —— `Work.newDefaultWork` 会懒加载 `WorkJsTicket`，但子模块的业务方法（如 `jsapi.getConfig`）仍需后续接续。
 
 ---

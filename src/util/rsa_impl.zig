@@ -9,6 +9,7 @@
 //! 优化；对 2048-bit 签名/验签可用但不够快。后续可用更快的 big-int 库替换。
 
 const std = @import("std");
+const asn1 = @import("asn1.zig");
 
 pub const Error = error{
     InvalidPemKey,
@@ -16,6 +17,8 @@ pub const Error = error{
     UnsupportedKeyFormat,
     OutOfMemory,
     EncodingFailed,
+    InvalidDer,
+    UnsupportedTag,
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -139,122 +142,44 @@ pub fn parsePublicKeyPem(allocator: std.mem.Allocator, pem: []const u8) Error!Pu
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// ASN.1 DER 最小解析器
+// ASN.1 DER 解析（使用共享 util/asn1.zig）
 // ──────────────────────────────────────────────────────────────────────────────
 
-const DerReader = struct {
-    data: []const u8,
-    pos: usize,
-
-    const Tag = struct {
-        class: u2,
-        constructed: bool,
-        number: u5,
-    };
-
-    fn readTag(self: *DerReader) Error!Tag {
-        if (self.pos >= self.data.len) return error.InvalidPemKey;
-        const b = self.data[self.pos];
-        self.pos += 1;
-        return Tag{
-            .class = @intCast((b >> 6) & 0x3),
-            .constructed = ((b >> 5) & 0x1) != 0,
-            .number = @intCast(b & 0x1f),
-        };
-    }
-
-    fn readLength(self: *DerReader) Error!usize {
-        if (self.pos >= self.data.len) return error.InvalidPemKey;
-        const first = self.data[self.pos];
-        self.pos += 1;
-        if (first & 0x80 == 0) return first;
-        const num_bytes = first & 0x7f;
-        if (num_bytes == 0 or num_bytes > 4 or self.pos + num_bytes > self.data.len) return error.InvalidPemKey;
-        var len: usize = 0;
-        for (0..num_bytes) |_| {
-            len = (len << 8) | self.data[self.pos];
-            self.pos += 1;
-        }
-        return len;
-    }
-
-    fn readSequence(self: *DerReader) Error![]const u8 {
-        const tag = try self.readTag();
-        if (tag.number != 0x10 or !tag.constructed) return error.InvalidPemKey;
-        const len = try self.readLength();
-        if (self.pos + len > self.data.len) return error.InvalidPemKey;
-        const seq = self.data[self.pos..self.pos + len];
-        self.pos += len;
-        return seq;
-    }
-
-    fn readIntegerBytes(self: *DerReader) Error![]const u8 {
-        const tag = try self.readTag();
-        if (tag.number != 0x02) return error.InvalidPemKey;
-        const len = try self.readLength();
-        if (self.pos + len > self.data.len) return error.InvalidPemKey;
-        const bytes = self.data[self.pos..self.pos + len];
-        self.pos += len;
-        return bytes;
-    }
-
-    fn readBitString(self: *DerReader) Error![]const u8 {
-        const tag = try self.readTag();
-        if (tag.number != 0x03) return error.InvalidPemKey;
-        const len = try self.readLength();
-        if (self.pos + len > self.data.len or len < 1) return error.InvalidPemKey;
-        const unused_bits = self.data[self.pos];
-        if (unused_bits != 0) return error.InvalidPemKey;
-        const bs = self.data[self.pos + 1 .. self.pos + len];
-        self.pos += len;
-        return bs;
-    }
-
-    fn readObjectIdentifier(self: *DerReader) Error![]const u8 {
-        const tag = try self.readTag();
-        if (tag.number != 0x06) return error.InvalidPemKey;
-        const len = try self.readLength();
-        if (self.pos + len > self.data.len) return error.InvalidPemKey;
-        const oid = self.data[self.pos..self.pos + len];
-        self.pos += len;
-        return oid;
-    }
-};
-
-// rsaEncryption OID: 1.2.840.113549.1.1.1 = 0x2a 0x86 0x48 0x86 0xf7 0x0d 0x01 0x01 0x01
+// rsaEncryption OID: 1.2.840.113549.1.1.1
 const RSA_ENCRYPTION_OID = &[_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01 };
 
+fn readBigInt(allocator: std.mem.Allocator, reader: *asn1.Reader) Error!std.math.big.int.Managed {
+    const bytes = try reader.readInteger();
+    return try bigIntFromBytes(allocator, bytes);
+}
+
 fn parseRsaPrivateKeyDer(allocator: std.mem.Allocator, der: []const u8) Error!PrivateKey {
-    var r = DerReader{ .data = der, .pos = 0 };
-    const seq = try r.readSequence();
-    var inner = DerReader{ .data = seq, .pos = 0 };
+    var r = asn1.Reader.init(der);
+    const tag = try r.readTag();
+    if (tag.number != 0x10 or !tag.constructed) return error.InvalidPemKey;
+    const len = try r.readLength();
+    const seq = try r.readSequenceContent(len);
+    var inner = asn1.Reader.init(seq);
 
     // Version
-    const version = try inner.readIntegerBytes();
+    const version = try inner.readInteger();
     if (version.len == 0) return error.InvalidPemKey;
 
-    const readInt = struct {
-        fn f(alloc: std.mem.Allocator, reader: *DerReader) Error!std.math.big.int.Managed {
-            const bytes = try reader.readIntegerBytes();
-            return try bigIntFromBytes(alloc, bytes);
-        }
-    }.f;
-
-    var n = try readInt(allocator, &inner);
+    var n = try readBigInt(allocator, &inner);
     errdefer n.deinit();
-    var e = try readInt(allocator, &inner);
+    var e = try readBigInt(allocator, &inner);
     errdefer e.deinit();
-    var d = try readInt(allocator, &inner);
+    var d = try readBigInt(allocator, &inner);
     errdefer d.deinit();
-    var p = try readInt(allocator, &inner);
+    var p = try readBigInt(allocator, &inner);
     errdefer p.deinit();
-    var q = try readInt(allocator, &inner);
+    var q = try readBigInt(allocator, &inner);
     errdefer q.deinit();
-    var dp = try readInt(allocator, &inner);
+    var dp = try readBigInt(allocator, &inner);
     errdefer dp.deinit();
-    var dq = try readInt(allocator, &inner);
+    var dq = try readBigInt(allocator, &inner);
     errdefer dq.deinit();
-    const qinv = try readInt(allocator, &inner);
+    const qinv = try readBigInt(allocator, &inner);
 
     return PrivateKey{
         .n = n,
@@ -269,12 +194,15 @@ fn parseRsaPrivateKeyDer(allocator: std.mem.Allocator, der: []const u8) Error!Pr
 }
 
 fn parseRsaPublicKeyDer(allocator: std.mem.Allocator, der: []const u8) Error!PublicKey {
-    var r = DerReader{ .data = der, .pos = 0 };
-    const seq = try r.readSequence();
-    var inner = DerReader{ .data = seq, .pos = 0 };
+    var r = asn1.Reader.init(der);
+    const tag = try r.readTag();
+    if (tag.number != 0x10 or !tag.constructed) return error.InvalidPemKey;
+    const len = try r.readLength();
+    const seq = try r.readSequenceContent(len);
+    var inner = asn1.Reader.init(seq);
 
-    const n_bytes = try inner.readIntegerBytes();
-    const e_bytes = try inner.readIntegerBytes();
+    const n_bytes = try inner.readInteger();
+    const e_bytes = try inner.readInteger();
 
     var n = try bigIntFromBytes(allocator, n_bytes);
     errdefer n.deinit();
@@ -284,21 +212,25 @@ fn parseRsaPublicKeyDer(allocator: std.mem.Allocator, der: []const u8) Error!Pub
 }
 
 fn parseSubjectPublicKeyInfoDer(allocator: std.mem.Allocator, der: []const u8) Error!PublicKey {
-    var r = DerReader{ .data = der, .pos = 0 };
-    const seq = try r.readSequence();
-    var inner = DerReader{ .data = seq, .pos = 0 };
+    var r = asn1.Reader.init(der);
+    const tag = try r.readTag();
+    if (tag.number != 0x10 or !tag.constructed) return error.InvalidPemKey;
+    const len = try r.readLength();
+    const seq = try r.readSequenceContent(len);
+    var inner = asn1.Reader.init(seq);
 
     // AlgorithmIdentifier SEQUENCE
-    const alg_seq = try inner.readSequence();
-    var alg = DerReader{ .data = alg_seq, .pos = 0 };
+    const alg_tag = try inner.readTag();
+    if (alg_tag.number != 0x10 or !alg_tag.constructed) return error.UnsupportedKeyFormat;
+    const alg_len = try inner.readLength();
+    const alg_seq = try inner.readSequenceContent(alg_len);
+    var alg = asn1.Reader.init(alg_seq);
+
     const oid = try alg.readObjectIdentifier();
     if (!std.mem.eql(u8, oid, RSA_ENCRYPTION_OID)) return error.UnsupportedKeyFormat;
     // 参数应为 NULL
-    if (alg.pos < alg.data.len) {
-        const null_tag = try alg.readTag();
-        if (null_tag.number != 0x05) return error.UnsupportedKeyFormat;
-        const null_len = try alg.readLength();
-        if (null_len != 0) return error.UnsupportedKeyFormat;
+    if (alg.remaining() > 0) {
+        try alg.readNull();
     }
 
     // subjectPublicKey BIT STRING 内是 RSAPublicKey DER

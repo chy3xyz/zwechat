@@ -11,6 +11,8 @@ pub const param = @import("param.zig");
 pub const util = @import("util.zig");
 pub const error_mod = @import("error.zig");
 pub const rsa = @import("rsa.zig");
+pub const asn1 = @import("asn1.zig");
+pub const pkcs12 = @import("pkcs12.zig");
 pub const xml = @import("xml.zig");
 
 test "util 模块全部导出" {
@@ -22,5 +24,7 @@ test "util 模块全部导出" {
     _ = util;
     _ = error_mod;
     _ = rsa;
+    _ = asn1;
+    _ = pkcs12;
     _ = xml;
 }

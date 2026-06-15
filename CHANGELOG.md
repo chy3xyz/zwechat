@@ -7,9 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Wave 15 — ASN.1 解析器提取 + PKCS#12 解析**：
+  - 新增 `src/util/asn1.zig`：最小 DER 解析器，支持 SEQUENCE / INTEGER / OCTET STRING / BIT STRING / OID / NULL，供 RSA PEM 与 PKCS#12 复用。
+  - 新增 `src/util/pkcs12.zig`：纯 Zig 实现 PKCS#12 解析，支持 PBES2 + PBKDF2-HMAC-SHA256 + AES-256-CBC，可从 `.p12` 导出 `-----BEGIN CERTIFICATE-----` 与 `-----BEGIN PRIVATE KEY-----` PEM。
+  - `util/rsa.parseP12` 与 `p12Available()` 接入 `pkcs12.parse`，不再返回 `P12NotImplemented`。
+  - 新增 3 个 PKCS#12 内联测试（成功解析、错误密码返回 `BadPassword`、空密码返回 `BadPassword`）。
+  - 测试总数从 260 提升至 **275**，仍保持 0 内存泄漏。
+
+### Changed
+
+- `src/util/rsa_impl.zig` 重构为使用共享 `src/util/asn1.zig` 解析器，减少重复代码。
+
 ### Planned
 
-- **PKCS#12 / TLS 双向认证**：支付 `refund` / `transfer` 的真实环境部署需要 ASN.1 解析器。
+- **`util/http.postXMLWithTLS` 与 `std.http.Client` 客户端证书对接**：PKCS#12 解析已就绪，待 Zig HTTP API 支持客户端证书后完成 TLS 双向认证。
 - **更快的 RSA big-int 后端**：当前 `rsa_impl.zig` 使用 `std.math.big.int.Managed` + 二进制模幂，功能正确但速度有优化空间。
 - **`work.jsapi.getConfig` corp / agent 完整 wire**：`WorkJsTicket` 已就绪，待 `Context.js_ticket_handle` 完成 plug-and-play。
 - **CI / GitHub Actions**：增加 `zig build test` 在 PR 上的自动运行。
