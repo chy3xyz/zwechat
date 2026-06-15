@@ -1,0 +1,22 @@
+# Zig 编译产物
+.zig-cache/
+zig-out/
+*.o
+*.obj
+
+# 代码图谱缓存
+.codegraph/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 临时
+/tmp/
+*.log
