@@ -43,6 +43,18 @@ pub const Context = struct {
     pub fn getAccessToken(self: *const Context) ?[]const u8 {
         return self.access_token;
     }
+
+    /// 获取或刷新 component_access_token。
+    ///
+    /// `verify_ticket` 是微信第三方平台推送的「票据」，每次换取 token 时必填。
+    /// 结果会写入 `config.cache`；命中缓存时直接返回。
+    pub fn getComponentAccessToken(
+        self: *Context,
+        allocator: std.mem.Allocator,
+        verify_ticket: []const u8,
+    ) ![]u8 {
+        return @import("access_token.zig").getComponentAccessToken(self, allocator, verify_ticket);
+    }
 };
 
 test "Context 默认值" {
@@ -71,4 +83,12 @@ test "Context 自定义配置 + token 存取" {
     // 覆写语义
     ctx.setAccessToken("comp-ak-rotated");
     try std.testing.expectEqualStrings("comp-ak-rotated", ctx.getAccessToken().?);
+}
+
+test "Context.getComponentAccessToken 需要 cache" {
+    var ctx = Context{
+        .config = .{ .app_id = "wx-op", .app_secret = "s" },
+    };
+    const result = ctx.getComponentAccessToken(std.testing.allocator, "ticket");
+    try std.testing.expectError(error.CacheUnavailable, result);
 }

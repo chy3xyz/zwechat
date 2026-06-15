@@ -89,25 +89,78 @@ pub const Account = struct {
         return self.allocator.dupe(u8, parsed.value.open_appid);
     }
 
-    /// `Bind` — 将公众号 / 小程序绑定到开放平台账号。
+    /// 将公众号 / 小程序绑定到开放平台账号。
     ///
-    /// 注：上游 Go SDK 暂未实现（account.go 内仅返回 `nil`）。本 Zig 版保持
-    /// "未实现" 的可观察行为——返回 `WechatError.ApiError` 作为哨兵，
-    /// 后续 pass 在上游补齐真实接口（`/cgi-bin/open/bind`）时再实现。
-    pub fn bind(self: *Self, app_id: []const u8) !void {
-        _ = self;
-        _ = app_id;
-        return util_error.WechatError.ApiError;
+    /// `verify_ticket` 用于换取 component_access_token。
+    pub fn bind(
+        self: *Self,
+        app_id: []const u8,
+        open_app_id: []const u8,
+        verify_ticket: []const u8,
+    ) !void {
+        const token = try self.ctx.getComponentAccessToken(self.allocator, verify_ticket);
+        defer self.allocator.free(token);
+
+        const uri = try std.fmt.allocPrint(
+            self.allocator,
+            "https://api.weixin.qq.com/cgi-bin/open/bind?component_access_token={s}",
+            .{token},
+        );
+        defer self.allocator.free(uri);
+
+        const body_json = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"appid\":\"{s}\",\"open_appid\":\"{s}\"}}",
+            .{ app_id, open_app_id },
+        );
+        defer self.allocator.free(body_json);
+
+        const client = util_http.getDefaultClient(self.allocator);
+        const resp = client.postJSON(uri, body_json) catch return util_error.WechatError.NetworkError;
+        defer self.allocator.free(resp);
+
+        var parsed = std.json.parseFromSlice(CommonResponse, self.allocator, resp, .{}) catch {
+            return util_error.WechatError.DecodeError;
+        };
+        defer parsed.deinit();
+
+        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
     }
 
-    /// `Unbind` — 将公众号 / 小程序从开放平台账号下解绑。
-    ///
-    /// 与 `Bind` 同样保持骨架语义（未实现 → 返回 `ApiError`）。
-    pub fn unbind(self: *Self, app_id: []const u8, open_app_id: []const u8) !void {
-        _ = self;
-        _ = app_id;
-        _ = open_app_id;
-        return util_error.WechatError.ApiError;
+    /// 将公众号 / 小程序从开放平台账号解绑。
+    pub fn unbind(
+        self: *Self,
+        app_id: []const u8,
+        open_app_id: []const u8,
+        verify_ticket: []const u8,
+    ) !void {
+        const token = try self.ctx.getComponentAccessToken(self.allocator, verify_ticket);
+        defer self.allocator.free(token);
+
+        const uri = try std.fmt.allocPrint(
+            self.allocator,
+            "https://api.weixin.qq.com/cgi-bin/open/unbind?component_access_token={s}",
+            .{token},
+        );
+        defer self.allocator.free(uri);
+
+        const body_json = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"appid\":\"{s}\",\"open_appid\":\"{s}\"}}",
+            .{ app_id, open_app_id },
+        );
+        defer self.allocator.free(body_json);
+
+        const client = util_http.getDefaultClient(self.allocator);
+        const resp = client.postJSON(uri, body_json) catch return util_error.WechatError.NetworkError;
+        defer self.allocator.free(resp);
+
+        var parsed = std.json.parseFromSlice(CommonResponse, self.allocator, resp, .{}) catch {
+            return util_error.WechatError.DecodeError;
+        };
+        defer parsed.deinit();
+
+        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
     }
 };
 
@@ -128,6 +181,12 @@ const OpenAccountResponse = struct {
     errcode: i64 = 0,
     errmsg: []const u8 = "",
     open_appid: []const u8 = "",
+};
+
+/// 绑定 / 解绑等无业务返回的通用响应。
+const CommonResponse = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -154,9 +213,9 @@ test "createOpenAccountURL / getOpenAccountURL 指向正确主机" {
     try std.testing.expect(std.mem.indexOf(u8, getOpenAccountURL, "/cgi-bin/open/get") != null);
 }
 
-test "bind / unbind 维持骨架语义（返回 ApiError）" {
+test "bind / unbind 无 cache 返回 CacheUnavailable" {
     var ctx: Context = .{ .config = .{ .app_id = "wx-op" } };
     var a = Account.init(&ctx, std.heap.page_allocator);
-    try std.testing.expectError(util_error.WechatError.ApiError, a.bind("wx-target"));
-    try std.testing.expectError(util_error.WechatError.ApiError, a.unbind("wx-target", "wx-open"));
+    try std.testing.expectError(error.CacheUnavailable, a.bind("wx-target", "wx-open", "ticket"));
+    try std.testing.expectError(error.CacheUnavailable, a.unbind("wx-target", "wx-open", "ticket"));
 }

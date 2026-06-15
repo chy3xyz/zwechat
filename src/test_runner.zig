@@ -96,6 +96,7 @@ const work_kf = @import("work/kf/mod.zig");
 const openplatform_mod = @import("openplatform/mod.zig");
 const openplatform_config = @import("openplatform/config.zig");
 const openplatform_context = @import("openplatform/context/mod.zig");
+const openplatform_access_token = @import("openplatform/context/access_token.zig");
 const openplatform_account = @import("openplatform/account/mod.zig");
 const openplatform_miniprogram = @import("openplatform/miniprogram/mod.zig");
 const openplatform_officialaccount = @import("openplatform/officialaccount/mod.zig");
@@ -184,6 +185,7 @@ test "test_runner 编译门 — 强制所有模块被解析 (v2)" {
     _ = openplatform_mod;
     _ = openplatform_config;
     _ = openplatform_context;
+    _ = openplatform_access_token;
     _ = openplatform_account;
     _ = openplatform_miniprogram;
     _ = openplatform_officialaccount;
