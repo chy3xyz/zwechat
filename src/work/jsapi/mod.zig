@@ -48,8 +48,10 @@ pub const Config = struct {
 
 pub const Js = struct {
     ctx: *Context,
-    /// JsTicket handle；未初始化时 `getConfig` 会 panic / 返回错误。
+    /// corp 类型 JsTicket handle；未初始化时 `getConfig` 返回 `error.JsTicketHandleNotSet`。
     ticket_handle: ?credential.JsTicketHandle = null,
+    /// agent 类型 JsTicket handle；未初始化时 `getAgentConfig` 返回 `error.JsTicketHandleNotSet`。
+    agent_ticket_handle: ?credential.JsTicketHandle = null,
 
     const Self = @This();
 
@@ -57,9 +59,14 @@ pub const Js = struct {
         return .{ .ctx = ctx };
     }
 
-    /// 注入 JsTicket handle（典型来源：`Work.getJsTicket` / 自定义实现）。
+    /// 注入 corp JsTicket handle（典型来源：`Work.getCorpJsTicket` / 自定义实现）。
     pub fn setJsTicketHandle(self: *Self, h: credential.JsTicketHandle) void {
         self.ticket_handle = h;
+    }
+
+    /// 注入 agent JsTicket handle（典型来源：`Work.getAgentJsTicket` / 自定义实现）。
+    pub fn setAgentJsTicketHandle(self: *Self, h: credential.JsTicketHandle) void {
+        self.agent_ticket_handle = h;
     }
 
     /// 计算企业微信 JS-SDK 配置（corp 类型 ticket）。
@@ -74,26 +81,31 @@ pub const Js = struct {
     ///
     /// 返回值的 `nonce_str` / `signature` 由调用方 `deinit` 释放。
     pub fn getConfig(self: *Self, allocator: std.mem.Allocator, uri: []const u8) !Config {
-        const handle = self.ticket_handle orelse return error.JsTicketHandleNotSet;
-
-        const access_token = try self.ctx.getAccessToken(allocator);
-        const ticket = try handle.getTicket(allocator, access_token);
-        defer allocator.free(ticket);
-
-        return computeConfig(allocator, self.ctx.config.corp_id, ticket, uri);
+        return self.getConfigWithHandle(allocator, uri, self.ticket_handle, error.JsTicketHandleNotSet);
     }
 
     /// 计算企业微信**应用** JS-SDK 配置（agent 类型 ticket）。
     ///
-    /// 算法与 `getConfig` 一致；区别仅在于 ticket 由"应用 ticket handle"提供。
-    /// 当前 framework 暂不区分 corp / agent handle 类型，需要调用方在
-    /// `setJsTicketHandle` 中注入专门的应用 ticket 实现。
-    ///
-    /// 本方法保留命名以与 Go 的 `GetAgentConfig` 对齐，但行为与 `getConfig` 等价
-    /// （直到后续实现 `WorkJsTicket`）。
+    /// 算法与 `getConfig` 一致；区别仅在于 ticket 由 `agent_ticket_handle` 提供。
     pub fn getAgentConfig(self: *Self, allocator: std.mem.Allocator, uri: []const u8) !Config {
-        // TODO: 引入 WorkJsTicket 时按 TicketType 区分 corp / agent。
-        return self.getConfig(allocator, uri);
+        return self.getConfigWithHandle(allocator, uri, self.agent_ticket_handle, error.JsTicketHandleNotSet);
+    }
+
+    fn getConfigWithHandle(
+        self: *Self,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        handle: ?credential.JsTicketHandle,
+        err: anyerror,
+    ) !Config {
+        const h = handle orelse return err;
+
+        const access_token = try self.ctx.getAccessToken(allocator);
+        defer allocator.free(access_token);
+        const ticket = try h.getTicket(allocator, access_token);
+        defer allocator.free(ticket);
+
+        return computeConfig(allocator, self.ctx.config.corp_id, ticket, uri);
     }
 };
 
@@ -205,4 +217,101 @@ test "computeConfig 输出 40 字符小写 hex 的 signature" {
     try std.testing.expectEqual(@as(usize, 16), cfg.nonce_str.len);
     // timestamp > 0。
     try std.testing.expect(cfg.timestamp > 0);
+}
+
+// 测试用的假 AccessTokenHandle。
+const FakeAccessTokenState = struct {
+    token: []const u8,
+};
+
+fn fakeAccessTokenGet(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+    const s: *const FakeAccessTokenState = @ptrCast(@alignCast(ctx));
+    return allocator.dupe(u8, s.token);
+}
+
+const fake_access_token_vtable = credential.AccessTokenHandle.VTable{
+    .getAccessToken = fakeAccessTokenGet,
+};
+
+fn makeFakeAccessTokenHandle(state: *FakeAccessTokenState) credential.AccessTokenHandle {
+    return .{
+        .ptr = @ptrCast(state),
+        .vtable = &fake_access_token_vtable,
+    };
+}
+
+// 测试用的假 JsTicketHandle：记录被调用时的 ticket 类型。
+const FakeTicketState = struct {
+    ticket: []const u8,
+};
+
+fn fakeTicketGet(ctx: *anyopaque, allocator: std.mem.Allocator, access_token: []const u8) anyerror![]u8 {
+    _ = access_token;
+    const s: *const FakeTicketState = @ptrCast(@alignCast(ctx));
+    return allocator.dupe(u8, s.ticket);
+}
+
+const fake_ticket_vtable = credential.JsTicketHandle.VTable{
+    .getTicket = fakeTicketGet,
+};
+
+fn makeFakeTicketHandle(state: *FakeTicketState) credential.JsTicketHandle {
+    return .{
+        .ptr = @ptrCast(state),
+        .vtable = &fake_ticket_vtable,
+    };
+}
+
+test "Js.getConfig 使用 corp ticket handle" {
+    const allocator = std.testing.allocator;
+    var ak_state = FakeAccessTokenState{ .token = "ak-corp" };
+    var corp_state = FakeTicketState{ .ticket = "corp-ticket" };
+
+    var ctx = Context{
+        .config = .{ .corp_id = "ww-getconfig" },
+        .access_token_handle = makeFakeAccessTokenHandle(&ak_state),
+    };
+    var j = Js.init(&ctx);
+    j.setJsTicketHandle(makeFakeTicketHandle(&corp_state));
+
+    var cfg = try j.getConfig(allocator, "https://example.com/");
+    defer cfg.deinit(allocator);
+
+    try std.testing.expectEqualStrings("ww-getconfig", cfg.app_id);
+    try std.testing.expectEqual(@as(usize, 40), cfg.signature.len);
+}
+
+test "Js.getAgentConfig 使用 agent ticket handle" {
+    const allocator = std.testing.allocator;
+    var ak_state = FakeAccessTokenState{ .token = "ak-agent" };
+    var agent_state = FakeTicketState{ .ticket = "agent-ticket" };
+
+    var ctx = Context{
+        .config = .{ .corp_id = "ww-getagent" },
+        .access_token_handle = makeFakeAccessTokenHandle(&ak_state),
+    };
+    var j = Js.init(&ctx);
+    j.setAgentJsTicketHandle(makeFakeTicketHandle(&agent_state));
+
+    var cfg = try j.getAgentConfig(allocator, "https://example.com/");
+    defer cfg.deinit(allocator);
+
+    try std.testing.expectEqualStrings("ww-getagent", cfg.app_id);
+    try std.testing.expectEqual(@as(usize, 40), cfg.signature.len);
+}
+
+test "Js.getAgentConfig 未设置 agent handle 时返回 JsTicketHandleNotSet" {
+    const allocator = std.testing.allocator;
+    var ak_state = FakeAccessTokenState{ .token = "ak" };
+    var corp_state = FakeTicketState{ .ticket = "corp-ticket" };
+
+    var ctx = Context{
+        .config = .{ .corp_id = "ww-agent-missing" },
+        .access_token_handle = makeFakeAccessTokenHandle(&ak_state),
+    };
+    var j = Js.init(&ctx);
+    j.setJsTicketHandle(makeFakeTicketHandle(&corp_state));
+
+    const result = j.getAgentConfig(allocator, "https://example.com/");
+    try std.testing.expectError(error.JsTicketHandleNotSet, result);
 }

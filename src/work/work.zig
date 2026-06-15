@@ -6,9 +6,11 @@
 //! 各子模块的懒加载字段在后续 pass 填充。
 
 const std = @import("std");
+const cache = @import("../cache/mod.zig");
 const credential = @import("../credential/mod.zig");
 const Config = @import("config.zig").Config;
 const Context = @import("context/mod.zig").Context;
+const jsapi = @import("jsapi/mod.zig");
 
 /// 企业微信业务 API 聚合入口。
 ///
@@ -22,6 +24,10 @@ pub const Work = struct {
     work_ticket_cache: ?credential.WorkJsTicket = null,
     /// 当前默认 ticket 类型（corp / agent）。
     default_ticket_type: credential.TicketType = .corp_js,
+    /// corp ticket 适配器（由 `getJs()` 初始化并复用）。
+    corp_js_adapter: ?WorkJsTicketAdapter = null,
+    /// agent ticket 适配器（由 `getJs()` 初始化并复用）。
+    agent_js_adapter: ?WorkJsTicketAdapter = null,
 
     /// 通过已构造好的 `Context` 直接组装实例。
     pub fn init(ctx: Context) Work {
@@ -84,6 +90,23 @@ pub const Work = struct {
         return &self.ctx;
     }
 
+    /// 构造 `jsapi.Js` 子模块，并自动注入 corp / agent 两种 ticket handle。
+    ///
+    /// 调用方拿到 `Js` 后可直接调用 `getConfig`（corp）或 `getAgentConfig`（agent），
+    /// 无需手动 `setJsTicketHandle`。
+    pub fn getJs(self: *Work) jsapi.Js {
+        if (self.corp_js_adapter == null) {
+            self.corp_js_adapter = WorkJsTicketAdapter.init(self, .corp_js);
+        }
+        if (self.agent_js_adapter == null) {
+            self.agent_js_adapter = WorkJsTicketAdapter.init(self, .agent_js);
+        }
+        var j = jsapi.Js.init(&self.ctx);
+        j.setJsTicketHandle(self.corp_js_adapter.?.asHandle());
+        j.setAgentJsTicketHandle(self.agent_js_adapter.?.asHandle());
+        return j;
+    }
+
     /// 获取 access_token。
     pub fn getAccessToken(
         self: *Work,
@@ -102,7 +125,7 @@ pub const Work = struct {
         self.ctx.js_ticket_handle = h;
     }
 
-    /// 获取企业微信 jsapi_ticket。
+    /// 获取企业微信 jsapi_ticket（遵循 `default_ticket_type`）。
     ///
     /// 三级回退：
     /// 1. `ctx.js_ticket_handle`（用户注入）；
@@ -116,6 +139,33 @@ pub const Work = struct {
         if (self.ctx.js_ticket_handle) |h| {
             return h.getTicket(allocator, access_token);
         }
+        return self.getJsTicketFromCache(allocator, access_token, self.default_ticket_type);
+    }
+
+    /// 获取 corp 类型 jsapi_ticket（忽略 `default_ticket_type` 与 `ctx.js_ticket_handle`）。
+    pub fn getCorpJsTicket(
+        self: *Work,
+        allocator: std.mem.Allocator,
+        access_token: []const u8,
+    ) ![]u8 {
+        return self.getJsTicketFromCache(allocator, access_token, .corp_js);
+    }
+
+    /// 获取 agent 类型 jsapi_ticket（忽略 `default_ticket_type` 与 `ctx.js_ticket_handle`）。
+    pub fn getAgentJsTicket(
+        self: *Work,
+        allocator: std.mem.Allocator,
+        access_token: []const u8,
+    ) ![]u8 {
+        return self.getJsTicketFromCache(allocator, access_token, .agent_js);
+    }
+
+    fn getJsTicketFromCache(
+        self: *Work,
+        allocator: std.mem.Allocator,
+        access_token: []const u8,
+        ticket_type: credential.TicketType,
+    ) ![]u8 {
         const cache_inst = self.ctx.config.cache orelse return error.CacheUnavailable;
         if (self.work_ticket_cache == null) {
             self.work_ticket_cache = credential.WorkJsTicket.init(
@@ -125,8 +175,43 @@ pub const Work = struct {
                 cache_inst,
             );
         }
-        return self.work_ticket_cache.?.getTicket(allocator, access_token, self.default_ticket_type);
+        return self.work_ticket_cache.?.getTicket(allocator, access_token, ticket_type);
     }
+};
+
+// 包装 `*Work` 与 `TicketType` 的 `JsTicketHandle` 实现。
+//
+// 生命周期：adapter 必须与 `Work` 实例共存；`Work.getJs()` 会把 adapter
+// 存放在 `Work` 内部字段，避免栈逃逸。
+pub const WorkJsTicketAdapter = struct {
+    work: *Work,
+    ticket_type: credential.TicketType,
+
+    pub fn init(work: *Work, ticket_type: credential.TicketType) WorkJsTicketAdapter {
+        return .{
+            .work = work,
+            .ticket_type = ticket_type,
+        };
+    }
+
+    pub fn asHandle(self: *WorkJsTicketAdapter) credential.JsTicketHandle {
+        return .{
+            .ptr = @ptrCast(self),
+            .vtable = &work_js_ticket_vtable,
+        };
+    }
+
+    fn getTicket(ctx: *anyopaque, allocator: std.mem.Allocator, access_token: []const u8) anyerror![]u8 {
+        const adapter: *WorkJsTicketAdapter = @ptrCast(@alignCast(ctx));
+        return switch (adapter.ticket_type) {
+            .corp_js => adapter.work.getCorpJsTicket(allocator, access_token),
+            .agent_js => adapter.work.getAgentJsTicket(allocator, access_token),
+        };
+    }
+};
+
+const work_js_ticket_vtable = credential.JsTicketHandle.VTable{
+    .getTicket = WorkJsTicketAdapter.getTicket,
 };
 
 // WorkAccessToken handle 的 vtable（包装到 access_token_handle 抽象接口）。
@@ -265,4 +350,85 @@ test "Work.setDefaultTicketType 切换 corp / agent" {
     try std.testing.expectEqual(credential.TicketType.corp_js, w.default_ticket_type);
     w.setDefaultTicketType(.agent_js);
     try std.testing.expectEqual(credential.TicketType.agent_js, w.default_ticket_type);
+}
+
+test "Work.getCorpJsTicket / getAgentJsTicket 返回对应类型 ticket" {
+    const allocator = std.testing.allocator;
+    var mem = try cache.Memory.create(allocator);
+    defer {
+        mem.deinit();
+        allocator.destroy(mem);
+    }
+
+    var w = Work.newWork(
+        .{ .corp_id = "ww-corp", .agent_id = "1000001", .cache = mem.asCache() },
+        .{ .ptr = undefined, .vtable = undefined },
+        null,
+    );
+
+    // 注入带 fetcher 的 WorkJsTicket，按 URL 区分 corp / agent。
+    const FetcherCtx = struct {
+        fn fetch(_: *anyopaque, alloc: std.mem.Allocator, url: []const u8) credential.CredentialError![]u8 {
+            const is_agent = std.mem.indexOf(u8, url, "type=agent_config") != null;
+            const ticket = if (is_agent) "agent-ticket-xyz" else "corp-ticket-xyz";
+            return std.fmt.allocPrint(alloc, "{{\"errcode\":0,\"errmsg\":\"ok\",\"ticket\":\"{s}\",\"expires_in\":7200}}", .{ticket}) catch return credential.CredentialError.HttpError;
+        }
+    };
+
+    w.work_ticket_cache = credential.WorkJsTicket.initWithFetcher(
+        "ww-corp",
+        "1000001",
+        credential.CacheKeyWorkPrefix,
+        mem.asCache(),
+        FetcherCtx.fetch,
+        @ptrCast(&w),
+    );
+
+    const corp = try w.getCorpJsTicket(allocator, "ak");
+    defer allocator.free(corp);
+    try std.testing.expectEqualStrings("corp-ticket-xyz", corp);
+
+    const agent = try w.getAgentJsTicket(allocator, "ak");
+    defer allocator.free(agent);
+    try std.testing.expectEqualStrings("agent-ticket-xyz", agent);
+}
+
+test "Work.getJs 自动注入 corp / agent ticket handle" {
+    const allocator = std.testing.allocator;
+    var mem = try cache.Memory.create(allocator);
+    defer {
+        mem.deinit();
+        allocator.destroy(mem);
+    }
+
+    var w = Work.newWork(
+        .{ .corp_id = "ww-js", .agent_id = "1000002", .cache = mem.asCache() },
+        .{ .ptr = undefined, .vtable = undefined },
+        null,
+    );
+
+    const FetcherCtx = struct {
+        fn fetch(_: *anyopaque, alloc: std.mem.Allocator, url: []const u8) credential.CredentialError![]u8 {
+            const is_agent = std.mem.indexOf(u8, url, "type=agent_config") != null;
+            const ticket = if (is_agent) "agent-js-ticket" else "corp-js-ticket";
+            return std.fmt.allocPrint(alloc, "{{\"errcode\":0,\"errmsg\":\"ok\",\"ticket\":\"{s}\",\"expires_in\":7200}}", .{ticket}) catch return credential.CredentialError.HttpError;
+        }
+    };
+
+    w.work_ticket_cache = credential.WorkJsTicket.initWithFetcher(
+        "ww-js",
+        "1000002",
+        credential.CacheKeyWorkPrefix,
+        mem.asCache(),
+        FetcherCtx.fetch,
+        @ptrCast(&w),
+    );
+
+    // Work.getJs 返回的 Js 已经注入两种 handle。
+    const j = w.getJs();
+    try std.testing.expect(j.ticket_handle != null);
+    try std.testing.expect(j.agent_ticket_handle != null);
+
+    // 由于 Js 内部会调用 ctx.getAccessToken，但 ctx 没有可用 handle，
+    // 这里只验证 adapter 存在性；完整签名测试在 work/jsapi 模块中。
 }

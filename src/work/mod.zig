@@ -4,10 +4,10 @@
 //! 顶层 `Work` 容器以及各子模块的懒加载入口
 //! （externalcontact / invoice / addresslist / appchat / robot / oauth / jsapi 等）。
 //!
-//! 本轮次新增：
+//! 能力：
 //! - `Work` 顶层 struct（access_token / js_ticket 透传 + 懒加载）
 //! - `oauth` 子模块（UserInfoToId / GetUserInfo / GetUserDetail / Tfa）
-//! - `jsapi` 子模块（GetConfig + GetAgentConfig 占位）
+//! - `jsapi` 子模块（GetConfig / GetAgentConfig，自动区分 corp / agent ticket）
 
 const std = @import("std");
 
@@ -15,6 +15,7 @@ pub const Config = @import("config.zig").Config;
 pub const Cache = @import("config.zig").Cache;
 pub const Context = @import("context/mod.zig").Context;
 pub const Work = @import("work.zig").Work;
+pub const WorkJsTicketAdapter = @import("work.zig").WorkJsTicketAdapter;
 pub const Oauth = @import("oauth/mod.zig").Oauth;
 pub const Js = @import("jsapi/mod.zig").Js;
 pub const JsConfig = @import("jsapi/mod.zig").Config;
@@ -36,6 +37,9 @@ test "work 模块全部导出" {
     try std.testing.expect(@hasDecl(Work, "getContext"));
     try std.testing.expect(@hasDecl(Work, "getAccessToken"));
     try std.testing.expect(@hasDecl(Work, "getJsTicket"));
+    try std.testing.expect(@hasDecl(Work, "getCorpJsTicket"));
+    try std.testing.expect(@hasDecl(Work, "getAgentJsTicket"));
+    try std.testing.expect(@hasDecl(Work, "getJs"));
     try std.testing.expect(@hasDecl(Oauth, "getRedirectURL"));
     try std.testing.expect(@hasDecl(Oauth, "userInfoToId"));
     try std.testing.expect(@hasDecl(Oauth, "getUserInfo"));
