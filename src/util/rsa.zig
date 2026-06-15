@@ -1,4 +1,4 @@
-//! util/rsa — 签名 / 验签 + PKCS#12 工具
+//! util/rsa — RSA 签名 / 验签 / 解密 + PKCS#12 工具
 //!
 //! 对应 `_ref/wechat/util/rsa.go`：RSA-SHA256 PKCS#1 v1.5 签名 + 验签。
 //!
@@ -6,11 +6,11 @@
 //! https://github.com/ziglang/zig/issues/14456），但 `std.crypto.sign.Ed25519` 已可用。
 //! 因此本文件同时提供：
 //!
-//! 1. **RSA 接口**（`rsaSign` / `rsaVerify`）：保留签名，当前返回 `RsaNotImplemented`。
-//!    生产路径：vendor 一个 ASN.1 / RSA 实现（推荐 Zig 社区的 `zig-crypto` 等三方包）。
+//! 1. **RSA 接口**（`rsaSign` / `rsaVerify` / `rsaDecrypt` / `rsaDecryptBase64`）：
+//!    纯 Zig 实现，支持 PKCS#1 / PKCS#8 私钥、X.509 / PKCS#1 公钥、CRT 签名路径。
 //! 2. **Ed25519 实现**（`ed25519Sign` / `ed25519Verify`）：直接可用，Zig 0.17 原生支持。
 //!    业务如可接受 Ed25519 替换 RSA，可立即启用。
-//! 3. **PKCS#12**（`parseP12`）：返回 `P12NotImplemented`，需要 vendor ASN.1 解析器。
+//! 3. **PKCS#12**（`parseP12`）：由 `pkcs12.zig` 提供完整解析。
 
 const std = @import("std");
 const ed25519 = std.crypto.sign.Ed25519;
@@ -22,6 +22,7 @@ pub const RsaError = error{
     RsaNotImplemented,
     InvalidPemKey,
     InvalidSignature,
+    InvalidCiphertext,
     OutOfMemory,
 };
 
@@ -69,6 +70,43 @@ pub fn rsaVerify(
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidSignature,
     };
+}
+
+/// RSAES-PKCS1-v1_5 解密（二进制密文）。
+///
+/// `private_key_pem` 支持 PKCS#1 `-----BEGIN RSA PRIVATE KEY-----` 和
+/// PKCS#8 `-----BEGIN PRIVATE KEY-----` 格式。
+/// 返回的明文由调用方负责释放。
+pub fn rsaDecrypt(
+    allocator: std.mem.Allocator,
+    ciphertext: []const u8,
+    private_key_pem: []const u8,
+) RsaError![]u8 {
+    var pk = rsa_impl.parsePrivateKeyPem(allocator, private_key_pem) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidPemKey,
+    };
+    defer pk.deinit();
+
+    return rsa_impl.decrypt(allocator, pk, ciphertext) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidCiphertext,
+    };
+}
+
+/// RSAES-PKCS1-v1_5 解密（base64 编码密文）。
+pub fn rsaDecryptBase64(
+    allocator: std.mem.Allocator,
+    ciphertext_b64: []const u8,
+    private_key_pem: []const u8,
+) RsaError![]u8 {
+    const decoder = std.base64.standard.Decoder;
+    const len = decoder.calcSizeForSlice(ciphertext_b64) catch return error.InvalidCiphertext;
+    const cipher = allocator.alloc(u8, len) catch return error.OutOfMemory;
+    defer allocator.free(cipher);
+    decoder.decode(cipher, ciphertext_b64) catch return error.InvalidCiphertext;
+
+    return rsaDecrypt(allocator, cipher, private_key_pem);
 }
 
 /// PKCS#12 解析（用于支付 TLS 双向认证）。
@@ -201,6 +239,49 @@ test "looksLikeRsaPublicKeyPem 识别 PEM 格式" {
     const valid = "-----BEGIN PUBLIC KEY-----\nfoo\n-----END PUBLIC KEY-----";
     try std.testing.expect(looksLikeRsaPublicKeyPem(valid));
     try std.testing.expect(!looksLikeRsaPublicKeyPem("plain text"));
+}
+
+const test_private_key_pkcs8 =
+    "-----BEGIN PRIVATE KEY-----\n" ++
+    "MIICdgIBADANBgkqhkiG9w0BAQEFAASCAmAwggJcAgEAAoGBAN4R80FQzwt1WDJs\n" ++
+    "KZ4/LOqrgrgl4hM7S1IjdyMtUhTRY2Of79ldCSnbCfFHDLut6Om1xnnZVKKwGRnb\n" ++
+    "g7aeZDWaCBFDraoeIyo4l18EKvl5ghwL6cGFlMwJd6iTMZc1CBYdJhJ6q6PdvQhA\n" ++
+    "tb9Qm6jLguyEbr37de1w5YVOK2PrAgMBAAECgYAOGJWYT8jUsV4n1TXPFbOEMd7a\n" ++
+    "UY1IKztcu2OUmAvdxmzIph5TbdRnE8BN0HS+dQuTyjYPBfyZVxRAz+5MaUFzB0lJ\n" ++
+    "gcODGb8AtAsWT8dad1Bk+FEbht44+6V4D+6cvLIj5YKz+RxN+RJUvHJaF3yZ992U\n" ++
+    "9zzMncF5Oxwq7J70AQJBAPe18VORF7dFcRglitglN9yOpj9VCc2ag4INxGRn2Fx/\n" ++
+    "rn7TR10bLYdUBiBtAgrSRJ5bmH3127F8HVD/+fd6fPMCQQDlgFpVtd9e3BhybUDL\n" ++
+    "rIKuAXkzl29Z1tio/F7tZIj7ED7HRWjpXNOLj4sQGBdAc6PmyAP5kEcOCCb7IjgX\n" ++
+    "EVspAkEA3PFc0hPNWnvG1ynNQONZgxF9eWnJN6lE+UB8Vq5FTqPYKWkb8xDluBoa\n" ++
+    "6NsyAiLwb2r1hgxAK3uvzmqzM6j+PwJAG3uLVcg5v3pL0ygSIlG+NGgow2zXAMMh\n" ++
+    "ntrZ40Ouw6HmYqaFMazUCFpgJMU9w5IVhoVdNH16hMulH12xqdGCQQJAFnlBdFGf\n" ++
+    "mbeuLfe8S5AxUHj7M3j9ZOyhNqOMiwCq5hLM1iQKDSMVyvHvZu57W+LpeO4UIQHZ\n" ++
+    "2QDcFxyhCMX49A==\n" ++
+    "-----END PRIVATE KEY-----";
+
+const test_ciphertext_b64 =
+    "jt3dup80IEd7jeUrH9glmjeoVxRcjww3MgFdmmwvxUmgVPubOhKrww0bs7Xobhkm3F99zAXlrjXvdPQZOgqt5DjMI+Agy3I0D8Z7VXdKExXWJCnsxlVWLGxjMLsvmTQ2pXCma8S6ckuNxmXygR8Mq0uqxzGW6r2dVlf1SFAnN3A=";
+
+test "rsaSign accepts PKCS#8 private key" {
+    const allocator = std.testing.allocator;
+    const sig = try rsaSign(allocator, "hello, zwechat rsa", test_private_key_pkcs8);
+    defer allocator.free(sig);
+    try std.testing.expectEqual(@as(usize, 128), sig.len);
+
+    const encoder = std.base64.standard.Encoder;
+    const b64_len = encoder.calcSize(sig.len);
+    const sig_b64 = try allocator.alloc(u8, b64_len);
+    defer allocator.free(sig_b64);
+    _ = encoder.encode(sig_b64, sig);
+    const ok = try rsaVerify(allocator, "hello, zwechat rsa", sig_b64, test_public_key_x509);
+    try std.testing.expect(ok);
+}
+
+test "rsaDecryptBase64 decrypts PKCS#1 v1.5 ciphertext" {
+    const allocator = std.testing.allocator;
+    const plain = try rsaDecryptBase64(allocator, test_ciphertext_b64, test_private_key_pkcs1);
+    defer allocator.free(plain);
+    try std.testing.expectEqualStrings("hello, zwechat decrypt", plain);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

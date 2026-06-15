@@ -373,7 +373,7 @@ test "test_runner 编译门 — 强制所有模块被解析" {
 | 运行时 | 零分配（除显式 `alloc` 调用外） |
 | 内存占用 | 单 OfficialAccount 实例 ~1KB |
 | HTTP 客户端 | 走 `std.http.Client`（libxev / io_uring / kqueue） |
-| 加密原语 | AES-256-CBC / MD5 / HMAC-SHA256 / **RSA-SHA256 PKCS#1 v1.5（纯 Zig）** / **PKCS#12（PBES2/PBKDF2/AES-256-CBC）** / Ed25519（Zig stdlib 原生） |
+| 加密原语 | AES-256-CBC / MD5 / HMAC-SHA256 / **RSA-SHA256 PKCS#1 v1.5（纯 Zig，支持 PKCS#1/PKCS#8 私钥、CRT 签名、RSAES-PKCS1-v1_5 解密）** / **PKCS#12（PBES2/PBKDF2/AES-256-CBC）** / Ed25519（Zig stdlib 原生） |
 | 并发 | `SpinMutex` + `std.Io` runtime |
 
 **生产环境建议**：
@@ -404,7 +404,7 @@ test "test_runner 编译门 — 强制所有模块被解析" {
 
 | 计划 | 优先级 |
 |---|---|
-| vendor 更快的 big-int 库（替换当前 `std.math.big.int.Managed` RSA 实现）| 低 |
+| vendor 更快的 big-int 库（替换当前 `std.math.big.int.Managed` RSA 实现；CRT 签名路径已完成）| 低 |
 | `util/http.postXMLWithTLS` 与 `std.http.Client` 客户端证书对接 | 高 |
 | 完整 wire `work.jsapi.getConfig`（corp + agent ticket 切换）| 中 |
 | `miniprogram/auth` 的 `verifyEncryptedData` 真实加密算法 | 中 |
