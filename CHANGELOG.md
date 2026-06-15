@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Planned
 
-- **RSA signing**：Zig 0.17 标准库尚未提供 RSA 实现；待 vendor 第三方包或自实现 ASN.1+RSA。
 - **PKCS#12 / TLS 双向认证**：支付 `refund` / `transfer` 的真实环境部署需要 ASN.1 解析器。
+- **更快的 RSA big-int 后端**：当前 `rsa_impl.zig` 使用 `std.math.big.int.Managed` + 二进制模幂，功能正确但速度有优化空间。
 - **`work.jsapi.getConfig` corp / agent 完整 wire**：`WorkJsTicket` 已就绪，待 `Context.js_ticket_handle` 完成 plug-and-play。
 - **CI / GitHub Actions**：增加 `zig build test` 在 PR 上的自动运行。
 
@@ -52,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### `util` 模块
 
+- **`util/rsa_impl.zig`：纯 Zig RSA-SHA256 PKCS#1 v1.5 签名/验签**：
+  - 最小 ASN.1 DER 解析器（SEQUENCE / INTEGER / BIT STRING / OID）。
+  - PEM 解析：支持 PKCS#1 `RSA PRIVATE KEY`、X.509 `PUBLIC KEY`（SubjectPublicKeyInfo）。
+  - `rsaSign` / `rsaVerify` 已接入；附 OpenSSL 生成的 1024-bit 测试向量。
+  - 基于 `std.math.big.int.Managed` + 二进制模幂（功能正确，后续可替换更快后端）。
 - **`util/http.HttpClient`**：基于 `std.http.Client` 与 `std.Io.Threaded.global_single_threaded`；支持 GET / POST / POST JSON / POST XML / multipart；提供 `getDefaultClient` 全局单例。
 - **`util/http.Transport` 注入点**：vtable 风格的 transport 函数指针 + ctx，可被 `MockTransport` 替换，便于离线单元测试。
 - **`util/http.MockTransport`**：内置 (uri → response) 映射 + 调用历史。`addRoute` 注册、`MockTransport.dispatch` 作为 transport 函数指针。

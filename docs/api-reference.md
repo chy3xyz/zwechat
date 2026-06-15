@@ -237,12 +237,14 @@ pub const CommonError = struct {
 pub fn decodeWithCommonError(allocator, response, api_name) !?CommonError;
 ```
 
-### `util/rsa` — 签名（RSA stub + Ed25519 native）
+### `util/rsa` — 签名（RSA-SHA256 PKCS#1 v1.5 + Ed25519 native）
 
 ```zig
-// RSA 接口（暂未实现，返回 RsaNotImplemented）
+// RSA-SHA256 PKCS#1 v1.5（已可用）
 pub fn rsaSign(allocator, content, private_key_pem) RsaError![]u8;
 pub fn rsaVerify(allocator, content, signature_b64, public_key_pem) RsaError!bool;
+
+// PKCS#12（暂未实现）
 pub fn parseP12(allocator, p12_bytes, password) P12Error!struct { cert_pem, key_pem };
 pub fn p12Available() bool;
 
@@ -618,6 +620,6 @@ pub const AiSpeech = struct {
 | `CacheError` | `NotFound`, `TypeMismatch`, `StorageError`, `OutOfMemory` |
 | `CredentialError` | `ApiError`, `HttpError`, `DecodeError`, `ConfigMissing`（+ 标准 std.json / Allocator 错误）|
 | `WechatError` | `ApiError`, `NetworkError`, `DecodeError`, `AccessTokenExpired`, `ConfigMissing`, `InvalidArgument` |
-| `RsaError` | `RsaNotImplemented`, `InvalidPemKey`, `InvalidSignature` |
+| `RsaError` | `RsaNotImplemented`, `InvalidPemKey`, `InvalidSignature`, `OutOfMemory` |
 | `P12Error` | `P12NotImplemented`, `InvalidP12File`, `BadPassword` |
 | `Ed25519Error` | `InvalidSecretKey`, `InvalidPublicKey`, `InvalidSignature`, `SigningFailed` |

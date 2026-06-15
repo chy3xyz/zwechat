@@ -203,10 +203,8 @@ src/
 
 ## 已知限制
 
-1. **RSA 签名**：Zig 0.17 标准库无 RSA 实现。`util/rsa.rsaSign/rsaVerify` 返回 `RsaNotImplemented`。建议方案：
-   - vendor 一个 Zig 社区的 RSA 实现（`zig-crypto` 等）
-   - 改用 Ed25519（已可用，见 `util/rsa.ed25519Sign`）
-2. **PKCS#12 / TLS 双向认证**：`util/http.postXMLWithTLS` 与 `util/rsa.parseP12` 均为占位。生产支付（`pay/refund` + `pay/transfer`）需要 vendor ASN.1 解析器。
+1. **RSA 签名**：✅ 已在 `src/util/rsa_impl.zig` 实现纯 Zig 的 RSA-SHA256 PKCS#1 v1.5 签名/验签；支持 PKCS#1 `RSA PRIVATE KEY` 与 X.509 `PUBLIC KEY` PEM。使用 `std.math.big.int.Managed` + 二进制模幂，**功能正确但速度不及优化 big-int 库**（后续可替换为更快的实现）。
+2. **PKCS#12 / TLS 双向认证**：`util/http.postXMLWithTLS` 与 `util/rsa.parseP12` 仍为占位。生产支付（`pay/refund` + `pay/transfer`）需要 vendor ASN.1 / PKCS#12 解析器。
 3. **`WorkJsTicket` 已就绪但 work.JsAPI 子模块尚未完整 wire** —— `Work.newDefaultWork` 会懒加载 `WorkJsTicket`，但子模块的业务方法（如 `jsapi.getConfig`）仍需后续接续。
 
 ---

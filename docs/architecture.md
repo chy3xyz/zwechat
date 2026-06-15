@@ -341,7 +341,7 @@ pub const MockTransport = struct {
 
 - `util/crypto.zig`：MD5("hello") = `5d41402abc4b2a76b9719d911017c592`
 - `util/signature.zig`：SHA1 排序后的预期 hex（Python `hashlib.sha1` 计算）
-- `util/rsa.zig`：**RFC 8032 §7.1 Test 1**（Ed25519 完整公开示例）
+- `util/rsa.zig`：RSA-SHA256 PKCS#1 v1.5（OpenSSL 生成的 1024-bit 测试向量）+ **RFC 8032 §7.1 Test 1**（Ed25519 完整公开示例）
 - `pay/notify.zig`：微信支付文档示例参数 + 文档示例签名
 
 ### 6.3 编译门
@@ -373,7 +373,7 @@ test "test_runner 编译门 — 强制所有模块被解析" {
 | 运行时 | 零分配（除显式 `alloc` 调用外） |
 | 内存占用 | 单 OfficialAccount 实例 ~1KB |
 | HTTP 客户端 | 走 `std.http.Client`（libxev / io_uring / kqueue） |
-| 加密原语 | AES-256-CBC / MD5 / HMAC-SHA256 / Ed25519（Zig stdlib 原生） |
+| 加密原语 | AES-256-CBC / MD5 / HMAC-SHA256 / **RSA-SHA256 PKCS#1 v1.5（纯 Zig）** / Ed25519（Zig stdlib 原生） |
 | 并发 | `SpinMutex` + `std.Io` runtime |
 
 **生产环境建议**：
@@ -402,7 +402,7 @@ test "test_runner 编译门 — 强制所有模块被解析" {
 
 | 计划 | 优先级 |
 |---|---|
-| vendor Zig 的 RSA 实现（解锁 `util/rsa.rsaSign`）| 高 |
+| vendor 更快的 big-int 库（替换当前 `std.math.big.int.Managed` RSA 实现）| 低 |
 | vendor ASN.1 / PKCS#12 解析器（解锁 TLS 双向认证）| 高 |
 | 完整 wire `work.jsapi.getConfig`（corp + agent ticket 切换）| 中 |
 | 添加 GitHub Actions CI（`zig build test` 自动化）| 中 |
