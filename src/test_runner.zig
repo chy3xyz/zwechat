@@ -30,6 +30,7 @@ const util_param = @import("util/param.zig");
 const util_util = @import("util/util.zig");
 const util_error = @import("util/error.zig");
 const util_rsa = @import("util/rsa.zig");
+const util_rsa_impl = @import("util/rsa_impl.zig");
 const _integration = @import("integration_test.zig");
 
 // —— officialaccount ——
@@ -121,6 +122,7 @@ test "test_runner 编译门 — 强制所有模块被解析 (v2)" {
     _ = util_util;
     _ = util_error;
     _ = util_rsa;
+    _ = util_rsa_impl;
     _ = _integration;
     _ = oa_mod;
     _ = oa_config;

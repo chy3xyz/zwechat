@@ -14,39 +14,60 @@
 
 const std = @import("std");
 const ed25519 = std.crypto.sign.Ed25519;
+const rsa_impl = @import("rsa_impl.zig");
 
 /// RSA 签名错误集。
 pub const RsaError = error{
     RsaNotImplemented,
     InvalidPemKey,
     InvalidSignature,
+    OutOfMemory,
 };
 
 /// RSA-SHA256 签名（PKCS#1 v1.5）。
 ///
-/// **当前实现**：返回 `RsaNotImplemented`，因为 Zig 0.17 标准库没有 RSA。
-/// 调用方应当在生产环境中 vendor 一个 RSA 实现，或改用 Ed25519。
+/// `private_key_pem` 支持 PKCS#1 `-----BEGIN RSA PRIVATE KEY-----` 格式。
 pub fn rsaSign(allocator: std.mem.Allocator, content: []const u8, private_key_pem: []const u8) RsaError![]u8 {
-    _ = allocator;
-    _ = content;
-    _ = private_key_pem;
-    return error.RsaNotImplemented;
+    var pk = rsa_impl.parsePrivateKeyPem(allocator, private_key_pem) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidPemKey,
+    };
+    defer pk.deinit();
+
+    return rsa_impl.signSha256(allocator, pk, content) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.EncodingFailed => return error.InvalidSignature,
+        else => return error.InvalidSignature,
+    };
 }
 
 /// RSA-SHA256 验签（PKCS#1 v1.5）。
 ///
-/// **当前实现**：返回 `RsaNotImplemented`。
+/// `public_key_pem` 支持 PKCS#1 `-----BEGIN RSA PUBLIC KEY-----` 或
+/// X.509 `-----BEGIN PUBLIC KEY-----`（SubjectPublicKeyInfo）格式。
+/// `signature_b64` 是 base64 编码的签名（调用方通常来自 HTTP 参数或 XML）。
 pub fn rsaVerify(
     allocator: std.mem.Allocator,
     content: []const u8,
     signature_b64: []const u8,
     public_key_pem: []const u8,
 ) RsaError!bool {
-    _ = allocator;
-    _ = content;
-    _ = signature_b64;
-    _ = public_key_pem;
-    return error.RsaNotImplemented;
+    var pk = rsa_impl.parsePublicKeyPem(allocator, public_key_pem) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidPemKey,
+    };
+    defer pk.deinit();
+
+    const decoder = std.base64.standard.Decoder;
+    const sig_len = decoder.calcSizeForSlice(signature_b64) catch return error.InvalidSignature;
+    const signature = allocator.alloc(u8, sig_len) catch return error.OutOfMemory;
+    defer allocator.free(signature);
+    decoder.decode(signature, signature_b64) catch return error.InvalidSignature;
+
+    return rsa_impl.verifySha256(allocator, pk, content, signature) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidSignature,
+    };
 }
 
 /// PKCS#12 解析（用于支付 TLS 双向认证）。
@@ -89,14 +110,73 @@ pub fn looksLikeRsaPublicKeyPem(pem: []const u8) bool {
         (std.mem.indexOf(u8, pem, "PUBLIC KEY") != null);
 }
 
-test "rsaSign 当前返回 RsaNotImplemented" {
-    const result = rsaSign(std.testing.allocator, "content", "-----BEGIN PRIVATE KEY-----\nfoo\n-----END PRIVATE KEY-----");
-    try std.testing.expectError(error.RsaNotImplemented, result);
+const test_private_key_pkcs1 =
+    "-----BEGIN RSA PRIVATE KEY-----\n" ++
+    "MIICXAIBAAKBgQDeEfNBUM8LdVgybCmePyzqq4K4JeITO0tSI3cjLVIU0WNjn+/Z\n" ++
+    "XQkp2wnxRwy7rejptcZ52VSisBkZ24O2nmQ1mggRQ62qHiMqOJdfBCr5eYIcC+nB\n" ++
+    "hZTMCXeokzGXNQgWHSYSequj3b0IQLW/UJuoy4LshG69+3XtcOWFTitj6wIDAQAB\n" ++
+    "AoGADhiVmE/I1LFeJ9U1zxWzhDHe2lGNSCs7XLtjlJgL3cZsyKYeU23UZxPATdB0\n" ++
+    "vnULk8o2DwX8mVcUQM/uTGlBcwdJSYHDgxm/ALQLFk/HWndQZPhRG4beOPuleA/u\n" ++
+    "nLyyI+WCs/kcTfkSVLxyWhd8mffdlPc8zJ3BeTscKuye9AECQQD3tfFTkRe3RXEY\n" ++
+    "JYrYJTfcjqY/VQnNmoOCDcRkZ9hcf65+00ddGy2HVAYgbQIK0kSeW5h99duxfB1Q\n" ++
+    "//n3enzzAkEA5YBaVbXfXtwYcm1Ay6yCrgF5M5dvWdbYqPxe7WSI+xA+x0Vo6VzT\n" ++
+    "i4+LEBgXQHOj5sgD+ZBHDggm+yI4FxFbKQJBANzxXNITzVp7xtcpzUDjWYMRfXlp\n" ++
+    "yTepRPlAfFauRU6j2ClpG/MQ5bgaGujbMgIi8G9q9YYMQCt7r85qszOo/j8CQBt7\n" ++
+    "i1XIOb96S9MoEiJRvjRoKMNs1wDDIZ7a2eNDrsOh5mKmhTGs1AhaYCTFPcOSFYaF\n" ++
+    "XTR9eoTLpR9dsanRgkECQBZ5QXRRn5m3ri33vEuQMVB4+zN4/WTsoTajjIsAquYS\n" ++
+    "zNYkCg0jFcrx72bue1vi6XjuFCEB2dkA3BccoQjF+PQ=\n" ++
+    "-----END RSA PRIVATE KEY-----";
+
+const test_public_key_x509 =
+    "-----BEGIN PUBLIC KEY-----\n" ++
+    "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDeEfNBUM8LdVgybCmePyzqq4K4\n" ++
+    "JeITO0tSI3cjLVIU0WNjn+/ZXQkp2wnxRwy7rejptcZ52VSisBkZ24O2nmQ1mggR\n" ++
+    "Q62qHiMqOJdfBCr5eYIcC+nBhZTMCXeokzGXNQgWHSYSequj3b0IQLW/UJuoy4Ls\n" ++
+    "hG69+3XtcOWFTitj6wIDAQAB\n" ++
+    "-----END PUBLIC KEY-----";
+
+// 对消息 "hello, zwechat rsa" 用上述私钥签名的 base64 结果（SHA-256 / PKCS#1 v1.5）。
+const test_signature_b64 = "I39FVzcM4KIyson4J73YCiyS5+h7/lhCOl/fCRRae4kGCDIqw1u+iBhgY7sU9MSts5pwOW2HFkakv3yix4QEeZYkMTIPdcISZ0l6cpsN3ouVhGb1JXHscSqKbj06yWUbxIiEO56GKRUhZ/CMkfXspuQAZiUsdT6S2yhcpvm8q1M=";
+
+test "rsaSign 对已知消息生成可被 OpenSSL 验证的签名" {
+    const allocator = std.testing.allocator;
+    const msg = "hello, zwechat rsa";
+    const sig = try rsaSign(allocator, msg, test_private_key_pkcs1);
+    defer allocator.free(sig);
+
+    // 签名长度等于密钥字节长度（1024-bit => 128 字节）。
+    try std.testing.expectEqual(@as(usize, 128), sig.len);
+
+    // 用公钥验签通过。
+    const encoder = std.base64.standard.Encoder;
+    const b64_len = encoder.calcSize(sig.len);
+    const sig_b64 = try allocator.alloc(u8, b64_len);
+    defer allocator.free(sig_b64);
+    _ = encoder.encode(sig_b64, sig);
+    const ok = try rsaVerify(allocator, msg, sig_b64, test_public_key_x509);
+    try std.testing.expect(ok);
 }
 
-test "rsaVerify 当前返回 RsaNotImplemented" {
-    const result = rsaVerify(std.testing.allocator, "content", "sig_b64", "-----BEGIN PUBLIC KEY-----\nfoo\n-----END PUBLIC KEY-----");
-    try std.testing.expectError(error.RsaNotImplemented, result);
+test "rsaVerify 验证 OpenSSL 预生成的 base64 签名" {
+    const allocator = std.testing.allocator;
+    const ok = try rsaVerify(allocator, "hello, zwechat rsa", test_signature_b64, test_public_key_x509);
+    try std.testing.expect(ok);
+}
+
+test "rsaVerify 对篡改消息返回 false" {
+    const allocator = std.testing.allocator;
+    const ok = try rsaVerify(allocator, "hello, zwechat rsa!", test_signature_b64, test_public_key_x509);
+    try std.testing.expect(!ok);
+}
+
+test "rsaSign 拒绝非法 PEM" {
+    const result = rsaSign(std.testing.allocator, "content", "not a pem");
+    try std.testing.expectError(error.InvalidPemKey, result);
+}
+
+test "rsaVerify 拒绝非法公钥 PEM" {
+    const result = rsaVerify(std.testing.allocator, "content", "c2ln", "not a pem");
+    try std.testing.expectError(error.InvalidPemKey, result);
 }
 
 test "parseP12 当前返回 P12NotImplemented" {
