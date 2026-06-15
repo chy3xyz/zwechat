@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          # Pin to the development version this project is tested against.
+          # Update this when `build.zig.zon` / README changes.
+          version: 0.17.0-dev.813+2153f8143
+
+      - name: Print Zig version
+        run: zig version
+
+      - name: Build (Debug)
+        run: zig build
+
+      - name: Run all tests
+        run: zig build test --summary all
+
+      - name: Build (ReleaseFast)
+        run: zig build -Doptimize=ReleaseFast
+
+  lint-docs:
+    name: Lint docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check markdown links (optional)
+        uses: lycheeverse/lychee-action@v1
+        with:
+          args: --timeout 30 README.md CONTRIBUTING.md CHANGELOG.md docs/
+          fail: false
