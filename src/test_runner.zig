@@ -12,6 +12,7 @@ const wechat = @import("wechat.zig");
 // —— cache ——
 const cache_mod = @import("cache/mod.zig");
 const cache_memory = @import("cache/memory.zig");
+const cache_redis = @import("cache/redis.zig");
 
 // —— credential ——
 const credential_mod = @import("credential/mod.zig");
@@ -110,6 +111,7 @@ test "test_runner 编译门 — 强制所有模块被解析 (v2)" {
     _ = wechat;
     _ = cache_mod;
     _ = cache_memory;
+    _ = cache_redis;
     _ = credential_mod;
     _ = default_access_token;
     _ = js_ticket;

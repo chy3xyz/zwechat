@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Wave 16 — Redis 缓存后端**：
+  - 新增 `src/cache/redis.zig`：最小 RESP Redis 客户端，实现 `Cache` vtable 的 `get` / `set` / `isExist` / `delete` / `deinit`。
+  - 支持外部传入 `std.Io` 句柄；未提供时自行创建 `std.Io.Threaded`。
+  - 支持 `AUTH` / `SELECT`（可选密码与非 0 数据库）。
+  - 新增 3 个内联测试（set/get/exists/delete 往返、不存在的 key 返回 null、公共 API 导出），使用本进程 mock Redis 服务器，无外部依赖。
+  - 测试总数从 275 提升至 **278**，仍保持 0 内存泄漏。
+
 - **Wave 15 — ASN.1 解析器提取 + PKCS#12 解析**：
   - 新增 `src/util/asn1.zig`：最小 DER 解析器，支持 SEQUENCE / INTEGER / OCTET STRING / BIT STRING / OID / NULL，供 RSA PEM 与 PKCS#12 复用。
   - 新增 `src/util/pkcs12.zig`：纯 Zig 实现 PKCS#12 解析，支持 PBES2 + PBKDF2-HMAC-SHA256 + AES-256-CBC，可从 `.p12` 导出 `-----BEGIN CERTIFICATE-----` 与 `-----BEGIN PRIVATE KEY-----` PEM。

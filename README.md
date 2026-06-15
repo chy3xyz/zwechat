@@ -30,7 +30,7 @@
 
 | 业务域 | 子模块数 | 状态 | 关键能力 |
 |---|---|---|---|
-| `cache` | 2 | ✅ | `Cache` vtable 接口 + 内存实现（线程安全 + TTL + lazy delete）|
+| `cache` | 2 | ✅ | `Cache` vtable 接口 + `Memory` 内存实现 + `Redis` RESP 客户端（线程安全 + TTL + lazy delete）|
 | `credential` | 5 | ✅ | `DefaultAccessToken` / `DefaultJsTicket` / **`WorkAccessToken`** / **`WorkJsTicket`**（corp + agent）|
 | `util` | 10 | ✅ | HTTP 客户端 / AES-CBC+ECB+PKCS7 / MD5 / HMAC-SHA256 / SHA1 / XML codec / 错误集 / 时间 / 参数 / **Ed25519 native** / RSA stub |
 | `officialaccount` | 15 | ✅ | menu / oauth / basic / **server（MessageHandler 路由）** / message / material / js / user / datacube / broadcast / device / customerservice / ocr / draft / freepublish |
@@ -158,11 +158,11 @@ zig build test --summary all
 ```
 Build Summary: 3/3 steps succeeded
 test success
-+- run test 275 pass (275 total)
++- run test 278 pass (278 total)
    +- compile test Debug native
 ```
 
-所有内联测试使用 `std.testing.allocator`，自动检测内存泄漏；运行结果应严格 **275/275 pass, 0 leak**。
+所有内联测试使用 `std.testing.allocator`，自动检测内存泄漏；运行结果应严格 **278/278 pass, 0 leak**。
 
 ---
 

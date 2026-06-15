@@ -73,6 +73,9 @@ pub const Cache = struct {
 /// 进程内线程安全的内存缓存实现。
 pub const Memory = @import("memory.zig").Memory;
 
+/// Redis 缓存实现。
+pub const Redis = @import("redis.zig").Redis;
+
 test "Cache 接口契约自检：get / set / isExist / delete / deinit 均存在" {
     try std.testing.expect(@hasDecl(Cache, "get"));
     try std.testing.expect(@hasDecl(Cache, "set"));

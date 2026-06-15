@@ -69,6 +69,24 @@ pub const Memory = struct {
 };
 ```
 
+### `Redis`
+
+```zig
+pub const Redis = struct {
+    pub const Options = struct {
+        host: []const u8 = "127.0.0.1",
+        port: u16 = 6379,
+        password: ?[]const u8 = null,
+        db: i32 = 0,
+        io: ?std.Io = null,  // 外部 Io 句柄，未提供时自行创建
+    };
+
+    pub fn create(allocator: std.mem.Allocator, opts: Options) !*Redis;
+    pub fn deinit(self: *Redis) void;
+    pub fn asCache(self: *Redis) Cache;
+};
+```
+
 ---
 
 ## 3. `credential` — 凭据管理
