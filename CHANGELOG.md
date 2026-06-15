@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Wave 17 — Memcache 缓存后端**：
+  - 新增 `src/cache/memcache.zig`：最小 Memcache 文本协议客户端，实现 `Cache` vtable 的 `get` / `set` / `isExist` / `delete` / `deinit`。
+  - 支持外部传入 `std.Io` 句柄；未提供时自行创建 `std.Io.Threaded`。
+  - 新增 3 个内联测试（set/get/exists/delete 往返、不存在的 key 返回 null、公共 API 导出），使用本进程 mock Memcache 服务器，无外部依赖。
+  - 测试总数从 278 提升至 **281**，仍保持 0 内存泄漏。
+
 - **Wave 16 — Redis 缓存后端**：
   - 新增 `src/cache/redis.zig`：最小 RESP Redis 客户端，实现 `Cache` vtable 的 `get` / `set` / `isExist` / `delete` / `deinit`。
   - 支持外部传入 `std.Io` 句柄；未提供时自行创建 `std.Io.Threaded`。
@@ -32,7 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`util/http.postXMLWithTLS` 与 `std.http.Client` 客户端证书对接**：PKCS#12 解析已就绪，待 Zig HTTP API 支持客户端证书后完成 TLS 双向认证。
 - **更快的 RSA big-int 后端**：当前 `rsa_impl.zig` 使用 `std.math.big.int.Managed` + 二进制模幂，功能正确但速度有优化空间。
 - **`work.jsapi.getConfig` corp / agent 完整 wire**：`WorkJsTicket` 已就绪，待 `Context.js_ticket_handle` 完成 plug-and-play。
-- **CI / GitHub Actions**：增加 `zig build test` 在 PR 上的自动运行。
 
 ---
 

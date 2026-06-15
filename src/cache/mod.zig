@@ -76,6 +76,9 @@ pub const Memory = @import("memory.zig").Memory;
 /// Redis 缓存实现。
 pub const Redis = @import("redis.zig").Redis;
 
+/// Memcache 缓存实现。
+pub const Memcache = @import("memcache.zig").Memcache;
+
 test "Cache 接口契约自检：get / set / isExist / delete / deinit 均存在" {
     try std.testing.expect(@hasDecl(Cache, "get"));
     try std.testing.expect(@hasDecl(Cache, "set"));

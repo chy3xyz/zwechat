@@ -87,6 +87,21 @@ pub const Redis = struct {
 };
 ```
 
+### `Memcache`
+
+```zig
+pub const Memcache = struct {
+    pub const Options = struct {
+        server: []const u8 = "127.0.0.1:11211",
+        io: ?std.Io = null,  // 外部 Io 句柄，未提供时自行创建
+    };
+
+    pub fn create(allocator: std.mem.Allocator, opts: Options) !*Memcache;
+    pub fn deinit(self: *Memcache) void;
+    pub fn asCache(self: *Memcache) Cache;
+};
+```
+
 ---
 
 ## 3. `credential` — 凭据管理
