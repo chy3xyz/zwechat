@@ -2,40 +2,31 @@
 
 `zwechat` 是使用 Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付、开放平台、企业微信、智能对话等能力。
 
-> ✅ **当前状态**：首版骨架 + 完整功能落地（`zig 0.17.0-dev.813+2153f8143`）。`zig build` / `zig build test` / `zig build run` 全部通过，**255 个内联单元测试全部通过且零内存泄漏**。
+> ✅ **当前状态**：`zig 0.17.0-dev.813+2153f8143`。`zig build` / `zig build test` / `zig build run` 全部通过，**296 个内联单元测试全部通过且零内存泄漏**。
 >
 > 目录包括：
 > - `_ref/wechat/` — 完整克隆的 Go 参考实现（`silenceper/wechat/v2`，Apache-2.0），作为移植依据（**只读**）。
 > - `.codegraph/` — 本地代码图谱缓存（SQLite，已 gitignore）。
-> - `src/` — Zig 实现，**78 个文件 / 12033 行**，覆盖 `cache` / `credential` / `util` / `officialaccount` / `pay` / `miniprogram` / `work` / `openplatform` / `minigame` / `aispeech` 十大业务域。
-> - `build.zig` / `build.zig.zon` — 构建脚本。
-> - `LICENSE` — Apache-2.0。
-> - `README.md` — 项目说明。
->
-> 目录包括：
-> - `_ref/wechat/` — 完整克隆的 Go 参考实现（`silenceper/wechat/v2`，Apache-2.0），作为移植依据（**只读**）。
-> - `.codegraph/` — 本地代码图谱缓存（SQLite，已 gitignore）。
-> - `src/` — Zig 实现，**76 个文件 / 10906 行**，覆盖 `cache` / `credential` / `util` / `officialaccount` / `pay` / `miniprogram` / `work` / `openplatform` / `minigame` / `aispeech` 十大业务域。
+> - `src/` — Zig 实现，**87 个文件 / 15711 行**，覆盖 `cache` / `credential` / `util` / `officialaccount` / `pay` / `miniprogram` / `work` / `openplatform` / `minigame` / `aispeech` 十大业务域。
 > - `build.zig` / `build.zig.zon` — 构建脚本。
 > - `LICENSE` — Apache-2.0。
 > - `README.md` — 项目说明。
 >
 > 已实现（与 Go 版业务域一一对应）：
-> - `cache`（vtable 接口 + 内存实现，线程安全 + TTL）
-> - `credential`（默认 access_token + 默认 js_ticket + WorkAccessToken 等）
-> - `util`（http / crypto AES-CBC/ECB+PKCS7+MD5+HMAC-SHA256 / signature SHA1 / RSA 占位 / XML codec / 错误 / 时间 / 参数 / 通用）
+> - `cache`（vtable 接口 + Memory / Redis / Memcache 实现，线程安全 + TTL）
+> - `credential`（默认 access_token + 默认 js_ticket + WorkAccessToken + WorkJsTicket 等）
+> - `util`（http / crypto AES-CBC/ECB+PKCS7+MD5+HMAC-SHA256 / signature SHA1 / RSA-SHA256+PKCS#8+PKCS#1-decrypt / PKCS#12 / XML codec / 错误 / 时间 / 参数 / 通用）
 > - `officialaccount` 14 个子模块（menu/oauth/basic/server/message/material/js/user/datacube/broadcast/device/customerservice/ocr/draft/freepublish）均含真实 HTTP 接口
-> - `pay` 6 个子模块（order/refund/notify/transfer/redpacket + 顶层）
-> - `miniprogram` + `auth`（jscode2session / getPhoneNumber）
-> - `work` 12 个子模块（oauth/jsapi/message/material/msgaudit/checkin/kf/externalcontact/invoice/addresslist/appchat/robot）
-> - `openplatform` + `account/miniprogram/officialaccount`
+> - `pay` 6 个子模块（order/refund/notify/transfer/redpacket + 顶层），order 增加 query/close/bridgeAppConfig/prePayID
+> - `miniprogram` + `auth`（jscode2session / getPhoneNumber）+ `qrcode` / `urlscheme`
+> - `work` 12 个子模块（oauth/jsapi/message/material/msgaudit/checkin/kf/externalcontact/invoice/addresslist/appchat/robot），jsapi 完整支持 corp / agent ticket
+> - `openplatform` + `account/miniprogram/officialaccount`，account 支持 component_access_token 缓存与 bind/unbind
 > - `minigame` 顶层 + config + context
 > - `aispeech` 骨架（Go 版本身为空）
-> - `wechat.zig` 顶层容器
+> - `wechat.zig` 顶层容器，已暴露 work/pay/miniprogram/openplatform 工厂
 >
 > **已知限制**：
-> - `util/rsa.zig` 与 `util/http.zig.postXMLWithTLS` 为占位（PKCS#12 / TLS 双向认证未实现，需要 vendor 一个 ASN.1/PKCS#12 解析器）。
-> - `work.Js.getAgentConfig` 当前复用 corp 算法，需 `WorkJsTicket` 区分 corp / agent ticket URL 后才能完全对齐 Go 行为。
+> - `util/http.zig.postXMLWithTLS` 仍为占位：Zig 0.17-dev 的 `std.http.Client` 暂不支持 TLS 客户端证书（mTLS）。PKCS#12 解析已在 `util/pkcs12.zig` + `util/rsa.zig` 中实现，待 stdlib 支持 mTLS 后可接入。
 > - `pay/refund` 与 `pay/transfer` 走普通 HTTPS，正式上线需切到 `postXMLWithTLS`。
 
 ---
@@ -48,7 +39,7 @@
 | 构建系统 | 原生 `zig build`（`build.zig` + `build.zig.zon`） |
 | 许可证 | Apache License 2.0（与上游参考保持一致，保留 `_ref/wechat/LICENSE`） |
 | 运行目标 | 静态库 + 可执行示例 |
-| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **255 个测试，0 泄漏** |
+| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **296 个测试，0 泄漏** |
 
 外部依赖按需声明在 `build.zig.zon`，尽量减少三方依赖；优先使用 Zig 标准库。
 
@@ -66,25 +57,27 @@ src/
 ├── cache/
 │   ├── mod.zig            # Cache 接口（vtable 风格）✅
 │   ├── memory.zig         # 内存实现（线程安全 + TTL + lazy delete）✅
-│   ├── redis.zig          # TODO：可选
-│   └── memcache.zig       # TODO：可选
+│   ├── redis.zig          # RESP Redis 实现 ✅
+│   └── memcache.zig       # text-protocol Memcache 实现 ✅
 ├── credential/
 │   ├── mod.zig            # AccessTokenHandle / JsTicketHandle 接口 ✅
 │   ├── default_access_token.zig  # DefaultAccessToken（双检 + 缓存）✅
 │   ├── js_ticket.zig      # DefaultJsTicket（双检 + 缓存）✅
-│   └── work_js_ticket.zig # TODO：企业微信 ticket
+│   └── work_js_ticket.zig # WorkJsTicket（corp / agent ticket）✅
 ├── util/
 │   ├── mod.zig            # barrel re-export ✅
 │   ├── http.zig           # HttpClient（基于 std.http.Client + Io）✅
 │   ├── crypto.zig         # AES-256-CBC/ECB、PKCS#7、MD5、HMAC-SHA256 ✅
-│   ├── rsa.zig            # 占位（返回 TODO）⚠️
+│   ├── rsa.zig            # RSA-SHA256、PKCS#8、PKCS#1 decrypt、PKCS#12 ✅
 │   ├── signature.zig      # SHA1 sort-and-sign ✅
 │   ├── error.zig          # WechatError + CommonError ✅
 │   ├── param.zig          # OrderParam ✅
 │   ├── time.zig           # getCurrTS ✅
 │   ├── util.zig           # SliceChunk ✅
 │   ├── template.zig       # TODO：消息模板
-│   └── xml.zig            # TODO：XML 编解码（支付回调用）
+│   ├── xml.zig            # XML 编解码（支付回调用）✅
+│   ├── asn1.zig           # DER 解析器 ✅
+│   └── pkcs12.zig         # PKCS#12 解析器 ✅
 ├── domain/
 │   └── openapi.zig        # TODO：通用 OpenAPI 调用抽象
 ├── officialaccount/
@@ -107,13 +100,13 @@ src/
 │   ├── ocr/               # TODO
 │   ├── draft/             # TODO
 │   └── freepublish/       # TODO
-├── miniprogram/           # TODO：小程序 API（45 个 Go 文件）
+├── miniprogram/           # 小程序 API：auth + qrcode + urlscheme 已实现，其余子模块待补齐
 ├── minigame/              # 小游戏 API（骨架）
-├── pay/                   # 微信支付（config + 顶层 + order/refund/notify 子模块）
-├── openplatform/          # 开放平台（骨架）
+├── pay/                   # 微信支付（config + 顶层 + order/refund/notify/transfer/redpacket 子模块）
+├── openplatform/          # 开放平台：account/component_access_token 已实现，其余子模块待补齐
 ├── work/                  # 企业微信（顶层 Work + context + config + oauth + jsapi 已实现；addresslist/appchat/checkin/externalcontact/invoice/kf/material/message/msgaudit/robot 持续补齐）
 ├── aispeech/              # 智能对话（占位）
-└── test_runner.zig        # ✅ 编译门（强制 @import 每个模块），231 个测试全部发现
+└── test_runner.zig        # ✅ 编译门（强制 @import 每个模块），296 个测试全部发现
 ```
 
 ---
@@ -330,11 +323,11 @@ const oa = wc.getOfficialAccount(cfg);
 | `LICENSE` | Apache-2.0 |
 | `README.md` | 项目说明（中文） |
 | `src/main.zig` | CLI 入口（`zig build run` 打印版本 + 模块列表） |
-| `src/root.zig` | 顶层 barrel：`pub const wechat / cache / credential / util / officialaccount` |
-| `src/wechat.zig` | 顶层 Wechat struct + `setCache` / `getOfficialAccount` |
-| `src/cache/` | 缓存抽象 + 内存实现（线程安全 + TTL） |
-| `src/credential/` | 默认 access_token / 默认 js_ticket（双检 + 缓存） |
-| `src/util/` | http / crypto / signature / error / param / time / util / rsa（占位） |
+| `src/root.zig` | 顶层 barrel：wechat / cache / credential / util / officialaccount / pay / miniprogram / work / openplatform |
+| `src/wechat.zig` | 顶层 Wechat struct + `setCache` + `getOfficialAccount` / `getWork` / `getPay` / `getMiniProgram` / `getOpenPlatform` |
+| `src/cache/` | 缓存抽象 + Memory / Redis / Memcache 实现 |
+| `src/credential/` | 默认 access_token / 默认 js_ticket / WorkAccessToken / WorkJsTicket（双检 + 缓存） |
+| `src/util/` | http / crypto / signature / error / param / time / util / rsa / asn1 / pkcs12 |
 | `src/officialaccount/` | Config + Context + 顶层 OfficialAccount（子模块未实现） |
 | `src/test_runner.zig` | 编译门 — 强制 `@import` 每个模块，确保 `zig build test` 发现所有 inline test |
 
@@ -350,7 +343,7 @@ const oa = wc.getOfficialAccount(cfg);
   - `std.http.Client` 集成 `std.Io` runtime；multipart / PKCS#12 需手写。
 - **Cache 接口选型**：vtable 风格（`*anyopaque` + `*const VTable`），与 std.Io / std.Build 一致，便于未来加 Redis / Memcache 实现而不破坏 ABI。
 - **Credential 抽象**：`Fetcher` 函数指针让所有微信服务端交互可被 stub，测试无需真实 HTTP；JSON 响应结构体所有字段都有默认值，能同时容忍成功响应与 `errcode != 0` 的失败响应。
-- **TLS / PKCS#12**：`util.http.postXMLWithTLS` 当前返回 `error.TLSNotImplemented`，签名已稳定；后续需 vendor 一个 PKCS#12 解析器或引入三方依赖。
+- **TLS / PKCS#12**：`util.pkcs12.zig` 已实现最小 PKCS#12 解析（PBES2/PBKDF2/AES-256-CBC），`util.rsa.zig` 提供 `parseP12` 包装。`util.http.postXMLWithTLS` 仍为占位，因为 Zig 0.17-dev 的 `std.http.Client` 暂不支持 TLS 客户端证书（mTLS）；待 stdlib 支持后可直接接入已解析的 cert/key PEM。
 - **测试基础设施**：`src/test_runner.zig` 顶部有一段「编译门」test，强制 `@import` 每个子文件，并在测试体内做 `_ = mod;` 引用 — 否则 0.17-dev 的 dead-strip 可能把带 inline test 的文件排除掉，导致 `zig build test` 报告「All 1 tests passed」假象。
 
 ---
@@ -365,4 +358,4 @@ const oa = wc.getOfficialAccount(cfg);
 - **新增测试时**在 `src/test_runner.zig` 中加一行 `@import`（即便内容只是占位），否则 `zig build test` 不会发现它。
 - **`build.zig.zon` 的 fingerprint 字段**：写一个占位 hex（如 `0xd658b8e96476550b`）即可；若该值不被 Zig 接受，运行 `zig build` 会提示正确的值。
 - **避免 Zig 0.17-dev 已被移除的 API**：`std.Thread.Mutex`（用 `SpinMutex`）、`std.time.timestamp()`（用 `std.Io.Clock.now`）、`std.fmt.AllocPrintError`（用 `Allocator.Error`）、`std.ArrayListUnmanaged = .{}`（用 `.empty`）。
-- **修改完任何模块后**，必须 `zig build test 2>&1 | tail -5` 确认 70/70 测试仍全部通过；任何内存泄漏会让测试失败。
+- **修改完任何模块后**，必须 `zig build test` 确认 296/296 测试仍全部通过；任何内存泄漏会让测试失败。
