@@ -8,9 +8,9 @@
 |---|---|
 | Zig 版本 | ≥ 0.17.0 |
 | 测试覆盖 | 297 个内联测试，0 内存泄漏 |
-| 代码规模 | 80 个 Zig 文件，~12.5k 行 |
+| 代码规模 | 87 个 Zig 文件，~15.8k 行 |
 | 许可证 | Apache-2.0（与上游一致） |
-| Git 仓库 | `c16d836`（首版 commit） |
+| Git 仓库 | `1e804f8`（最新 commit） |
 
 ---
 
@@ -32,7 +32,7 @@
 |---|---|---|---|
 | `cache` | 2 | ✅ | `Cache` vtable 接口 + `Memory` / `Redis` / `Memcache` 三种后端（线程安全 + TTL + lazy delete）|
 | `credential` | 5 | ✅ | `DefaultAccessToken` / `DefaultJsTicket` / **`WorkAccessToken`** / **`WorkJsTicket`**（corp + agent）|
-| `util` | 10 | ✅ | HTTP 客户端（含 mTLS） / AES-CBC+ECB+PKCS7 / MD5 / HMAC-SHA256 / SHA1 / XML codec / 错误集 / 时间 / 参数 / **Ed25519 native** / RSA-SHA256 + PKCS#12 |
+| `util` | 13 | ✅ | HTTP 客户端（含 mTLS） / AES-CBC+ECB+PKCS7 / MD5 / HMAC-SHA256 / SHA1 / XML codec / 错误集 / 时间 / 参数 / **Ed25519 native** / RSA-SHA256 + PKCS#12 |
 | `officialaccount` | 15 | ✅ | menu / oauth / basic / **server（MessageHandler 路由）** / message / material / js / user / datacube / broadcast / device / customerservice / ocr / draft / freepublish |
 | `pay` | 6 | ✅ | order（统一下单 + JS 拉起） / refund（退款 + AES-ECB） / notify（**真实测试向量验签**） / transfer / redpacket |
 | `miniprogram` | 4 | ✅ | auth（jscode2session / getPhoneNumber / checkSession）|
@@ -178,7 +178,7 @@ src/
 │
 ├── cache/                    # 缓存抽象 + 内存实现
 ├── credential/               # 凭据管理（access_token + js_ticket × 2 种）
-├── util/                     # 通用工具（12 个文件）
+├── util/                     # 通用工具（13 个文件）
 │   ├── http.zig              # HTTP 客户端 + MockTransport + Transport 注入
 │   ├── crypto.zig            # AES / MD5 / HMAC-SHA256
 │   ├── signature.zig         # SHA1 sort-and-sign
