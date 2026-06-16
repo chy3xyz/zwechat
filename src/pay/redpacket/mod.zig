@@ -89,7 +89,11 @@ pub const Redpacket = struct {
 
         var client = util_http.HttpClient.init(allocator);
         defer client.deinit();
-        const body = try client.postXML("https://api.mch.weixin.qq.com/mmpaymkttransfers/sendredpack", xml_body);
+        const url = "https://api.mch.weixin.qq.com/mmpaymkttransfers/sendredpack";
+        const body = if (self.cfg.root_ca.len > 0)
+            try client.postXMLWithTLS(url, xml_body, self.cfg.root_ca, self.cfg.mch_id)
+        else
+            try client.postXML(url, xml_body);
         defer allocator.free(body);
 
         var doc = try util_xml.parse(allocator, body);

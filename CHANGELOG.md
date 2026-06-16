@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Wave 19 — 微信支付 mTLS 支持**：
+  - 引入 `vendor/httpz`（httpz.zig v0.2.0）并本地打补丁，为 OpenSSL 后端增加客户端证书加载能力。
+  - 实现 `src/util/http.zig` 的 `postXMLWithTLS`：读取商户 P12 → `util.rsa.parseP12` 解析 PEM → 通过 httpz 完成 TLS 双向认证 POST。
+  - `pay/refund`、`pay/transfer`、`pay/redpacket` 在 `pay.Config.root_ca` 非空时自动调用 `postXMLWithTLS`；空时退回到普通 HTTPS，便于无证书环境测试。
+  - 新增 2 个内联测试（缺少 P12 文件返回 `FileNotFound`、非法 P12 返回 `InvalidP12File`）。
+  - 测试总数从 **296** 提升至 **297**，仍保持 0 内存泄漏。
+
+- **Wave 18 — RSA 后端优化 + Pay V2 补齐 + 小程序二维码/URL Scheme + 开放平台 component_token**：
+  - RSA 后端切换到更快的 big-int 实现。
+  - 微信支付 order 增加 query/close/bridgeAppConfig/prePayID；refund/transfer/redpacket 接口完善。
+  - 小程序新增 `qrcode` / `urlscheme` 子模块。
+  - 开放平台 account 支持 component_access_token 缓存与 bind/unbind。
+
 - **Wave 17 — Memcache 缓存后端**：
   - 新增 `src/cache/memcache.zig`：最小 Memcache 文本协议客户端，实现 `Cache` vtable 的 `get` / `set` / `isExist` / `delete` / `deinit`。
   - 支持外部传入 `std.Io` 句柄；未提供时自行创建 `std.Io.Threaded`。
@@ -35,9 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Planned
 
-- **`util/http.postXMLWithTLS` 与 `std.http.Client` 客户端证书对接**：PKCS#12 解析已就绪，待 Zig HTTP API 支持客户端证书后完成 TLS 双向认证。
-- **更快的 RSA big-int 后端**：当前 `rsa_impl.zig` 使用 `std.math.big.int.Managed` + 二进制模幂，功能正确但速度有优化空间。
 - **`work.jsapi.getConfig` corp / agent 完整 wire**：`WorkJsTicket` 已就绪，待 `Context.js_ticket_handle` 完成 plug-and-play。
+- **跨平台 OpenSSL 路径**：当前 `vendor/httpz/build.zig` 硬编码 `/opt/homebrew/opt/openssl@3/include`，后续需要为 Linux / Windows 提供条件 include/lib 路径。
 
 ---
 

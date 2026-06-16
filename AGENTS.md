@@ -2,7 +2,7 @@
 
 `zwechat` 是使用 Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付、开放平台、企业微信、智能对话等能力。
 
-> ✅ **当前状态**：`zig 0.17.0-dev.813+2153f8143`。`zig build` / `zig build test` / `zig build run` 全部通过，**296 个内联单元测试全部通过且零内存泄漏**。
+> ✅ **当前状态**：`zig 0.17.0-dev.813+2153f8143`。`zig build` / `zig build test` / `zig build run` 全部通过，**297 个内联单元测试全部通过且零内存泄漏**。
 >
 > 目录包括：
 > - `_ref/wechat/` — 完整克隆的 Go 参考实现（`silenceper/wechat/v2`，Apache-2.0），作为移植依据（**只读**）。
@@ -26,8 +26,8 @@
 > - `wechat.zig` 顶层容器，已暴露 work/pay/miniprogram/openplatform 工厂
 >
 > **已知限制**：
-> - `util/http.zig.postXMLWithTLS` 仍为占位：Zig 0.17-dev 的 `std.http.Client` 暂不支持 TLS 客户端证书（mTLS）。PKCS#12 解析已在 `util/pkcs12.zig` + `util/rsa.zig` 中实现，待 stdlib 支持 mTLS 后可接入。
-> - `pay/refund` 与 `pay/transfer` 走普通 HTTPS，正式上线需切到 `postXMLWithTLS`。
+> - `util/http.zig.postXMLWithTLS` 已通过 `vendor/httpz`（OpenSSL 后端）实现 mTLS；当前 macOS 构建硬链 Homebrew OpenSSL 3 路径，跨平台时需补充对应 include/lib。
+> - `pay/refund` / `pay/transfer` / `pay/redpacket` 在 `pay.Config.root_ca` 非空时自动走 `postXMLWithTLS`；空时退回到普通 HTTPS，便于无证书环境测试。
 
 ---
 
@@ -39,9 +39,9 @@
 | 构建系统 | 原生 `zig build`（`build.zig` + `build.zig.zon`） |
 | 许可证 | Apache License 2.0（与上游参考保持一致，保留 `_ref/wechat/LICENSE`） |
 | 运行目标 | 静态库 + 可执行示例 |
-| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **296 个测试，0 泄漏** |
+| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **297 个测试，0 泄漏** |
 
-外部依赖按需声明在 `build.zig.zon`，尽量减少三方依赖；优先使用 Zig 标准库。
+外部依赖按需声明在 `build.zig.zon`，尽量减少三方依赖；优先使用 Zig 标准库。当前 vendored 依赖：`vendor/httpz`（OpenSSL 后端，用于微信支付 mTLS）。
 
 ---
 
@@ -292,8 +292,9 @@ const oa = wc.getOfficialAccount(cfg);
 
 ### HTTP 客户端
 
-- `src/util/http.zig` 提供 `httpGet` / `httpPost` / `postJSON` / `postXML` / `postMultipart`，对应 `_ref/wechat/util/http.go`。
-- 默认客户端可通过 `util.setDefaultHttpClient(...)` 替换，便于注入测试桩或自定义 TLS。
+- `src/util/http.zig` 提供 `httpGet` / `httpPost` / `postJSON` / `postXML` / `postMultipart` / `postXMLWithTLS`，对应 `_ref/wechat/util/http.go`。
+- 普通请求基于 `std.http.Client` + `std.Io`；`postXMLWithTLS` 基于 `vendor/httpz`（OpenSSL 后端），加载商户 PKCS#12 证书完成 mTLS 双向认证。
+- `HttpClient` 支持可注入 `Transport`，`MockTransport` 用于离线单元测试。
 - 微信支付回调验签需要的 PKCS#12 解析依赖 `crypto.zig` 与 `rsa.zig`。
 
 ---
@@ -302,7 +303,7 @@ const oa = wc.getOfficialAccount(cfg);
 
 - **凭据保密**：`AppSecret`、商户密钥、`EncodingAESKey`、证书口令等绝不写入源码或日志；测试时使用占位字符串。
 - **签名校验**：被动回复消息接收（`officialaccount/server`）必须校验微信签名（`util/signature.zig` 的 SHA1），并对加密消息用 AES 解密。
-- **TLS**：支付相关请求（`pay/order`、`pay/refund`）使用 `PostXMLWithTLS` 加载商户证书（PKCS#12 → PEM），见 `_ref/wechat/util/http.go:284`。
+- **TLS**：支付相关请求（`pay/refund`、`pay/transfer`、`pay/redpacket`）在配置 `root_ca`（商户 P12 路径）后，使用 `postXMLWithTLS` 加载商户证书（PKCS#12 → PEM）完成 mTLS；未配置时退回到普通 HTTPS，仅用于测试/开发。
 - **access_token 缓存**：默认存于内存，多实例部署需切换到 `Redis`/`Memcache`；并遵循 `credential/access_token.go` 中"先缓存后服务端"的逻辑，避免重复拉取。
 - **errdefer 链**：所有错误路径必须正确释放分配的 buffer / 解码器，避免泄漏密钥材料。
 
@@ -343,7 +344,9 @@ const oa = wc.getOfficialAccount(cfg);
   - `std.http.Client` 集成 `std.Io` runtime；multipart / PKCS#12 需手写。
 - **Cache 接口选型**：vtable 风格（`*anyopaque` + `*const VTable`），与 std.Io / std.Build 一致，便于未来加 Redis / Memcache 实现而不破坏 ABI。
 - **Credential 抽象**：`Fetcher` 函数指针让所有微信服务端交互可被 stub，测试无需真实 HTTP；JSON 响应结构体所有字段都有默认值，能同时容忍成功响应与 `errcode != 0` 的失败响应。
-- **TLS / PKCS#12**：`util.pkcs12.zig` 已实现最小 PKCS#12 解析（PBES2/PBKDF2/AES-256-CBC），`util.rsa.zig` 提供 `parseP12` 包装。`util.http.postXMLWithTLS` 仍为占位，因为 Zig 0.17-dev 的 `std.http.Client` 暂不支持 TLS 客户端证书（mTLS）；待 stdlib 支持后可直接接入已解析的 cert/key PEM。
+- **TLS / PKCS#12 / mTLS**：`util.pkcs12.zig` 已实现最小 PKCS#12 解析（PBES2/PBKDF2/AES-256-CBC），`util.rsa.zig` 提供 `parseP12` 包装。为接入 mTLS，引入 vendored `httpz.zig` v0.2.0 并本地打补丁：在 `vendor/httpz/src/openssl.zig` 的 `config.Client` 中新增可选 `cert: ?*const CertKeyPair`，握手时调用 `SSL_CTX_use_certificate_PEM` / `SSL_CTX_use_PrivateKey_PEM` 加载客户端证书。`util.http.postXMLWithTLS` 读取 P12 → 解析 PEM → 使用 httpz 完成 HTTPS POST。
+- **外部依赖**：`build.zig.zon` 通过 `vendor/httpz` 本地路径依赖 `httpz.zig`，构建时链接 `-lssl -lcrypto -lc`。这是项目首次引入非 stdlib 依赖，后续如需升级/替换应继续 vendoring 或 fork。
+- **Zig 0.17-dev API 差异（文件 I/O）**：`std.fs.cwd()` 已被移除，统一使用 `std.Io.Dir.cwd()`，并显式传入 `std.Io` 句柄（如 `readFileAlloc` / `openFile` / `createFile` / `deleteFile`）。
 - **测试基础设施**：`src/test_runner.zig` 顶部有一段「编译门」test，强制 `@import` 每个子文件，并在测试体内做 `_ = mod;` 引用 — 否则 0.17-dev 的 dead-strip 可能把带 inline test 的文件排除掉，导致 `zig build test` 报告「All 1 tests passed」假象。
 
 ---
@@ -358,4 +361,5 @@ const oa = wc.getOfficialAccount(cfg);
 - **新增测试时**在 `src/test_runner.zig` 中加一行 `@import`（即便内容只是占位），否则 `zig build test` 不会发现它。
 - **`build.zig.zon` 的 fingerprint 字段**：写一个占位 hex（如 `0xd658b8e96476550b`）即可；若该值不被 Zig 接受，运行 `zig build` 会提示正确的值。
 - **避免 Zig 0.17-dev 已被移除的 API**：`std.Thread.Mutex`（用 `SpinMutex`）、`std.time.timestamp()`（用 `std.Io.Clock.now`）、`std.fmt.AllocPrintError`（用 `Allocator.Error`）、`std.ArrayListUnmanaged = .{}`（用 `.empty`）。
-- **修改完任何模块后**，必须 `zig build test` 确认 296/296 测试仍全部通过；任何内存泄漏会让测试失败。
+- **修改完任何模块后**，必须 `zig build test` 确认 297/297 测试仍全部通过；任何内存泄漏会让测试失败。
+- **避免 Zig 0.17-dev 已被移除的 API**：`std.fs.cwd()`（改用 `std.Io.Dir.cwd()`）、`std.Thread.Mutex`（用 `SpinMutex`）、`std.time.timestamp()`（用 `std.Io.Clock.now`）、`std.fmt.AllocPrintError`（用 `Allocator.Error`）、`std.ArrayListUnmanaged = .{}`（用 `.empty`）。

@@ -7,7 +7,7 @@
 | | |
 |---|---|
 | Zig 版本 | ≥ 0.17.0 |
-| 测试覆盖 | 275 个内联测试，0 内存泄漏 |
+| 测试覆盖 | 297 个内联测试，0 内存泄漏 |
 | 代码规模 | 80 个 Zig 文件，~12.5k 行 |
 | 许可证 | Apache-2.0（与上游一致） |
 | Git 仓库 | `c16d836`（首版 commit） |
@@ -20,7 +20,7 @@
 
 - ✅ **静态分发 + 显式内存**：所有公共 API 显式传递 `std.mem.Allocator`，无 GC，无运行时反射。
 - ✅ **vtable 接口**：用 Zig 函数指针模拟 Go `interface`，抽象 `Cache`、`AccessTokenHandle`、`JsTicketHandle` 等。
-- ✅ **零三方依赖**：除 Zig 标准库外不引入任何外部包；TLS / PKCS#12 / RSA 是仅有的未实现项（需要 vendor ASN.1）。
+- ✅ **极少三方依赖**：核心逻辑优先使用 Zig 标准库；仅 `vendor/httpz`（OpenSSL 后端）作为微信支付 mTLS 的 vendored 依赖引入，无外部包管理器下载。
 - ✅ **测试可离线**：所有 HTTP 调用可通过 `MockTransport` 注入，无需真实微信服务器即可跑 CI。
 - ✅ **中文注释**：所有 `///` / `//!` 文档注释与上游 Go 注释一致，使用中文。
 
@@ -32,7 +32,7 @@
 |---|---|---|---|
 | `cache` | 2 | ✅ | `Cache` vtable 接口 + `Memory` / `Redis` / `Memcache` 三种后端（线程安全 + TTL + lazy delete）|
 | `credential` | 5 | ✅ | `DefaultAccessToken` / `DefaultJsTicket` / **`WorkAccessToken`** / **`WorkJsTicket`**（corp + agent）|
-| `util` | 10 | ✅ | HTTP 客户端 / AES-CBC+ECB+PKCS7 / MD5 / HMAC-SHA256 / SHA1 / XML codec / 错误集 / 时间 / 参数 / **Ed25519 native** / RSA stub |
+| `util` | 10 | ✅ | HTTP 客户端（含 mTLS） / AES-CBC+ECB+PKCS7 / MD5 / HMAC-SHA256 / SHA1 / XML codec / 错误集 / 时间 / 参数 / **Ed25519 native** / RSA-SHA256 + PKCS#12 |
 | `officialaccount` | 15 | ✅ | menu / oauth / basic / **server（MessageHandler 路由）** / message / material / js / user / datacube / broadcast / device / customerservice / ocr / draft / freepublish |
 | `pay` | 6 | ✅ | order（统一下单 + JS 拉起） / refund（退款 + AES-ECB） / notify（**真实测试向量验签**） / transfer / redpacket |
 | `miniprogram` | 4 | ✅ | auth（jscode2session / getPhoneNumber / checkSession）|
@@ -156,13 +156,13 @@ zig build test --summary all
 ```
 
 ```
-Build Summary: 3/3 steps succeeded
+Build Summary: 4/4 steps succeeded
 test success
-+- run test 281 pass (281 total)
++- run test 297 pass (297 total)
    +- compile test Debug native
 ```
 
-所有内联测试使用 `std.testing.allocator`，自动检测内存泄漏；运行结果应严格 **281/281 pass, 0 leak**。
+所有内联测试使用 `std.testing.allocator`，自动检测内存泄漏；运行结果应严格 **297/297 pass, 0 leak**。
 
 ---
 
@@ -207,7 +207,7 @@ src/
 ## 已知限制
 
 1. **RSA 签名**：✅ 已在 `src/util/rsa_impl.zig` 实现纯 Zig 的 RSA-SHA256 PKCS#1 v1.5 签名/验签；支持 PKCS#1 `RSA PRIVATE KEY` 与 X.509 `PUBLIC KEY` PEM。使用 `std.math.big.int.Managed` + 二进制模幂，**功能正确但速度不及优化 big-int 库**（后续可替换为更快的实现）。
-2. **PKCS#12**：✅ 已在 `src/util/pkcs12.zig` 实现 PBES2 + PBKDF2-HMAC-SHA256 + AES-256-CBC 解析，支持从 `.p12` 导出证书/私钥 PEM。`util/rsa.parseP12` 已接入；`util/http.postXMLWithTLS` 仍需与 `std.http.Client` TLS 客户端证书接口对接。
+2. **PKCS#12 / mTLS**：✅ 已在 `src/util/pkcs12.zig` 实现 PBES2 + PBKDF2-HMAC-SHA256 + AES-256-CBC 解析，支持从 `.p12` 导出证书/私钥 PEM。`util/rsa.parseP12` 已接入；`util/http.postXMLWithTLS` 已通过 `vendor/httpz`（OpenSSL 后端）实现 mTLS，`pay/refund` / `pay/transfer` / `pay/redpacket` 在配置商户 P12 路径后自动使用。
 3. **`WorkJsTicket` 已就绪但 work.JsAPI 子模块尚未完整 wire** —— `Work.newDefaultWork` 会懒加载 `WorkJsTicket`，但子模块的业务方法（如 `jsapi.getConfig`）仍需后续接续。
 
 ---

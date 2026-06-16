@@ -9,6 +9,8 @@
 //! 场景；如果以后需要并发，可以把 `inner.io` 换成调用方注入的 `Io`。
 
 const std = @import("std");
+const httpz = @import("httpz");
+const rsa = @import("rsa.zig");
 
 /// multipart/form-data 字段描述（对照 `MultipartFormField`）。
 ///
@@ -164,12 +166,11 @@ pub const HttpClient = struct {
 
     /// POST XML + TLS 客户端证书（对照 `PostXMLWithTLS`，用于微信支付）。
     ///
-    /// 当前 `postXMLWithTLS` 暂时返回 `error.TLSNotImplemented`：
-    /// Zig 标准库目前未提供 PKCS#12 解析器（参考 `_ref/wechat/util/http.go`
-    /// 的 `pkcs12ToPem`，依赖 `golang.org/x/crypto/pkcs12`）。在不引入
-    /// 第三方依赖的前提下，先保留接口签名，待后续接入 PKCS#12 解析时
-    /// 在这里实现 `httpWithTLS` 路径（构造一个带 `Certificates` 的
-    /// `tls.Config`，再 clone `std.http.Client`）。
+    /// 流程：
+    /// 1. 读取 `p12_path` 文件；
+    /// 2. 用 `util.rsa.parseP12` 解出 cert/key PEM；
+    /// 3. 使用 httpz + OpenSSL 进行 mTLS 握手；
+    /// 4. 发送 `Content-Type: application/xml` POST 请求并返回响应体。
     pub fn postXMLWithTLS(
         self: *HttpClient,
         uri: []const u8,
@@ -177,19 +178,61 @@ pub const HttpClient = struct {
         p12_path: []const u8,
         p12_password: []const u8,
     ) ![]u8 {
-        _ = self;
-        _ = uri;
-        _ = body;
-        _ = p12_path;
-        _ = p12_password;
-        // TODO: 实现 PKCS#12 解析
-        // 1. 读取 p12_path 字节流；
-        // 2. 用 PKCS#12 解析器把 cert + key 拆出来（标准库缺失，需三方依赖
-        //    或自实现 ASN.1 / PKCS#12 解析）；
-        // 3. 用 `std.crypto.Certificate.Bundle.parse` 或自实现 PEM 解码，
-        //    构造 `std.http.Client.TLSOptions`；
-        // 4. 在 fetch 时把这个 TLS 配置注入到 `client.inner`。
-        return error.TLSNotImplemented;
+        const effective_uri = applyUriModifier(uri);
+        const io = std.Io.Threaded.global_single_threaded.io();
+
+        // 1. 读取 P12 文件
+        const p12_bytes = try std.Io.Dir.cwd().readFileAlloc(
+            io,
+            p12_path,
+            self.allocator,
+            .limited(1024 * 1024),
+        );
+        defer self.allocator.free(p12_bytes);
+
+        // 2. 解析出 cert + key PEM
+        const p12 = try rsa.parseP12(self.allocator, p12_bytes, p12_password);
+        defer {
+            self.allocator.free(p12.cert_pem);
+            self.allocator.free(p12.key_pem);
+        }
+
+        // 3. 解析 URL
+        const parsed = httpz.Client.Url.parse(effective_uri) orelse return error.InvalidUri;
+
+        // 4. 构造 client cert 配置
+        const ckp = httpz.tls.config.CertKeyPair{
+            .cert_pem = p12.cert_pem,
+            .key_pem = p12.key_pem,
+            .allocator = self.allocator,
+        };
+        const tls_cfg = httpz.tls.config.Client{
+            .host = parsed.host,
+            .disable_h2 = true,
+            .cert = &ckp,
+        };
+
+        // 5. 使用 httpz 客户端完成 mTLS 请求
+        var client = httpz.Client.init(self.allocator, .{
+            .host = parsed.host,
+            .port = parsed.port,
+            .tls_config = tls_cfg,
+        });
+        defer client.deinit();
+
+        try client.connect(io);
+
+        var headers = httpz.Headers{};
+        try headers.append("Content-Type", "application/xml;charset=utf-8");
+
+        var resp = try client.request(io, .POST, parsed.path, headers, body);
+        defer resp.deinit(self.allocator);
+
+        if (resp.status.toInt() != 200) {
+            return error.HttpStatusNotOk;
+        }
+
+        return self.allocator.dupe(u8, resp.body);
     }
 
     // -------------------------------------------------------------------------
@@ -337,16 +380,21 @@ fn writeMultipartPart(
     try body_buf.appendSlice(allocator, "\r\n");
 
     if (field.is_file) {
-        const file = std.fs.cwd().openFile(field.file_path, .{}) catch |err| switch (err) {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const file = std.Io.Dir.cwd().openFile(
+            field.file_path,
+            io,
+            .{ .mode = .read_only },
+        ) catch |err| switch (err) {
             error.FileNotFound => return error.FileNotFound,
             else => return err,
         };
-        defer file.close();
-        const stat = try file.stat();
+        defer file.close(io);
+        const stat = try file.stat(io);
         if (stat.size > 0) {
             const file_buf = try allocator.alloc(u8, stat.size);
             defer allocator.free(file_buf);
-            const read = try file.readAll(file_buf);
+            const read = try file.readPositionalAll(io, file_buf, 0);
             try body_buf.appendSlice(allocator, file_buf[0..read]);
         }
     } else {
@@ -408,16 +456,39 @@ test "MultipartField 结构体字段类型可见" {
     try std.testing.expect(!f.is_file);
 }
 
-test "postXMLWithTLS 当前返回 TLSNotImplemented" {
+test "postXMLWithTLS 缺少 P12 文件返回 FileNotFound" {
     var client = HttpClient.init(std.testing.allocator);
     defer client.deinit();
     const result = client.postXMLWithTLS(
         "https://api.mch.weixin.qq.com/secapi/pay/refund",
         "<xml/>",
-        "/tmp/dummy.p12",
+        "/tmp/dummy_zwechat_not_exist.p12",
         "pwd",
     );
-    try std.testing.expectError(error.TLSNotImplemented, result);
+    try std.testing.expectError(error.FileNotFound, result);
+}
+
+test "postXMLWithTLS 非法 P12 文件返回 InvalidP12File" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const tmp_path = "/tmp/zwechat_bad_p12_test.p12";
+
+    const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{});
+    defer {
+        file.close(io);
+        std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+    }
+    try file.writePositionalAll(io, "not a p12", 0);
+
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+    const result = client.postXMLWithTLS(
+        "https://api.mch.weixin.qq.com/secapi/pay/refund",
+        "<xml/>",
+        tmp_path,
+        "pwd",
+    );
+    try std.testing.expectError(error.InvalidP12File, result);
 }
 
 test "模块公共 API 全部导出" {

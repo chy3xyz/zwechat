@@ -78,9 +78,12 @@ pub const Refund = struct {
         var client = util_http.HttpClient.init(allocator);
         defer client.deinit();
 
-        // 退款需要 TLS 双向认证（PKCS#12），但当前 HttpClient.postXMLWithTLS 返回 TLSNotImplemented。
-        // 此处使用 postXML 走普通 HTTPS；正式上线需要换 TLS 版本。
-        const body = try client.postXML("https://api.mch.weixin.qq.com/secapi/pay/refund", xml_body);
+        // 退款需要 TLS 双向认证（PKCS#12）。
+        const url = "https://api.mch.weixin.qq.com/secapi/pay/refund";
+        const body = if (self.cfg.root_ca.len > 0)
+            try client.postXMLWithTLS(url, xml_body, self.cfg.root_ca, self.cfg.mch_id)
+        else
+            try client.postXML(url, xml_body);
         defer allocator.free(body);
 
         var doc = try util_xml.parse(allocator, body);

@@ -11,6 +11,9 @@ pub const Config = struct {
     key: []const u8 = "",
     /// 支付回调地址。
     notify_url: []const u8 = "",
+    /// 商户证书 P12 文件路径（退款 / 企业付款 / 红包等需 mTLS 的接口使用）。
+    /// 密码固定为商户号 `mch_id`（与 Go 参考实现一致）。
+    root_ca: []const u8 = "",
 };
 
 test "Config 默认值" {
