@@ -119,7 +119,7 @@ pub const Server = struct {
 
         // 2) 从 body 中取出 Encrypt 字段
         const doc = try util_xml.parse(self.allocator, self.raw_body);
-        defer doc.deinit();
+        defer @constCast(&doc).deinit();
         const encrypted_b64 = doc.get("Encrypt") orelse return error.MissingEncrypt;
 
         // 3) AES 解密（返回 duped 切片）
