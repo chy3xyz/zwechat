@@ -10,6 +10,7 @@ pub const Config = @import("config.zig").Config;
 pub const Cache = @import("config.zig").Cache;
 pub const Context = @import("context.zig").Context;
 pub const OfficialAccount = @import("officialaccount.zig").OfficialAccount;
+pub const menu = @import("menu/mod.zig");
 
 test "officialaccount 模块全部导出" {
     try std.testing.expect(@hasDecl(OfficialAccount, "init"));
