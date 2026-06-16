@@ -31,7 +31,9 @@ pub const Oauth = struct {
     }
 
     /// code → user access_token（含 openid / refresh_token）。
-    pub fn getUserAccessToken(self: *Self, code: []const u8) !ResAccessToken {
+    /// 返回的 `std.json.Parsed(ResAccessToken)` 由调用方持有并负责 `deinit`，
+    /// 避免内部切片（openid/unionid 等）在返回前被释放导致 use-after-free。
+    pub fn getUserAccessToken(self: *Self, code: []const u8) !std.json.Parsed(ResAccessToken) {
         const uri = try std.fmt.allocPrint(
             self.allocator,
             "https://api.weixin.qq.com/sns/oauth2/access_token?appid={s}&secret={s}&code={s}&grant_type=authorization_code",
@@ -46,10 +48,12 @@ pub const Oauth = struct {
         var parsed = std.json.parseFromSlice(ResAccessToken, self.allocator, body, .{}) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
 
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        if (parsed.value.errcode != 0) {
+            parsed.deinit();
+            return util_error.WechatError.ApiError;
+        }
+        return parsed;
     }
 
     /// 刷新 user access_token。
@@ -96,7 +100,9 @@ pub const Oauth = struct {
     }
 
     /// 获取用户基本信息（需 scope=snsapi_userinfo）。
-    pub fn getUserInfo(self: *Self, access_token: []const u8, open_id: []const u8, lang: []const u8) !UserInfo {
+    /// 返回的 `std.json.Parsed(UserInfo)` 由调用方持有并负责 `deinit`，
+    /// 避免内部切片（nickname/headimgurl/unionid 等）在返回前被释放导致 use-after-free。
+    pub fn getUserInfo(self: *Self, access_token: []const u8, open_id: []const u8, lang: []const u8) !std.json.Parsed(UserInfo) {
         const language = if (lang.len == 0) "zh_CN" else lang;
         const uri = try std.fmt.allocPrint(
             self.allocator,
@@ -112,10 +118,12 @@ pub const Oauth = struct {
         var parsed = std.json.parseFromSlice(UserInfo, self.allocator, body, .{}) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
 
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        if (parsed.value.errcode != 0) {
+            parsed.deinit();
+            return util_error.WechatError.ApiError;
+        }
+        return parsed;
     }
 };
 

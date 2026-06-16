@@ -11,6 +11,9 @@ pub const Cache = @import("config.zig").Cache;
 pub const Context = @import("context.zig").Context;
 pub const OfficialAccount = @import("officialaccount.zig").OfficialAccount;
 pub const menu = @import("menu/mod.zig");
+pub const oauth = @import("oauth/mod.zig");
+pub const server = @import("server/mod.zig");
+pub const js = @import("js/mod.zig");
 
 test "officialaccount 模块全部导出" {
     try std.testing.expect(@hasDecl(OfficialAccount, "init"));
