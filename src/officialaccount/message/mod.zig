@@ -213,15 +213,14 @@ fn formatText(allocator: std.mem.Allocator, to: []const u8, from: []const u8, co
 fn formatImage(allocator: std.mem.Allocator, to: []const u8, from: []const u8, media_id: []const u8) ![]u8 {
     const ts_str = try std.fmt.allocPrint(allocator, "{d}", .{std.Io.Clock.now(.real, std.Options.debug_io).toSeconds()});
     defer allocator.free(ts_str);
-    const elements = [_]util_xml.XmlElement{
-        .{ .key = "ToUserName", .value = to },
-        .{ .key = "FromUserName", .value = from },
-        .{ .key = "CreateTime", .value = ts_str },
-        .{ .key = "MsgType", .value = "image" },
-        .{ .key = "Image", .value = "" },
-        .{ .key = "MediaId", .value = media_id },
-    };
-    return util_xml.serialize(allocator, "xml", &elements);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.print(allocator, "<xml><ToUserName><![CDATA[{s}]]></ToUserName>", .{to});
+    try buf.print(allocator, "<FromUserName><![CDATA[{s}]]></FromUserName>", .{from});
+    try buf.print(allocator, "<CreateTime>{s}</CreateTime>", .{ts_str});
+    try buf.print(allocator, "<MsgType><![CDATA[image]]></MsgType>", .{});
+    try buf.print(allocator, "<Image><MediaId><![CDATA[{s}]]></MediaId></Image></xml>", .{media_id});
+    return buf.toOwnedSlice(allocator);
 }
 
 fn formatTransfer(allocator: std.mem.Allocator, to: []const u8, from: []const u8) ![]u8 {
@@ -239,31 +238,29 @@ fn formatTransfer(allocator: std.mem.Allocator, to: []const u8, from: []const u8
 fn formatVoice(allocator: std.mem.Allocator, to: []const u8, from: []const u8, media_id: []const u8) ![]u8 {
     const ts_str = try std.fmt.allocPrint(allocator, "{d}", .{std.Io.Clock.now(.real, std.Options.debug_io).toSeconds()});
     defer allocator.free(ts_str);
-    const elements = [_]util_xml.XmlElement{
-        .{ .key = "ToUserName", .value = to },
-        .{ .key = "FromUserName", .value = from },
-        .{ .key = "CreateTime", .value = ts_str },
-        .{ .key = "MsgType", .value = "voice" },
-        .{ .key = "Voice", .value = "" },
-        .{ .key = "MediaId", .value = media_id },
-    };
-    return util_xml.serialize(allocator, "xml", &elements);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.print(allocator, "<xml><ToUserName><![CDATA[{s}]]></ToUserName>", .{to});
+    try buf.print(allocator, "<FromUserName><![CDATA[{s}]]></FromUserName>", .{from});
+    try buf.print(allocator, "<CreateTime>{s}</CreateTime>", .{ts_str});
+    try buf.print(allocator, "<MsgType><![CDATA[voice]]></MsgType>", .{});
+    try buf.print(allocator, "<Voice><MediaId><![CDATA[{s}]]></MediaId></Voice></xml>", .{media_id});
+    return buf.toOwnedSlice(allocator);
 }
 
 fn formatVideo(allocator: std.mem.Allocator, to: []const u8, from: []const u8, media_id: []const u8, title: []const u8, description: []const u8) ![]u8 {
     const ts_str = try std.fmt.allocPrint(allocator, "{d}", .{std.Io.Clock.now(.real, std.Options.debug_io).toSeconds()});
     defer allocator.free(ts_str);
-    const elements = [_]util_xml.XmlElement{
-        .{ .key = "ToUserName", .value = to },
-        .{ .key = "FromUserName", .value = from },
-        .{ .key = "CreateTime", .value = ts_str },
-        .{ .key = "MsgType", .value = "video" },
-        .{ .key = "Video", .value = "" },
-        .{ .key = "MediaId", .value = media_id },
-        .{ .key = "Title", .value = title },
-        .{ .key = "Description", .value = description },
-    };
-    return util_xml.serialize(allocator, "xml", &elements);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.print(allocator, "<xml><ToUserName><![CDATA[{s}]]></ToUserName>", .{to});
+    try buf.print(allocator, "<FromUserName><![CDATA[{s}]]></FromUserName>", .{from});
+    try buf.print(allocator, "<CreateTime>{s}</CreateTime>", .{ts_str});
+    try buf.print(allocator, "<MsgType><![CDATA[video]]></MsgType>", .{});
+    try buf.print(allocator, "<Video><MediaId><![CDATA[{s}]]></MediaId>", .{media_id});
+    try buf.print(allocator, "<Title><![CDATA[{s}]]></Title>", .{title});
+    try buf.print(allocator, "<Description><![CDATA[{s}]]></Description></Video></xml>", .{description});
+    return buf.toOwnedSlice(allocator);
 }
 
 fn formatMusic(allocator: std.mem.Allocator, to: []const u8, from: []const u8, m: MusicReply) ![]u8 {
@@ -301,17 +298,17 @@ fn formatNews(allocator: std.mem.Allocator, to: []const u8, from: []const u8, ar
 fn formatMiniprogramPage(allocator: std.mem.Allocator, to: []const u8, from: []const u8, mp: MiniprogramPageReply) ![]u8 {
     const ts_str = try std.fmt.allocPrint(allocator, "{d}", .{std.Io.Clock.now(.real, std.Options.debug_io).toSeconds()});
     defer allocator.free(ts_str);
-    const elements = [_]util_xml.XmlElement{
-        .{ .key = "ToUserName", .value = to },
-        .{ .key = "FromUserName", .value = from },
-        .{ .key = "CreateTime", .value = ts_str },
-        .{ .key = "MsgType", .value = "miniprogrampage" },
-        .{ .key = "Title", .value = mp.title },
-        .{ .key = "AppId", .value = mp.appid },
-        .{ .key = "PagePath", .value = mp.pagepath },
-        .{ .key = "ThumbMediaId", .value = mp.thumb_media_id },
-    };
-    return util_xml.serialize(allocator, "xml", &elements);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.print(allocator, "<xml><ToUserName><![CDATA[{s}]]></ToUserName>", .{to});
+    try buf.print(allocator, "<FromUserName><![CDATA[{s}]]></FromUserName>", .{from});
+    try buf.print(allocator, "<CreateTime>{s}</CreateTime>", .{ts_str});
+    try buf.print(allocator, "<MsgType><![CDATA[miniprogrampage]]></MsgType>", .{});
+    try buf.print(allocator, "<MiniprogramPage><Title><![CDATA[{s}]]></Title>", .{mp.title});
+    try buf.print(allocator, "<AppId><![CDATA[{s}]]></AppId>", .{mp.appid});
+    try buf.print(allocator, "<PagePath><![CDATA[{s}]]></PagePath>", .{mp.pagepath});
+    try buf.print(allocator, "<ThumbMediaId><![CDATA[{s}]]></ThumbMediaId></MiniprogramPage></xml>", .{mp.thumb_media_id});
+    return buf.toOwnedSlice(allocator);
 }
 
 /// 模板消息数据结构（用于 `SendTemplate`）。
@@ -394,11 +391,7 @@ pub const Message = struct {
         );
         defer self.allocator.free(uri);
 
-        const body = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"touser\":\"{s}\",\"msgtype\":\"text\",\"text\":{{\"content\":\"{s}\"}}}}",
-            .{ msg.touser, msg.content },
-        );
+        const body = try serializeCustomerText(self.allocator, msg);
         defer self.allocator.free(body);
 
         const client = util_http.getDefaultClient(self.allocator);
@@ -411,27 +404,67 @@ pub const Message = struct {
     }
 
     fn serializeTemplate(allocator: std.mem.Allocator, msg: TemplateMessage) ![]u8 {
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(allocator);
-        try buf.writer.print("{{\"touser\":\"{s}\",\"template_id\":\"{s}\"", .{ msg.to_user, msg.template_id });
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var s: std.json.Stringify = .{ .writer = &out.writer };
+
+        try s.beginObject();
+        try s.objectField("touser");
+        try s.write(msg.to_user);
+        try s.objectField("template_id");
+        try s.write(msg.template_id);
         if (msg.url.len > 0) {
-            try buf.writer.print(",\"url\":\"{s}\"", .{msg.url});
+            try s.objectField("url");
+            try s.write(msg.url);
         }
         if (msg.miniprogram) |mp| {
-            try buf.writer.print(",\"miniprogram\":{{\"appid\":\"{s}\",\"pagepath\":\"{s}\"}}", .{ mp.appid, mp.pagepath });
+            try s.objectField("miniprogram");
+            try s.beginObject();
+            try s.objectField("appid");
+            try s.write(mp.appid);
+            try s.objectField("pagepath");
+            try s.write(mp.pagepath);
+            try s.endObject();
         }
-        try buf.appendSlice(allocator, ",\"data\":{");
-        for (msg.data, 0..) |d, i| {
-            if (i > 0) try buf.append(allocator, ',');
-            try buf.writer.print("\"{s}\":{{\"value\":\"{s}\"", .{ d.key, d.value });
-            if (d.color.len > 0) try buf.writer.print(",\"color\":\"{s}\"", .{d.color});
-            try buf.append(allocator, '}');
+        try s.objectField("data");
+        try s.beginObject();
+        for (msg.data) |d| {
+            try s.objectField(d.key);
+            try s.beginObject();
+            try s.objectField("value");
+            try s.write(d.value);
+            if (d.color.len > 0) {
+                try s.objectField("color");
+                try s.write(d.color);
+            }
+            try s.endObject();
         }
-        try buf.append(allocator, '}');
-        try buf.append(allocator, '}');
-        return buf.toOwnedSlice(allocator);
+        try s.endObject();
+        try s.endObject();
+
+        return out.toOwnedSlice();
     }
 };
+
+fn serializeCustomerText(allocator: std.mem.Allocator, msg: CustomerTextMessage) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+
+    try s.beginObject();
+    try s.objectField("touser");
+    try s.write(msg.touser);
+    try s.objectField("msgtype");
+    try s.write("text");
+    try s.objectField("text");
+    try s.beginObject();
+    try s.objectField("content");
+    try s.write(msg.content);
+    try s.endObject();
+    try s.endObject();
+
+    return out.toOwnedSlice();
+}
 
 pub const templateSendURL = "https://api.weixin.qq.com/cgi-bin/message/template/send";
 pub const customSendURL = "https://api.weixin.qq.com/cgi-bin/message/custom/send";
@@ -456,4 +489,120 @@ test "CommonToken 默认值" {
 test "URL 常量值" {
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/message/template/send", templateSendURL);
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/message/custom/send", customSendURL);
+}
+
+test "serializeTemplate produces valid JSON and escapes quotes" {
+    const allocator = std.testing.allocator;
+    const msg = TemplateMessage{
+        .to_user = "user\"quote",
+        .template_id = "tid123",
+        .url = "https://example.com",
+        .miniprogram = .{
+            .appid = "wx_appid",
+            .pagepath = "pages/index",
+        },
+        .data = &.{
+            .{ .key = "first", .value = "hello \"world\"", .color = "#FF0000" },
+            .{ .key = "keyword1", .value = "line1\nline2", .color = "" },
+        },
+    };
+    const body = try Message.serializeTemplate(allocator, msg);
+    defer allocator.free(body);
+
+    // 验证特殊字符被正确转义。
+    try std.testing.expect(std.mem.indexOf(u8, body, "user\\\"quote") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "hello \\\"world\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "line1\\nline2") != null);
+
+    // 验证 JSON 可解析且结构正确。
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("user\"quote", parsed.value.object.get("touser").?.string);
+    try std.testing.expectEqualStrings("tid123", parsed.value.object.get("template_id").?.string);
+    try std.testing.expectEqualStrings("https://example.com", parsed.value.object.get("url").?.string);
+    const mp = parsed.value.object.get("miniprogram").?.object;
+    try std.testing.expectEqualStrings("wx_appid", mp.get("appid").?.string);
+    try std.testing.expectEqualStrings("pages/index", mp.get("pagepath").?.string);
+    const data = parsed.value.object.get("data").?.object;
+    try std.testing.expectEqualStrings("hello \"world\"", data.get("first").?.object.get("value").?.string);
+    try std.testing.expectEqualStrings("#FF0000", data.get("first").?.object.get("color").?.string);
+    try std.testing.expectEqualStrings("line1\nline2", data.get("keyword1").?.object.get("value").?.string);
+    try std.testing.expect(data.get("keyword1").?.object.get("color") == null);
+}
+
+test "serializeCustomerText produces valid JSON and escapes content" {
+    const allocator = std.testing.allocator;
+    const msg = CustomerTextMessage{
+        .touser = "user\"test",
+        .content = "say \"hi\"",
+    };
+    const body = try serializeCustomerText(allocator, msg);
+    defer allocator.free(body);
+
+    try std.testing.expect(std.mem.indexOf(u8, body, "user\\\"test") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "say \\\"hi\\\"") != null);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("user\"test", parsed.value.object.get("touser").?.string);
+    try std.testing.expectEqualStrings("text", parsed.value.object.get("msgtype").?.string);
+    try std.testing.expectEqualStrings("say \"hi\"", parsed.value.object.get("text").?.object.get("content").?.string);
+}
+
+test "Reply.format image produces nested XML" {
+    const allocator = std.testing.allocator;
+    const reply = Reply{
+        .msg_type = .image,
+        .data = .{ .image = .{ .media_id = "media_123" } },
+    };
+    const xml = try reply.format(allocator, "toUser", "fromUser");
+    defer allocator.free(xml);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<Image><MediaId><![CDATA[media_123]]></MediaId></Image>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<MsgType><![CDATA[image]]></MsgType>") != null);
+}
+
+test "Reply.format voice produces nested XML" {
+    const allocator = std.testing.allocator;
+    const reply = Reply{
+        .msg_type = .voice,
+        .data = .{ .voice = .{ .media_id = "voice_123" } },
+    };
+    const xml = try reply.format(allocator, "toUser", "fromUser");
+    defer allocator.free(xml);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<Voice><MediaId><![CDATA[voice_123]]></MediaId></Voice>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<MsgType><![CDATA[voice]]></MsgType>") != null);
+}
+
+test "Reply.format video produces nested XML" {
+    const allocator = std.testing.allocator;
+    const reply = Reply{
+        .msg_type = .video,
+        .data = .{ .video = .{ .media_id = "video_123", .title = "title\"x", .description = "desc\\y" } },
+    };
+    const xml = try reply.format(allocator, "toUser", "fromUser");
+    defer allocator.free(xml);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<Video><MediaId><![CDATA[video_123]]></MediaId>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<Title><![CDATA[title\"x]]></Title>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<Description><![CDATA[desc\\y]]></Description></Video>") != null);
+}
+
+test "Reply.format miniprogrampage produces nested XML" {
+    const allocator = std.testing.allocator;
+    const reply = Reply{
+        .msg_type = .text,
+        .data = .{ .miniprogrampage = .{
+            .title = "title",
+            .appid = "appid",
+            .pagepath = "pages/index",
+            .thumb_media_id = "thumb_123",
+        } },
+    };
+    const xml = try reply.format(allocator, "toUser", "fromUser");
+    defer allocator.free(xml);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<MiniprogramPage>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<Title><![CDATA[title]]></Title>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<AppId><![CDATA[appid]]></AppId>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<PagePath><![CDATA[pages/index]]></PagePath>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<ThumbMediaId><![CDATA[thumb_123]]></ThumbMediaId>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "</MiniprogramPage>") != null);
 }
