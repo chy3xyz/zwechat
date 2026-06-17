@@ -103,6 +103,7 @@ pub const ReplyMsgType = enum {
     video,
     music,
     news,
+    miniprogrampage,
     transfer_customer_service,
 };
 
@@ -589,7 +590,7 @@ test "Reply.format video produces nested XML" {
 test "Reply.format miniprogrampage produces nested XML" {
     const allocator = std.testing.allocator;
     const reply = Reply{
-        .msg_type = .text,
+        .msg_type = .miniprogrampage,
         .data = .{ .miniprogrampage = .{
             .title = "title",
             .appid = "appid",
