@@ -13,11 +13,20 @@ pub fn build(b: *std.Build) void {
     switch (target.result.os.tag) {
         .macos => openssl_c.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" }),
         else => {
-            openssl_c.addIncludePath(.{ .cwd_relative = "/usr/include" });
-            switch (target.result.cpu.arch) {
-                .aarch64 => openssl_c.addIncludePath(.{ .cwd_relative = "/usr/include/aarch64-linux-gnu" }),
-                .x86_64 => openssl_c.addIncludePath(.{ .cwd_relative = "/usr/include/x86_64-linux-gnu" }),
-                else => {},
+            if (b.graph.environ_map.get("XCOMPILE_ROOT")) |xroot| {
+                openssl_c.addIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{xroot}) });
+                switch (target.result.cpu.arch) {
+                    .aarch64 => openssl_c.addIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include/aarch64-linux-gnu", .{xroot}) }),
+                    .x86_64 => openssl_c.addIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include/x86_64-linux-gnu", .{xroot}) }),
+                    else => {},
+                }
+            } else {
+                openssl_c.addIncludePath(.{ .cwd_relative = "/usr/include" });
+                switch (target.result.cpu.arch) {
+                    .aarch64 => openssl_c.addIncludePath(.{ .cwd_relative = "/usr/include/aarch64-linux-gnu" }),
+                    .x86_64 => openssl_c.addIncludePath(.{ .cwd_relative = "/usr/include/x86_64-linux-gnu" }),
+                    else => {},
+                }
             }
         },
     }
