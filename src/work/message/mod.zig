@@ -243,6 +243,14 @@ fn serializeRequest(allocator: std.mem.Allocator, req: anytype) ![]u8 {
             try appendJsonString(allocator, &buf, req.media_id);
             try buf.appendSlice(allocator, "\"}}");
         },
+        SendMarkdownRequest => {
+            if (req.content.len == 0) {
+                return error.InvalidArgument;
+            }
+            try buf.appendSlice(allocator, "\"markdown\":{\"content\":\"");
+            try appendJsonString(allocator, &buf, req.content);
+            try buf.appendSlice(allocator, "\"}}");
+        },
         else => @compileError("serializeRequest 不支持的请求类型"),
     }
     return buf.toOwnedSlice(allocator);
