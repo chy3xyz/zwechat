@@ -73,7 +73,17 @@ pub const SendImageRequest = struct {
     media_id: []const u8 = "",
 };
 
-/// `SendText` / `SendImage` 等共用的返回结构。
+/// 发送 Markdown 消息请求。
+///
+/// Markdown 内容是纯文本（最长 2048 字节），与企业微信智能机器人
+/// 的 markdown 卡片互通。无需 `media_id` — 直接传内容即可。
+pub const SendMarkdownRequest = struct {
+    common: SendRequestCommon = .{},
+    /// Markdown 内容（最长 2048 字节）。
+    content: []const u8 = "",
+};
+
+/// `SendText` / `SendImage` / `SendMarkdown` 等共用的返回结构。
 ///
 /// 除了 `errcode` / `errmsg`（在微信侧 errcode=0 表示成功），还会带回
 /// 部分用户维度的回执信息以及本次消息的 `msgid`。
@@ -128,6 +138,16 @@ pub const Message = struct {
         var copy = req;
         copy.common.msg_type = "image";
         return self.send(SendImageRequest, copy);
+    }
+
+    /// 发送 Markdown 消息。
+    ///
+    /// 对应 WeCom API `msgtype: "markdown"`。本方法会强制把 `msg_type`
+    /// 置为 `"markdown"`。内容直接传掉 fields 中的 `markdown.content`。
+    pub fn sendMarkdown(self: *Self, req: SendMarkdownRequest) !SendResponse {
+        var copy = req;
+        copy.common.msg_type = "markdown";
+        return self.send(SendMarkdownRequest, copy);
     }
 
     // -------------------------------------------------------------------------
