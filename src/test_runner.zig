@@ -35,6 +35,7 @@ const util_rsa = @import("util/rsa.zig");
 const util_rsa_impl = @import("util/rsa_impl.zig");
 const util_asn1 = @import("util/asn1.zig");
 const util_pkcs12 = @import("util/pkcs12.zig");
+const util_template = @import("util/template.zig");
 const _integration = @import("integration_test.zig");
 
 // —— officialaccount ——
@@ -109,6 +110,10 @@ const minigame_context = @import("minigame/context/mod.zig");
 // —— aispeech ——
 const aispeech_mod = @import("aispeech/mod.zig");
 
+// —— middleware ——
+const middleware_mod = @import("middleware/mod.zig");
+const middleware_handler = @import("middleware/wechat_handler.zig");
+
 test "test_runner 编译门 — 强制所有模块被解析 (v2)" {
     // 引用每个模块，阻止任何文件被 dead-strip。
     _ = root_mod;
@@ -134,6 +139,7 @@ test "test_runner 编译门 — 强制所有模块被解析 (v2)" {
     _ = util_rsa_impl;
     _ = util_asn1;
     _ = util_pkcs12;
+    _ = util_template;
     _ = _integration;
     _ = oa_mod;
     _ = oa_config;
@@ -193,6 +199,8 @@ test "test_runner 编译门 — 强制所有模块被解析 (v2)" {
     _ = minigame_config;
     _ = minigame_context;
     _ = aispeech_mod;
+    _ = middleware_mod;
+    _ = middleware_handler;
     try std.testing.expect(true);
 }
 

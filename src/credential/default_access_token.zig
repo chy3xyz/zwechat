@@ -180,6 +180,36 @@ pub const DefaultAccessToken = struct {
         return allocator.dupe(u8, resp.access_token);
     }
 
+    /// 强制清空缓存并重新从服务端获取 Token（用于 Token 失效时的自动恢复机制）
+    pub fn forceRefresh(self: *DefaultAccessToken, allocator: std.mem.Allocator) CredentialError![]u8 {
+        const key = try self.cacheKey(allocator);
+        defer allocator.free(key);
+
+        self.lock.lock();
+        defer self.lock.unlock();
+
+        self.cache.delete(key) catch {};
+        
+        const url = try self.buildURL(allocator);
+        defer allocator.free(url);
+
+        const body = try self.fetcher(self.fetcher_ctx, allocator, url);
+        defer allocator.free(body);
+
+        var parsed = std.json.parseFromSlice(TokenResponse, allocator, body, .{}) catch {
+            return CredentialError.DecodeError;
+        };
+        defer parsed.deinit();
+
+        const resp = parsed.value;
+        if (resp.errcode != 0) return CredentialError.ApiError;
+
+        const ttl = resp.expires_in - 1500;
+        try self.cache.set(key, resp.access_token, ttl);
+
+        return allocator.dupe(u8, resp.access_token);
+    }
+
     /// 包装为抽象接口 `AccessTokenHandle`，便于注入到 `Context` 等。
     pub fn asHandle(self: *DefaultAccessToken) AccessTokenHandle {
         return .{

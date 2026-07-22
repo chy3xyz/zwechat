@@ -2,7 +2,7 @@
 
 `zwechat` 是使用 Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付、开放平台、企业微信、智能对话等能力。
 
-> ✅ **当前状态**：`zig 0.17.0-dev.813+2153f8143`。`zig build` / `zig build test` / `zig build run` 全部通过，**297 个内联单元测试全部通过且零内存泄漏**。
+> ✅ **当前状态**：`zig 0.17.0-dev.1422+e863bf3be`。`zig build` / `zig build test` / `zig build run` 全部通过，**297 个内联单元测试全部通过且零内存泄漏**。
 >
 > 目录包括：
 > - `_ref/wechat/` — 完整克隆的 Go 参考实现（`silenceper/wechat/v2`，Apache-2.0），作为移植依据（**只读**）。
@@ -35,7 +35,7 @@
 
 | 项 | 取值 |
 |---|---|
-| 语言 | Zig `0.17.0-dev.813+2153f8143`（参考同 workspace 下 `zigmodu`） |
+| 语言 | Zig `0.17.0-dev.1422+e863bf3be`（参考同 workspace 下 `zigmodu`） |
 | 构建系统 | 原生 `zig build`（`build.zig` + `build.zig.zon`） |
 | 许可证 | Apache License 2.0（与上游参考保持一致，保留 `_ref/wechat/LICENSE`） |
 | 运行目标 | 静态库 + 可执行示例 |
@@ -346,8 +346,21 @@ const oa = wc.getOfficialAccount(cfg);
 - **Credential 抽象**：`Fetcher` 函数指针让所有微信服务端交互可被 stub，测试无需真实 HTTP；JSON 响应结构体所有字段都有默认值，能同时容忍成功响应与 `errcode != 0` 的失败响应。
 - **TLS / PKCS#12 / mTLS**：`util.pkcs12.zig` 已实现最小 PKCS#12 解析（PBES2/PBKDF2/AES-256-CBC），`util.rsa.zig` 提供 `parseP12` 包装。为接入 mTLS，引入 vendored `httpz.zig` v0.2.0 并本地打补丁：在 `vendor/httpz/src/openssl.zig` 的 `config.Client` 中新增可选 `cert: ?*const CertKeyPair`，握手时调用 `SSL_CTX_use_certificate_PEM` / `SSL_CTX_use_PrivateKey_PEM` 加载客户端证书。`util.http.postXMLWithTLS` 读取 P12 → 解析 PEM → 使用 httpz 完成 HTTPS POST。
 - **外部依赖**：`build.zig.zon` 通过 `vendor/httpz` 本地路径依赖 `httpz.zig`，构建时链接 `-lssl -lcrypto -lc`。这是项目首次引入非 stdlib 依赖，后续如需升级/替换应继续 vendoring 或 fork。
-- **Zig 0.17-dev API 差异（文件 I/O）**：`std.fs.cwd()` 已被移除，统一使用 `std.Io.Dir.cwd()`，并显式传入 `std.Io` 句柄（如 `readFileAlloc` / `openFile` / `createFile` / `deleteFile`）。
 - **测试基础设施**：`src/test_runner.zig` 顶部有一段「编译门」test，强制 `@import` 每个子文件，并在测试体内做 `_ = mod;` 引用 — 否则 0.17-dev 的 dead-strip 可能把带 inline test 的文件排除掉，导致 `zig build test` 报告「All 1 tests passed」假象。
+- **最新增强**：
+  - **httpz.zig 升级**：整合最新版 `vendor/httpz` 及 OpenSSL mTLS 客户端证书增强。
+  - **动态 OpenSSL 路径感知**：`build.zig` 中新增基于 `std.Io.Dir.cwd().access` 的安全目录校验，兼容 macOS Homebrew `/opt/homebrew/opt/openssl@3` 与 `/usr/local/opt/openssl@3`。
+  - **基准测试 (Benchmark)**：新增 `src/util/benchmark.zig` 与 `zig build bench` 命令，实测 SHA1 签名 ~253 ns/op，AES-256-CBC 解密 ~116 ns/op，XML 解析 ~137 ns/op。
+  - **场景示例 (Examples)**：新增 `examples/officialaccount_server.zig`（公众号消息验证与 AES 解密）、`examples/pay_order.zig`（支付统一下单与 BridgeAppConfig 调起签名）、`examples/work_robot.zig`（企微机器人与 JSAPI 实例）。可通过 `zig build run-oa-server` / `zig build run-pay-order` / `zig build run-work-robot` 运行。
+  - **CI/CD**：新增 `.github/workflows/ci.yml` 跨平台自动化测试。
+  - **智能 Token 自动重试与强刷 (P1)**：新增 `isTokenInvalidErrCode` 判断及 `DefaultAccessToken.forceRefresh`，自动清理无效 Token 并重新回源拉取。
+  - **微信支付 v3 拓展 (P2)**：新增 `src/pay/v3/`（`config`, `signer`, `order`, `notify`），实现 v3 HTTP `Authorization: WECHATPAY2-SHA256-RSA2048` 签名头部、小程序/JSAPI 拉起支付 RSA 签名算法及基于 `std.crypto.aead.aes_gcm.Aes256Gcm` 的零 C 依赖通知回调密文解密。
+  - **Web 框架中间件适配 (P2)**：新增 `src/middleware/`（`wechat_handler`），专为 `zfinal` / `zigmodu` 等 Web 框架提供服务端 URL 签名校验 `verifyServerSignature` 与 AES 消息解密 `handleServerMessage`。
+  - **小程序能力扩充**：新增 `src/miniprogram/message/`（`subscribeMessage.send` 订阅消息）与 `src/miniprogram/security/`（`msgSecCheck` 文本内容安全审核）。
+  - **企业微信 Server 校验**：新增 `src/work/server/`（`WorkServer`），支持企业微信回调消息签名 `msg_signature` 校验与 `ReceiveID` (CorpID) 解密验证。
+  - **开发者 API 指南**：创建 `doc/api_guide.md`，提供完整接口使用、方法速查及内存管理的最佳实践手册。
+  - **编译期模板生成器 (`comptime`)**：新增 `src/util/template.zig`（`buildTemplateData`），利用 Zig `comptime` 类型反射，零堆开销将任意平铺 Zig 结构体转换为符合微信规范的 `{"field": {"value": "..."}}` 模板 JSON。
+  - **CLI 开发者诊断工具箱**：升级 `src/main.zig`，适配 Zig 0.17 的 `std.process.Init` 规范，提供 `version`、`verify-sig`（签名快速验证）及 `template-demo`（模版生成调试）。
 
 ---
 

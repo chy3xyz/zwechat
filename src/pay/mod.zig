@@ -6,10 +6,14 @@ const config_mod = @import("config.zig");
 pub const Config = config_mod.Config;
 pub const Pay = @import("pay.zig").Pay;
 pub const Order = @import("order/mod.zig").Order;
+pub const PreOrder = @import("order/mod.zig").PreOrder;
+pub const BridgeConfig = @import("order/mod.zig").BridgeConfig;
+pub const AppConfig = @import("order/mod.zig").AppConfig;
 pub const Refund = @import("refund/mod.zig").Refund;
 pub const Notify = @import("notify/mod.zig").Notify;
 pub const Transfer = @import("transfer/mod.zig").Transfer;
 pub const Redpacket = @import("redpacket/mod.zig").Redpacket;
+pub const v3 = @import("v3/mod.zig");
 
 test "pay 模块导出" {
     _ = Pay;
@@ -18,4 +22,5 @@ test "pay 模块导出" {
     _ = Notify;
     _ = Transfer;
     _ = Redpacket;
+    _ = v3;
 }

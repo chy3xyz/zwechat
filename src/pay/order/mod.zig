@@ -10,6 +10,7 @@ const util_param = @import("../../util/param.zig");
 const util_crypto = @import("../../util/crypto.zig");
 const util_util = @import("../../util/util.zig");
 const util_xml = @import("../../util/xml.zig");
+const util_time = @import("../../util/time.zig");
 
 /// 下单参数。
 pub const Params = struct {
@@ -237,7 +238,7 @@ pub const Order = struct {
 
     /// 构造 APP 拉起支付参数。
     pub fn bridgeAppConfig(self: *Self, allocator: std.mem.Allocator, pre_order: PreOrder) !AppConfig {
-        const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{std.time.timestamp()});
+        const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{util_time.getCurrTS()});
         defer allocator.free(timestamp);
 
         const nonce_str = try util_util.randomStr(allocator, 32);
@@ -245,7 +246,8 @@ pub const Order = struct {
 
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(allocator);
-        try buf.writer.print(
+        try buf.print(
+            allocator,
             "appid={s}&noncestr={s}&package=Sign=WXPay&partnerid={s}&prepayid={s}&timestamp={s}&key={s}",
             .{ self.cfg.app_id, nonce_str, self.cfg.mch_id, pre_order.prepay_id, timestamp, self.cfg.key },
         );
@@ -267,7 +269,7 @@ pub const Order = struct {
     /// 构造 JS SDK 拉起支付参数。
     pub fn bridgeConfig(self: *Self, allocator: std.mem.Allocator, p: Params, pre_order: PreOrder) !BridgeConfig {
         _ = p;
-        const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{std.time.timestamp()});
+        const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{util_time.getCurrTS()});
         defer allocator.free(timestamp);
 
         const nonce_str = try util_util.randomStr(allocator, 32);
@@ -276,7 +278,7 @@ pub const Order = struct {
         // 签名串：appId=...&nonceStr=...&package=prepay_id=...&signType=...&timeStamp=...&key=...
         var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(allocator);
-        try buf.writer.print("appId={s}&nonceStr={s}&package=prepay_id={s}&signType=MD5&timeStamp={s}&key={s}", .{
+        try buf.print(allocator, "appId={s}&nonceStr={s}&package=prepay_id={s}&signType=MD5&timeStamp={s}&key={s}", .{
             self.cfg.app_id,
             nonce_str,
             pre_order.prepay_id,

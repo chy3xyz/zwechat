@@ -14,6 +14,7 @@ pub const rsa = @import("rsa.zig");
 pub const asn1 = @import("asn1.zig");
 pub const pkcs12 = @import("pkcs12.zig");
 pub const xml = @import("xml.zig");
+pub const template = @import("template.zig");
 
 test "util 模块全部导出" {
     _ = http;
@@ -27,4 +28,5 @@ test "util 模块全部导出" {
     _ = asn1;
     _ = pkcs12;
     _ = xml;
+    _ = template;
 }

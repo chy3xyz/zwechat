@@ -25,6 +25,8 @@ pub const Invoice = @import("invoice/mod.zig").Invoice;
 pub const AddressList = @import("addresslist/mod.zig").AddressList;
 pub const AppChat = @import("appchat/mod.zig").AppChat;
 pub const Robot = @import("robot/mod.zig").Robot;
+pub const server = @import("server/mod.zig");
+pub const WorkServer = server.WorkServer;
 
 test "work 模块全部导出" {
     try std.testing.expect(@hasField(Config, "corp_id"));

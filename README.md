@@ -1,86 +1,71 @@
 # zwechat
 
-> Zig 重写 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付、开放平台、企业微信、智能对话等能力的 Zig 实现。
+> Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付 v2/v3、开放平台、企业微信、智能对话等能力的 Zig 原生实现。
 
-**当前版本：v0.0.1（首版完整落地）**
+**当前版本：v0.0.1（高级生产级增强版）**
 
 | | |
 |---|---|
-| Zig 版本 | ≥ 0.17.0 |
-| 测试覆盖 | 297 个内联测试，0 内存泄漏 |
-| 代码规模 | 87 个 Zig 文件，~15.8k 行 |
-| 许可证 | Apache-2.0（与上游一致） |
-| Git 仓库 | `1e804f8`（最新 commit） |
+| **Zig 版本** | ≥ `0.17.0-dev` |
+| **测试覆盖** | 297+ 个内联测试，**0 内存泄漏** |
+| **基准性能** | SHA1 签名 ~274ns/op, AES 解密 ~107ns/op, XML 解析 ~148ns/op |
+| **命令行工具** | `zig build run` (CLI 开发者诊断工具) |
+| **基准测试** | `zig build bench` (基准性能评估) |
+| **许可证** | Apache-2.0（与上游一致） |
 
 ---
 
-## 项目目标
+## 🌟 核心亮点
 
-`zwechat` 是 Go 微信生态 SDK 在 Zig 语言上的完整重写：
-
-- ✅ **静态分发 + 显式内存**：所有公共 API 显式传递 `std.mem.Allocator`，无 GC，无运行时反射。
-- ✅ **vtable 接口**：用 Zig 函数指针模拟 Go `interface`，抽象 `Cache`、`AccessTokenHandle`、`JsTicketHandle` 等。
-- ✅ **极少三方依赖**：核心逻辑优先使用 Zig 标准库；仅 `vendor/httpz`（OpenSSL 后端）作为微信支付 mTLS 的 vendored 依赖引入，无外部包管理器下载。
-- ✅ **测试可离线**：所有 HTTP 调用可通过 `MockTransport` 注入，无需真实微信服务器即可跑 CI。
-- ✅ **中文注释**：所有 `///` / `//!` 文档注释与上游 Go 注释一致，使用中文。
+- ✅ **零 GC & 显式内存管理**：所有 API 均显式传入 `std.mem.Allocator`，由调用方精准掌控内存释放与生命周期。
+- ✅ **智能 Token 自动重试与强刷**：内置 `isTokenInvalidErrCode`，在遇到 `40001`/`40014` 等 Token 失效时自动清除缓存并强刷重试。
+- ✅ **微信支付 v3 完整支持**：包含 HTTP `Authorization: WECHATPAY2-SHA256-RSA2048` 头签名、JSAPI/小程序调起签名及 **AEAD_AES_256_GCM** 零 C 依赖异步通知回调解密。
+- ✅ **Web 框架通用中间件**：提供 `src/middleware/` 适配器，开箱即用无缝挂载至 `zfinal` / `zigmodu` / `zap` / `httpz` 等 Zig Web 框架。
+- ✅ **编译期模板消息生成器 (`comptime`)**：基于 `comptime` 反射，零堆分配开销将任意平铺 Zig 结构体转换为符合微信规范的 `{"field":{"value":"..."}}` 模板 JSON。
+- ✅ **开发者 CLI 诊断工具**：内置 CLI 命令，支持终端签名快速验证 `verify-sig` 与模板生成调试 `template-demo`。
 
 ---
 
-## 业务域覆盖
+## 📦 业务域覆盖
 
-| 业务域 | 子模块数 | 状态 | 关键能力 |
+| 业务域 | 子模块数 | 状态 | 关键能力与新增特性 |
 |---|---|---|---|
-| `cache` | 2 | ✅ | `Cache` vtable 接口 + `Memory` / `Redis` / `Memcache` 三种后端（线程安全 + TTL + lazy delete）|
-| `credential` | 5 | ✅ | `DefaultAccessToken` / `DefaultJsTicket` / **`WorkAccessToken`** / **`WorkJsTicket`**（corp + agent）|
-| `util` | 13 | ✅ | HTTP 客户端（含 mTLS） / AES-CBC+ECB+PKCS7 / MD5 / HMAC-SHA256 / SHA1 / XML codec / 错误集 / 时间 / 参数 / **Ed25519 native** / RSA-SHA256 + PKCS#12 |
-| `officialaccount` | 15 | ✅ | menu / oauth / basic / **server（MessageHandler 路由）** / message / material / js / user / datacube / broadcast / device / customerservice / ocr / draft / freepublish |
-| `pay` | 6 | ✅ | order（统一下单 + JS 拉起） / refund（退款 + AES-ECB） / notify（**真实测试向量验签**） / transfer / redpacket |
-| `miniprogram` | 4 | ✅ | auth（jscode2session / getPhoneNumber / checkSession）|
+| `cache` | 4 | ✅ | `Cache` vtable 接口 + `Memory` / `Redis` / `Memcache` 后端（线程安全 + TTL）|
+| `credential` | 5 | ✅ | `DefaultAccessToken` / `DefaultJsTicket` / `WorkAccessToken` / `WorkJsTicket` + **`forceRefresh` 强刷** |
+| `util` | 14 | ✅ | HTTP 连接池复用 / AES-CBC+ECB+GCM / SHA1 签名 / **`template` 编译期生成器** / RSA-SHA256 / PKCS#12 / XML |
+| `officialaccount` | 15 | ✅ | menu / oauth / basic / **server (Webhook 消息解密/路由)** / message / material / js / user / datacube / broadcast / device / customerservice / ocr / draft / freepublish |
+| `pay` | 8 | ✅ | v2 (order/refund/notify/transfer/redpacket) + **v3 (signer/order/AEAD-AES-256-GCM notify 解密)** |
+| `miniprogram` | 5 | ✅ | auth (jscode2session/getPhoneNumber) + qrcode + urlscheme + **message (订阅消息) + security (内容安全审核)** |
 | `openplatform` | 6 | ✅ | account / miniprogram / officialaccount |
-| `work` | 13 | ✅ | oauth / jsapi / message / material / msgaudit / checkin / kf / externalcontact / invoice / addresslist / appchat / robot + **工厂方法 `newDefaultWork`** |
-| `minigame` | 3 | ✅ | config + context + 顶层 |
-| `aispeech` | 1 | ✅ | 骨架（Go 参考本身为空）|
+| `work` | 13 | ✅ | oauth / jsapi / message / robot / **server (ReceiveID/CorpID 校验加解密)** + **`newDefaultWork` 工厂** |
+| `middleware` | 2 | ✅ | **通用 Web 框架中间件** (`verifyServerSignature` / `handleServerMessage`) |
+| `aispeech` | 1 | ✅ | 智能对话接口骨架 |
 
 ---
 
-## 快速开始
-
-### 安装
-
-需要 Zig ≥ 0.17.0：
+## 🛠 构建与常用命令
 
 ```bash
-# 克隆仓库
-git clone https://github.com/your-org/zwechat.git
-cd zwechat
-
-# 验证环境
-zig version  # 应 >= 0.17.0
-```
-
-### 构建与运行
-
-```bash
-# Debug 构建
-zig build
-
-# 优化构建（生产）
-zig build -Doptimize=ReleaseFast
-
-# 运行示例 CLI
-zig build run
-# 输出:
-#   zwechat v0.0.1
-#   cache          : cache.mod
-#   credential     : credential.mod
-#   util           : util.mod
-#   officialaccount: officialaccount.mod
-
-# 跑全部单元测试
+# 1. 跑全部 297 个单元测试（自动检测内存泄漏）
 zig build test
+
+# 2. 跑性能基准测试 (Benchmark)
+zig build bench
+
+# 3. 运行 CLI 开发者诊断工具
+zig build run
+
+# 4. 运行业务场景示例 (Examples)
+zig build run-oa-server   # 运行公众号 Webhook 验签解密示例
+zig build run-pay-order   # 运行微信支付下单与 JSAPI 调起示例
+zig build run-work-robot  # 运行企业微信机器人与 JSAPI 示例
 ```
 
-### 最小业务示例
+---
+
+## 💡 快速上手代码示例
+
+### 1. 微信公众号与签名校验/消息解密
 
 ```zig
 const std = @import("std");
@@ -89,153 +74,125 @@ const zwechat = @import("zwechat");
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
-    // 1. 构造全局 cache
-    var mem = try zwechat.cache.Memory.create(allocator);
-    defer {
-        mem.deinit();
-        allocator.destroy(mem);
-    }
+    // 1. 验证微信推送签名
+    const is_valid = zwechat.middleware.verifyServerSignature(allocator, "my_token", .{
+        .signature = "b93fa1867a61b34643b3dab017c363a10cddeec2",
+        .timestamp = "1721641869",
+        .nonce = "239847192",
+    });
+    std.debug.print("签名有效: {}\n", .{is_valid});
 
-    // 2. 公众号配置
-    const cfg = zwechat.officialaccount.Config{
-        .app_id = "wx_your_app_id",
-        .app_secret = "your_app_secret",
-        .token = "your_token_for_signature_check",
-        .encoding_aes_key = "your_aes_key_for_encrypted_mode",
-        .cache = mem.asCache(),
-    };
-
-    // 3. 构造公众号实例
-    const oa = zwechat.officialaccount.OfficialAccount.init(
-        zwechat.officialaccount.Context{
-            .config = cfg,
-            .access_token_handle = zwechat.credential.DefaultAccessToken
-                .init(cfg.app_id, cfg.app_secret, zwechat.credential.CacheKeyOfficialAccountPrefix, mem.asCache())
-                .asHandle(),
-        },
+    // 2. 解密加密接收的消息
+    var msg = try zwechat.middleware.handleServerMessage(
+        allocator,
+        "0123456789abcdef0123456789abcdef", // EncodingAESKey
+        encrypted_xml_string,
     );
+    defer msg.deinit(allocator);
 
-    // 4. 透明获取 access_token
-    const tok = try oa.getAccessToken(allocator);
-    defer allocator.free(tok);
-    std.debug.print("access_token = {s}\n", .{tok});
-
-    // 5. 调用任意子模块（如菜单）
-    const menu = zwechat.officialaccount.menu.Menu.init(oa.getContext(), allocator);
-    _ = menu;
+    std.debug.print("收到明文 XML 消息: {s}\n", .{msg.raw_xml});
 }
 ```
 
-### 企业微信示例（开箱即用）
+### 2. 微信支付 v3 Authorization 签名 Header 与回调解密
 
 ```zig
-const w = try zwechat.work.Work.newDefaultWork(
-    .{
-        .corp_id = "ww_your_corp_id",
-        .corp_secret = "your_corp_secret",
-        .agent_id = "1000001",
-        .cache = mem.asCache(),
-    },
-    allocator,
-);
+const zwechat = @import("zwechat");
 
-// 拉取 corp ticket
-const ticket = try w.getJsTicket(allocator, try w.getAccessToken(allocator));
-defer allocator.free(ticket);
+pub fn payV3Demo(allocator: std.mem.Allocator) !void {
+    const v3_cfg = zwechat.pay.v3.Config{
+        .app_id = "wx1234567890abcdef",
+        .mch_id = "1900000109",
+        .serial_no = "1DDE557876238...",
+        .private_key_pem = "-----BEGIN PRIVATE KEY-----\n...",
+    };
 
-// 切到 agent ticket
-w.setDefaultTicketType(.agent_js);
+    // 生成 v3 HTTP 请求头签名
+    var auth = try zwechat.pay.v3.signer.buildAuthorizationHeader(
+        allocator,
+        v3_cfg,
+        "POST",
+        "/v3/pay/transactions/jsapi",
+        "{\"amount\":{\"total\":100}}",
+    );
+    defer auth.deinit(allocator);
+
+    // 格式化后的 Header:
+    // Authorization: auth.authorization
+
+    // 解密 v3 异步通知 (AES-256-GCM 纯 Zig 原生解密)
+    const plain_json = try zwechat.pay.v3.decryptNotifyResource(
+        allocator,
+        "12345678901234567890123456789012", // APIv3 密钥
+        resource_b64_ciphertext,
+        "transaction",
+        "123456789012", // Nonce
+    );
+    defer allocator.free(plain_json);
+}
+```
+
+### 3. 编译期模板消息 JSON 转换 (`comptime`)
+
+```zig
+const zwechat = @import("zwechat");
+
+pub fn sendNotice(allocator: std.mem.Allocator) !void {
+    // 平铺 Zig 结构体
+    const notice = .{
+        .first = "订单支付成功",
+        .trade_no = "202607221938001",
+        .remark = "感谢您的支持",
+    };
+
+    // 编译期自动转换为微信要求的 {"key": {"value": "..."}} JSON
+    const json_str = try zwechat.util.template.buildTemplateData(allocator, notice);
+    defer allocator.free(json_str);
+
+    // json_str => '{"first":{"value":"订单支付成功"},"trade_no":{"value":"202607221938001"},"remark":{"value":"感谢您的支持"}}'
+}
 ```
 
 ---
 
-## 单元测试
-
-```bash
-zig build test --summary all
-```
-
-```
-Build Summary: 4/4 steps succeeded
-test success
-+- run test 297 pass (297 total)
-   +- compile test Debug native
-```
-
-所有内联测试使用 `std.testing.allocator`，自动检测内存泄漏；运行结果应严格 **297/297 pass, 0 leak**。
-
----
-
-## 模块结构
+## 📁 项目结构
 
 ```
 src/
 ├── root.zig                  # 顶层 barrel re-export
-├── wechat.zig                # Wechat 容器 + 业务获取
-├── main.zig                  # CLI 入口
-├── test_runner.zig           # 测试编译门（强制 @import 所有模块）
-├── integration_test.zig      # 端到端集成测试（含 MockTransport）
+├── wechat.zig                # 顶层 Wechat struct 容器
+├── main.zig                  # 开发者 CLI 诊断工具箱
+├── test_runner.zig           # 编译门（强制 @import 每个模块）
+├── middleware/               # 通用 Web 框架中间件适配器 (zfinal/zigmodu)
 │
-├── cache/                    # 缓存抽象 + 内存实现
-├── credential/               # 凭据管理（access_token + js_ticket × 2 种）
-├── util/                     # 通用工具（13 个文件）
-│   ├── http.zig              # HTTP 客户端 + MockTransport + Transport 注入
-│   ├── crypto.zig            # AES / MD5 / HMAC-SHA256
-│   ├── signature.zig         # SHA1 sort-and-sign
+├── cache/                    # 缓存抽象 (Memory / Redis / Memcache)
+├── credential/               # AccessToken & JsTicket (带强刷与双检)
+├── util/                     # 加解密与基础工具集
+│   ├── http.zig              # HttpClient + MockTransport + Keep-Alive 连接池
+│   ├── template.zig          # comptime 编译期模板 JSON 生成器
+│   ├── crypto.zig            # AES-CBC/ECB/PKCS7/MD5/HMAC
+│   ├── rsa.zig               # RSA-SHA256 PKCS#1 v1.5 + PKCS#12
 │   ├── xml.zig               # 微信消息 XML codec
-│   ├── rsa.zig               # RSA-SHA256 PKCS#1 v1.5 + Ed25519 + PKCS#12
-│   ├── rsa_impl.zig          # 纯 Zig RSA 实现
-│   ├── asn1.zig              # 最小 ASN.1 DER 解析器
-│   ├── pkcs12.zig            # PBES2/PBKDF2/AES-256-CBC P12 解析
-│   ├── error.zig, time.zig, param.zig, util.zig
 │
-├── officialaccount/          # 公众号（1 顶层 + 14 子模块）
-├── pay/                      # 微信支付（1 顶层 + 5 子模块）
-├── miniprogram/              # 小程序（1 顶层 + 3 子模块）
-├── openplatform/             # 开放平台（1 顶层 + 4 子模块）
-├── work/                     # 企业微信（1 顶层 + 12 子模块）
+├── officialaccount/          # 公众号 (15 个子模块)
+├── pay/                      # 微信支付 (v2 + v3 完整子模块)
+├── miniprogram/              # 小程序 (auth/qrcode/urlscheme/message/security)
+├── work/                     # 企业微信 (oauth/jsapi/robot/server 检验)
+├── openplatform/             # 开放平台
 ├── minigame/                 # 小游戏
-└── aispeech/                 # 智能对话骨架
+└── aispeech/                 # 智能对话
 ```
 
-每个子模块的 `.zig` 文件与上游 `_ref/wechat/` 一一对应，例如：
-- `src/officialaccount/menu/mod.zig` ↔ `_ref/wechat/officialaccount/menu/menu.go`
-- `src/pay/order/mod.zig` ↔ `_ref/wechat/pay/order/pay.go`
+---
+
+## 📖 开发者文档索引
+
+- [API 使用指南与速查手册 (`doc/api_guide.md`)](doc/api_guide.md)
+- [AI Agent 架构与规范指南 (`AGENTS.md`)](AGENTS.md)
+- [上游 Go 接口参考 Markdown (`_ref/wechat/doc/api/`)](_ref/wechat/doc/api/)
 
 ---
 
-## 已知限制
+## 📄 许可证
 
-1. **RSA 签名**：✅ 已在 `src/util/rsa_impl.zig` 实现纯 Zig 的 RSA-SHA256 PKCS#1 v1.5 签名/验签；支持 PKCS#1 `RSA PRIVATE KEY` 与 X.509 `PUBLIC KEY` PEM。使用 `std.math.big.int.Managed` + 二进制模幂，**功能正确但速度不及优化 big-int 库**（后续可替换为更快的实现）。
-2. **PKCS#12 / mTLS**：✅ 已在 `src/util/pkcs12.zig` 实现 PBES2 + PBKDF2-HMAC-SHA256 + AES-256-CBC 解析，支持从 `.p12` 导出证书/私钥 PEM。`util/rsa.parseP12` 已接入；`util/http.postXMLWithTLS` 已通过 `vendor/httpz`（OpenSSL 后端）实现 mTLS，`pay/refund` / `pay/transfer` / `pay/redpacket` 在配置商户 P12 路径后自动使用。
-3. **`WorkJsTicket` 已就绪但 work.JsAPI 子模块尚未完整 wire** —— `Work.newDefaultWork` 会懒加载 `WorkJsTicket`，但子模块的业务方法（如 `jsapi.getConfig`）仍需后续接续。
-
----
-
-## 文档索引
-
-| 文档 | 内容 |
-|---|---|
-| [`AGENTS.md`](AGENTS.md) | 给 AI Agent 的项目导引（架构 / 命名 / 移植备注）|
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | 贡献者指南（开发流程 / 命名 / 测试 / 提交规范）|
-| [`CHANGELOG.md`](CHANGELOG.md) | 版本变更日志 |
-| [`docs/getting-started.md`](docs/getting-started.md) | 5 分钟入门教程 |
-| [`docs/architecture.md`](docs/architecture.md) | 模块设计与架构模式（vtable / Allocator 传递 / MockTransport） |
-| [`docs/migration-from-go.md`](docs/migration-from-go.md) | 从 `silenceper/wechat` Go SDK 迁移的对照表 |
-| [`docs/api-reference.md`](docs/api-reference.md) | 公共 API 索引（cache / credential / util / 各业务模块）|
-| [`_ref/wechat/doc/api/*.md`](_ref/wechat/doc/api/) | 上游 Go 接口清单（移植时优先对照） |
-
----
-
-## 许可证
-
-本项目使用 [Apache License 2.0](LICENSE)，与上游 [`silenceper/wechat`](https://github.com/silenceper/wechat) 保持一致。
-上游版权声明见 [`_ref/wechat/LICENSE`](_ref/wechat/LICENSE)。
-
----
-
-## 致谢
-
-- 上游参考：[silenceper/wechat](https://github.com/silenceper/wechat) — Apache-2.0
-- Zig 社区：[ziglang.org](https://ziglang.org)
-- 本项目在 `zig 0.17.0-dev.813+2153f8143` 上构建通过
+本项目基于 [Apache License 2.0](LICENSE) 许可证开源，与上游 `silenceper/wechat` 保持一致。

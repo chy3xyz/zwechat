@@ -36,6 +36,8 @@ pub const pay = @import("pay/mod.zig");
 pub const miniprogram = @import("miniprogram/mod.zig");
 /// 微信开放平台业务模块。
 pub const openplatform = @import("openplatform/mod.zig");
+/// 常用 Web 框架 (zfinal/zigmodu) 回调中间件。
+pub const middleware = @import("middleware/mod.zig");
 
 test "version 与 build.zig.zon 保持一致" {
     try std.testing.expectEqualStrings("0.0.1", version);
@@ -46,4 +48,5 @@ test "root 导出所有业务模块" {
     try std.testing.expect(@hasDecl(@This(), "pay"));
     try std.testing.expect(@hasDecl(@This(), "miniprogram"));
     try std.testing.expect(@hasDecl(@This(), "openplatform"));
+    try std.testing.expect(@hasDecl(@This(), "middleware"));
 }

@@ -68,6 +68,14 @@ pub fn decodeWithCommonError(
     return parseCommonError(allocator, response, api_name);
 }
 
+/// 判断错误码是否属于 access_token 失效/过期类型（如 40001, 40014, 41001, 42001）。
+pub fn isTokenInvalidErrCode(errcode: i64) bool {
+    return switch (errcode) {
+        40001, 40014, 41001, 42001 => true,
+        else => false,
+    };
+}
+
 /// 同 `decodeWithCommonError`，但在出现 errcode != 0 时直接返回 `WechatError.ApiError` 错误。
 pub fn parseCommonError(
     allocator: std.mem.Allocator,
@@ -189,4 +197,13 @@ test "handleFileResponse 对普通响应原样返回" {
     const body = "<xml>ok</xml>";
     const result = try handleFileResponse(body, "X");
     try std.testing.expectEqualSlices(u8, body, result);
+}
+
+test "isTokenInvalidErrCode 准确识别 Token 过期错误码" {
+    try std.testing.expect(isTokenInvalidErrCode(40001));
+    try std.testing.expect(isTokenInvalidErrCode(40014));
+    try std.testing.expect(isTokenInvalidErrCode(41001));
+    try std.testing.expect(isTokenInvalidErrCode(42001));
+    try std.testing.expect(!isTokenInvalidErrCode(40013));
+    try std.testing.expect(!isTokenInvalidErrCode(0));
 }

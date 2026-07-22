@@ -8,6 +8,9 @@ const Context = @import("context/mod.zig").Context;
 pub const Auth = @import("auth/mod.zig").Auth;
 pub const qrcode = @import("qrcode/mod.zig");
 pub const urlscheme = @import("urlscheme/mod.zig");
+pub const message = @import("message/mod.zig");
+pub const security = @import("security/mod.zig");
+
 pub const MiniProgram = struct {
     ctx: Context,
     auth_instance: ?Auth = null,
@@ -40,6 +43,16 @@ pub const MiniProgram = struct {
     /// 懒加载 URLScheme 子模块。
     pub fn getURLScheme(self: *Self) urlscheme.URLScheme {
         return urlscheme.URLScheme.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 Message 订阅消息子模块。
+    pub fn getMessage(self: *Self) message.Message {
+        return message.Message.init(&self.ctx);
+    }
+
+    /// 懒加载 Security 内容安全审核子模块。
+    pub fn getSecurity(self: *Self) security.Security {
+        return security.Security.init(&self.ctx);
     }
 };
 
