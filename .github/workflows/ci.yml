@@ -19,10 +19,22 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.17.0-dev.1567+f0354179a
+      - name: Install Zig
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIG_VERSION="0.17.0-dev.1567+f0354179a"
+          case "$RUNNER_OS" in
+            Linux)   PLAT="x86_64-linux";  EXT="tar.xz" ;;
+            macOS)   PLAT="aarch64-macos"; EXT="tar.xz" ;;
+            *) echo "unsupported runner os: $RUNNER_OS"; exit 1 ;;
+          esac
+          FILE="zig-${PLAT}-${ZIG_VERSION}.${EXT}"
+          curl -fL --retry 3 --retry-delay 2 -o "$FILE" "https://ziglang.org/builds/$FILE"
+          mkdir -p "$HOME/zig"
+          tar -xf "$FILE" -C "$HOME/zig" --strip-components=1
+          "$HOME/zig/zig" version
+          echo "$HOME/zig" >> "$GITHUB_PATH"
 
       - name: Cache Zig
         uses: actions/cache@v4
@@ -64,10 +76,18 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.17.0-dev.1567+f0354179a
+      - name: Install Zig
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIG_VERSION="0.17.0-dev.1567+f0354179a"
+          PLAT="x86_64-windows"
+          FILE="zig-${PLAT}-${ZIG_VERSION}.zip"
+          curl -fL --retry 3 --retry-delay 2 -o "$FILE" "https://ziglang.org/builds/$FILE"
+          python -m zipfile -e "$FILE" "$HOME"
+          mv "$HOME/zig-${PLAT}-${ZIG_VERSION}" "$HOME/zig"
+          "$HOME/zig/zig.exe" version
+          echo "$HOME/zig" >> "$GITHUB_PATH"
 
       - name: Setup MSYS2 + OpenSSL
         uses: msys2/setup-msys2@v2
