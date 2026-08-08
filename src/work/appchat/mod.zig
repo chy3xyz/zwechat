@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/appchat — 应用群（群信息 / 推送）
 //!
 //! 对应 `_ref/wechat/work/appchat/`：企业微信应用群相关接口。

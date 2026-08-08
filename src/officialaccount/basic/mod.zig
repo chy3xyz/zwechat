@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/basic — 基础接口
 //!
 //! 对应 `_ref/wechat/officialaccount/basic/basic.go`：获取微信服务器 IP 列表 + 清理接口配额。

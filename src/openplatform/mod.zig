@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! openplatform — 微信开放平台（第三方平台）顶层模块
 //!
 //! 对应 `_ref/wechat/openplatform/openplatform.go` 的 `OpenPlatform` struct：

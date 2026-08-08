@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! credential/work_js_ticket — 企业微信 JsAPI ticket
 //!
 //! 对应 `_ref/wechat/credential/work_js_ticket.go`：支持 corp / agent 两种 ticket。

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! miniprogram/urlscheme — 小程序 URL Scheme
 //!
 //! 对应 `_ref/wechat/miniprogram/urlscheme/urlscheme.go`：

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! util/time — 时间工具
 //!
 //! 对应 `_ref/wechat/util/time.go`：仅提供 `GetCurrTS`（当前 Unix 秒）。

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! pay/pay — 微信支付顶层 struct
 //!
 //! 对应 `_ref/wechat/pay/pay.go`：聚合 order/refund/notify/transfer/redpacket 子模块。

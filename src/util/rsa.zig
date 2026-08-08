@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! util/rsa — RSA 签名 / 验签 / 解密 + PKCS#12 工具
 //!
 //! 对应 `_ref/wechat/util/rsa.go`：RSA-SHA256 PKCS#1 v1.5 签名 + 验签。

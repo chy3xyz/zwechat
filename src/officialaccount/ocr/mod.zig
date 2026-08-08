@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/ocr — OCR（身份证 / 银行卡 / 行驶证 / 驾驶证）
 
 const std = @import("std");

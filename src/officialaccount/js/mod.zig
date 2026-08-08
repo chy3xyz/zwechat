@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/js — JS-SDK 配置
 //!
 //! 对应 `_ref/wechat/officialaccount/js/js.go`：根据 jsapi_ticket + 当前 URL 计算

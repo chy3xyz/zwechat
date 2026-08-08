@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/invoice — 电子发票
 //!
 //! 对应 `_ref/wechat/work/invoice/`：查询电子发票 / 批量查询电子发票

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! util/rsa_impl — 纯 Zig 实现的 RSA-SHA256 PKCS#1 v1.5 签名 / 验签 / 解密
 //!
 //! 用于填补 Zig 0.17 标准库没有 RSA 的空白。当前实现：

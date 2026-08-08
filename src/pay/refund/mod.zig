@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! pay/refund — 退款
 
 const std = @import("std");

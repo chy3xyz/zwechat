@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! pay/v3/signer — 微信支付 v3 HTTP 请求头签名算法 (RSA-SHA256)
 //!
 //! 根据微信支付 v3 官方文档计算 `Authorization: WECHATPAY2-SHA256-RSA2048 ...` 标头：

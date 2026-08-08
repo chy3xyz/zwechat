@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! 企业微信群机器人 (Robot) 消息推送示例
 //!
 //! 演示功能：

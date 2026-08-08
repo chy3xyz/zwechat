@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! pay/v3 — 微信支付 v3 模块入口
 //!
 //! 包含 API v3 Config、Authorization 签名器及 JSAPI/小程序拉起支付。

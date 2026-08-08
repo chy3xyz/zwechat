@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! minigame/context — 微信小游戏调用上下文
 //!
 //! 对应 `_ref/wechat/minigame/`：上游 Go 侧仅有 README；本 Zig 落地

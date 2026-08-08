@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/broadcast — 群发
 //!
 //! 提供按标签 / 按 openid 列表的群发接口（文本 / 图文 / 语音 / 图片 / 视频 / 卡券）。

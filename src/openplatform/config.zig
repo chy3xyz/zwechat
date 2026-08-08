@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! openplatform/config — 微信开放平台（第三方平台）配置
 //!
 //! 对应 `_ref/wechat/openplatform/config/config.go` 的 `Config`：

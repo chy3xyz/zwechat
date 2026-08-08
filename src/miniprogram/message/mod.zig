@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! miniprogram/message — 微信小程序订阅消息 (subscribeMessage)
 
 const std = @import("std");

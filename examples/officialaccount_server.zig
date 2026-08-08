@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! 微信公众号服务端消息接收与被动回复示例
 //!
 //! 演示功能：

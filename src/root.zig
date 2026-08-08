@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! zwechat — 微信开放接口 SDK（Zig 重写版）
 //!
 //! 对应 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，

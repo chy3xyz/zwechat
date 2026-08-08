@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/message — 应用消息推送
 //!
 //! 对应 `_ref/wechat/work/message/`：实现企业微信"发送应用消息"接口

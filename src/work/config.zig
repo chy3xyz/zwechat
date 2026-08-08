@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/config — 企业微信配置
 //!
 //! 对应 `_ref/wechat/work/config/config.go` 的 `Config`：

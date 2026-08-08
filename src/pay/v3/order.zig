@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! pay/v3/order — 微信支付 v3 统一下单与小程序/JSAPI 调起参数
 //!
 //! 支持前端拉起支付的核心签名算法：

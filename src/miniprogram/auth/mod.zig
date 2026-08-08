@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! miniprogram/auth — 小程序登录 / 用户信息
 //!
 //! 对应 `_ref/wechat/miniprogram/auth/auth.go`：jscode2session / getPhoneNumber / checkSession 等。

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! credential — 凭据管理（access_token / js_ticket）
 //!
 //! 对应 `_ref/wechat/credential/`：默认从微信服务端获取 token 并缓存，

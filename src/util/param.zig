@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! util/param — 参数排序
 //!
 //! 对应 `_ref/wechat/util/param.go` 的 `OrderParam`：按 key 升序拼接成 `k1=v1&k2=v2&...`，

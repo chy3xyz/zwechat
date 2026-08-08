@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! pay/redpacket — 现金红包
 
 const std = @import("std");

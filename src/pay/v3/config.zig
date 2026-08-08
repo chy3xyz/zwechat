@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! pay/v3/config — 微信支付 v3 规范配置
 //!
 //! 包含 AppID、商户号 MchID、商户 APIv3 密钥 Key、RSA 私钥 PEM 以及商户证书序列号 SerialNo。

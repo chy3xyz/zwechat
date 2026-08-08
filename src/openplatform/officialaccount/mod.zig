@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! openplatform/officialaccount — 代公众号实现业务（骨架）
 //!
 //! 对应 `_ref/wechat/openplatform/officialaccount/`：在 Go SDK 中聚合

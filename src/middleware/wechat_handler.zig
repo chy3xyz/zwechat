@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! middleware/wechat_handler — 微信回调服务中间件
 //!
 //! 专为 `zfinal` / `zigmodu` 等 Web 框架及标准 HTTP Handler 设计：

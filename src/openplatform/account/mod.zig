@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! openplatform/account — 开放平台账号管理
 //!
 //! 对应 `_ref/wechat/openplatform/account/account.go`：在 Go SDK 中是 TODO

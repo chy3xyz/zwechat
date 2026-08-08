@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/kf — 微信客服
 //!
 //! 对应 `_ref/wechat/work/kf/`。Go 参考实现的 `NewClient(cfg)` 接受 `*config.Config`

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! miniprogram/config — 小程序配置
 
 const std = @import("std");

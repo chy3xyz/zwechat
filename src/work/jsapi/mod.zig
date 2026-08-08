@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/jsapi — 企业微信 JS-SDK 配置
 //!
 //! 对应 `_ref/wechat/work/jsapi/jsapi.go`：根据 jsapi_ticket + 当前 URL 计算

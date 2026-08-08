@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! 微信支付统一下单与小程序/App调起配置示例
 //!
 //! 演示功能：

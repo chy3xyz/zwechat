@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! openplatform/context — 开放平台（第三方平台）调用上下文
 //!
 //! 对应 `_ref/wechat/openplatform/context/context.go` 的 `Context`：

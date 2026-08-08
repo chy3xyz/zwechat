@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! miniprogram/qrcode — 小程序码（无数量限制）
 //!
 //! 对应 `_ref/wechat/miniprogram/qrcode/qrcode.go`：

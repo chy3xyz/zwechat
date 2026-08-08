@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! pay/order — 微信支付下单 / 查询 / 关闭
 //!
 //! 对应 `_ref/wechat/pay/order/`：实现 V2 统一下单（`unifiedorder`）。

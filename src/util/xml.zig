@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! util/xml — 微信消息格式 XML 编解码（极简）
 //!
 //! 微信推送的 XML 格式：`<xml><key><![CDATA[val]]></key>...</xml>`，层级只有一层。
@@ -45,7 +46,7 @@ pub const XmlDoc = struct {
 /// value 可以是 `<![CDATA[...]]>` 或纯文本。
 ///
 /// 错误集：`Allocator.Error || error{MalformedXml}`。
-pub fn parse(allocator: std.mem.Allocator, input: []const u8) (std.mem.Allocator.Error || error{ MalformedXml })!XmlDoc {
+pub fn parse(allocator: std.mem.Allocator, input: []const u8) (std.mem.Allocator.Error || error{MalformedXml})!XmlDoc {
     // 跳过前导空白
     var pos: usize = 0;
     skipWs(input, &pos);

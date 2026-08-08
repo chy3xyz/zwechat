@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! util/crypto — 加解密工具
 //!
 //! 对应 `_ref/wechat/util/crypto.go`：

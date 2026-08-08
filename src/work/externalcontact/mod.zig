@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/externalcontact — 客户联系（external_userid 管理）
 //!
 //! 对应 `_ref/wechat/work/externalcontact/`：实现按 `external_userid` 查详情

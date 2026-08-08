@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/context — 企业微信调用上下文
 //!
 //! 对应 `_ref/wechat/work/context/context.go` 的 `Context`：

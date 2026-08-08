@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/customerservice — 客服管理
 
 const std = @import("std");

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! wechat — 顶层 Wechat struct
 //!
 //! 对应 `_ref/wechat/wechat.go`：聚合官方账号、小程序、支付、开放平台、

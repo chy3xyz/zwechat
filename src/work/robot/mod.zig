@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/robot — 群机器人 webhook 推送
 //!
 //! 对应 `_ref/wechat/work/robot/`：通过群机器人 `webhook_url` 推送

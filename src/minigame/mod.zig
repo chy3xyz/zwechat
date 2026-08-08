@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! minigame — 微信小游戏顶层模块
 //!
 //! 对应 `_ref/wechat/minigame/`：上游 Go 侧只有 README，没有具体业务实现。

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! aispeech — 智能对话（骨架）
 //!
 //! 对应 `_ref/wechat/aispeech/`：上游 Go 侧目前只有 README（"智能对话"页的

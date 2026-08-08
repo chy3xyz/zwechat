@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! credential/work_access_token — 企业微信 access_token 获取器
 //!
 //! 对应 `_ref/wechat/credential/default_access_token.go` 中的 `WorkAccessToken`：

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! util/error — 通用错误类型与微信接口返回错误解析
 //!
 //! 对应 `_ref/wechat/util/error.go`：
@@ -126,7 +127,7 @@ pub fn decodeWithError(
 }
 
 /// 错误集合：仅在 JSON 解析失败（无法解析为 CommonError 形态）时返回。
-pub const WechatErrorDecodeError = WechatError || error{ OutOfMemory };
+pub const WechatErrorDecodeError = WechatError || error{OutOfMemory};
 
 /// 通用处理微信等接口的返回：响应可能是 JSON 错误，也可能是普通文件/字节流。
 ///

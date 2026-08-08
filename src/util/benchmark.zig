@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! zwechat 基准测试 (Benchmark)
 //!
 //! 包含关键算法与工具函数的性能基准：

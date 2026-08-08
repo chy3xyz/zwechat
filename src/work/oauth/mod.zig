@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/oauth — 企业微信网页授权
 //!
 //! 对应 `_ref/wechat/work/oauth/oauth.go`：构造跳转 URL、code 换 userid、

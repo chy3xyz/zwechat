@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/officialaccount — 公众号顶层实例
 //!
 //! 对应 `_ref/wechat/officialaccount/officialaccount.go` 的 `OfficialAccount` struct。

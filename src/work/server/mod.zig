@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/server — 企业微信回调服务器消息校验与加解密 (`WorkServer`)
 //!
 //! 校验 `msg_signature`（SHA1 over token, timestamp, nonce, encrypt_msg），

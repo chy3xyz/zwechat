@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/oauth — 网页授权
 //!
 //! 对应 `_ref/wechat/officialaccount/oauth/oauth.go`：构建跳转 URL、code 换 token、刷新 token、获取用户信息。

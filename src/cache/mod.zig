@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! cache — 缓存抽象
 //!
 //! 对应 `_ref/wechat/cache/`：定义 `Cache` 接口与 `Memory` 实现（`Redis` / `Memcache`

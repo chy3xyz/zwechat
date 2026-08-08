@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! zwechat — 微信开发者 CLI 调试与诊断工具箱
 //!
 //! 提供客户端及服务端常用的诊断命令：

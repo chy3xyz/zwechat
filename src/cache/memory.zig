@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! cache/memory — 内存缓存实现
 //!
 //! 对应 `_ref/wechat/cache/memory.go`：进程内线程安全的 KV 缓存，支持过期时间（TTL）。

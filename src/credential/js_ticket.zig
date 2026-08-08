@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! credential/js_ticket — 默认 jsapi_ticket 获取器
 //!
 //! 对应 `_ref/wechat/credential/default_js_ticket.go`：先从缓存中取，

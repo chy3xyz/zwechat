@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/freepublish — 发布能力（发布 / 撤回 / 获取 / 获取列表）
 
 const std = @import("std");
@@ -106,6 +107,6 @@ test "FreePublish.init 持有 ctx" {
 }
 
 test "PublishStatus 枚举值" {
-    try std.testing.expectEqual(@as(i32, 0), @intFromEnum(PublishStatus.success));
-    try std.testing.expectEqual(@as(i32, 4), @intFromEnum(PublishStatus.failed));
+    try std.testing.expectEqual(@as(i32, 0), @backingInt(PublishStatus.success));
+    try std.testing.expectEqual(@as(i32, 4), @backingInt(PublishStatus.failed));
 }

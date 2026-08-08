@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/message — 消息相关 API
 //!
 //! 对应 `_ref/wechat/officialaccount/message/`：

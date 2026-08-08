@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! pay/config — 微信支付商户配置
 
 const std = @import("std");

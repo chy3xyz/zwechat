@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! miniprogram/security — 微信小程序内容安全审核 (`security.msgSecCheck` / `imgSecCheck`)
 
 const std = @import("std");

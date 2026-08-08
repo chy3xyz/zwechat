@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! openplatform/miniprogram — 代小程序实现业务（骨架）
 //!
 //! 对应 `_ref/wechat/openplatform/miniprogram/`：在 Go SDK 中聚合

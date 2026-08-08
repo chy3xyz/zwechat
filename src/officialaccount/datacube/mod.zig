@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/datacube — 数据统计
 //!
 //! 提供公众号用户、消息、接口、图文等维度的统计接口。

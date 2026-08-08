@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/material — 素材管理
 //!
 //! 对应 `_ref/wechat/work/material/`：实现临时素材（图片 / 语音 / 视频 / 文件）

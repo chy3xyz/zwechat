@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! util/pkcs12 — 最小 PKCS#12 解析器
 //!
 //! 仅支持微信支付最常见的 P12 生成方式：

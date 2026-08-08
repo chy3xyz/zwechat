@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! cache/memcache — 最小 Memcache 缓存实现
 //!
 //! 对应 `_ref/wechat/cache/memcache.go`：通过 Memcache 文本协议与服务器通信，

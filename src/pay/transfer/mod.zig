@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! pay/transfer — 企业付款到零钱（V2 接口）
 
 const std = @import("std");

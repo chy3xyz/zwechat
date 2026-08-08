@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! util/asn1 — 最小 ASN.1 DER 解析器
 //!
 //! 仅支持本项目所需的最小子集：
@@ -70,7 +71,7 @@ pub const Reader = struct {
     /// 读取一个 SEQUENCE，返回其内容（不检查 tag/constructed，调用方应先 readTag）。
     pub fn readSequenceContent(self: *Reader, len: usize) Error![]const u8 {
         if (self.pos + len > self.data.len) return error.InvalidDer;
-        const seq = self.data[self.pos..self.pos + len];
+        const seq = self.data[self.pos .. self.pos + len];
         self.pos += len;
         return seq;
     }
@@ -81,7 +82,7 @@ pub const Reader = struct {
         if (tag.number != 0x02) return error.InvalidDer;
         const len = try self.readLength();
         if (self.pos + len > self.data.len) return error.InvalidDer;
-        const bytes = self.data[self.pos..self.pos + len];
+        const bytes = self.data[self.pos .. self.pos + len];
         self.pos += len;
         return bytes;
     }
@@ -92,7 +93,7 @@ pub const Reader = struct {
         if (tag.number != 0x04) return error.InvalidDer;
         const len = try self.readLength();
         if (self.pos + len > self.data.len) return error.InvalidDer;
-        const bytes = self.data[self.pos..self.pos + len];
+        const bytes = self.data[self.pos .. self.pos + len];
         self.pos += len;
         return bytes;
     }
@@ -116,7 +117,7 @@ pub const Reader = struct {
         if (tag.number != 0x06) return error.InvalidDer;
         const len = try self.readLength();
         if (self.pos + len > self.data.len) return error.InvalidDer;
-        const oid = self.data[self.pos..self.pos + len];
+        const oid = self.data[self.pos .. self.pos + len];
         self.pos += len;
         return oid;
     }
@@ -134,7 +135,7 @@ pub const Reader = struct {
         const tag = try self.readTag();
         const len = try self.readLength();
         if (self.pos + len > self.data.len) return error.InvalidDer;
-        const content = self.data[self.pos..self.pos + len];
+        const content = self.data[self.pos .. self.pos + len];
         self.pos += len;
         return .{ .tag = tag, .content = content };
     }

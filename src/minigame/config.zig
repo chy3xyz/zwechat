@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! minigame/config — 微信小游戏配置
 //!
 //! 对应 `_ref/wechat/minigame/`：上游 Go 侧只有 README，没有独立 `config` 包，

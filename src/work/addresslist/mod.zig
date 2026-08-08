@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/addresslist — 通讯录（user / department）
 //!
 //! 对应 `_ref/wechat/work/addresslist/`：成员 / 部门的基础读写。

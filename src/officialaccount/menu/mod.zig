@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/menu — 自定义菜单
 //!
 //! 对应 `_ref/wechat/officialaccount/menu/`：提供 12 类按钮构造器 + CRUD API。

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/material — 素材管理
 //!
 //! 对应 `_ref/wechat/officialaccount/material/material.go`：永久素材（图文 / 图片 / 语音 / 视频）的 CRUD。

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! integration_test — 端到端集成测试
 //!
 //! 演示：用 MockTransport 替代真实 HTTP，验证：

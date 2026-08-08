@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/checkin — 打卡
 //!
 //! 对应 `_ref/wechat/work/checkin/`：实现"打卡"应用相关的查询与写入接口。

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! credential/default_access_token — 默认 access_token 获取器
 //!
 //! 对应 `_ref/wechat/credential/default_access_token.go`：先从缓存中取，
@@ -189,7 +190,7 @@ pub const DefaultAccessToken = struct {
         defer self.lock.unlock();
 
         self.cache.delete(key) catch {};
-        
+
         const url = try self.buildURL(allocator);
         defer allocator.free(url);
 

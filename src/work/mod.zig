@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work — 企业微信业务模块
 //!
 //! 对应 `_ref/wechat/work/`：包含配置（config）、运行时上下文（context）、

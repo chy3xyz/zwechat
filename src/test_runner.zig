@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! test_runner — 聚合所有带 inline test 的模块
 //!
 //! `zig build test` 以本文件为根，递归发现所有 `test "..."` 块。

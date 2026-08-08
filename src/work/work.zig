@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/work — 企业微信顶层 Work struct
 //!
 //! 对应 `_ref/wechat/work/work.go` 的 `Work` struct：聚合企业微信全部子模块

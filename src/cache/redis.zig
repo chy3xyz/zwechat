@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! cache/redis — 最小 Redis 缓存实现
 //!
 //! 对应 `_ref/wechat/cache/redis.go`：通过 RESP 协议与 Redis 通信，提供

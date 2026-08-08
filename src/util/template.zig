@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! util/template — 编译期微信模板消息/订阅消息 JSON 数据生成器
 //!
 //! 利用 Zig `comptime` 反射，将任意平铺的 Zig 结构体（如 `.{ .first = "Title", .keyword1 = "Val" }`）

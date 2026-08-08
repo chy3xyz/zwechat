@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! util/util — 通用工具
 //!
 //! 对应 `_ref/wechat/util/util.go`：提供 `SliceChunk` —— 把字符串切片切成固定大小的子切片，

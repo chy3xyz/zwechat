@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! work/msgaudit — 消息存档
 //!
 //! 对应 `_ref/wechat/work/msgaudit/`。Go 参考实现仅在 Linux + cgo + `msgaudit`

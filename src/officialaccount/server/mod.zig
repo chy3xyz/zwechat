@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/server — 公众号消息接收服务器
 //!
 //! 对应 `_ref/wechat/officialaccount/server/server.go`：处理微信推送的请求。
@@ -247,7 +248,7 @@ pub const Server = struct {
             // 没有 handler：返回 "success"
             return self.allocator.dupe(u8, "success");
         };
-        const reply_opt = try handler(self.handler_ctx orelse @constCast(@ptrCast(&self)), &msg);
+        const reply_opt = try handler(self.handler_ctx orelse @ptrCast(@constCast(&self)), &msg);
         const reply = reply_opt orelse {
             return self.allocator.dupe(u8, "success");
         };

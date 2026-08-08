@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/config — 公众号配置
 //!
 //! 对应 `_ref/wechat/officialaccount/config/config.go` 的 `Config`：

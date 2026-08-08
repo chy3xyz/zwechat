@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! pay/notify — 回调通知（验签 + 解密）
 
 const std = @import("std");

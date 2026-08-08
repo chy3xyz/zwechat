@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! pay/v3/notify — 微信支付 v3 通知回调解密 (AES-256-GCM)
 //!
 //! 微信支付 v3 异步通知 (支付成功/退款等) 报文在 `resource` 中使用 AEAD_AES_256_GCM 加密。

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! util/signature — 微信 SHA1 签名
 //!
 //! 对应 `_ref/wechat/util/signature.go` 的 `Signature`：先把入参按字典序升序排序，

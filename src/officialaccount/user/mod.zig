@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/user — 用户管理 / 标签 / 黑名单
 
 const std = @import("std");

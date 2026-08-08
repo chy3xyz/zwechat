@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! openplatform/context/access_token — component_access_token 获取与缓存
 //!
 //! 对应 `_ref/wechat/openplatform/context/accessToken.go`：

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount — 微信公众号业务模块
 //!
 //! 对应 `_ref/wechat/officialaccount/`：包含配置（config）、运行时上下文（context）、

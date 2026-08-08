@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! officialaccount/draft — 草稿箱（新增 / 删除 / 更新 / 获取 / 获取列表）
 
 const std = @import("std");
