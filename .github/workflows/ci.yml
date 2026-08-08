@@ -107,7 +107,10 @@ jobs:
             windows-zig-
 
       - name: Check Formatting
-        run: zig build fmt
+        run: |
+          # msys2 默认 locale 可能非 UTF-8，导致 zig fmt 解析中文注释失败
+          export LC_ALL=C.UTF-8
+          zig build fmt
 
       - name: Run Unit Tests
         run: |
