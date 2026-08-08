@@ -28,6 +28,8 @@ pub const AppChat = @import("appchat/mod.zig").AppChat;
 pub const Robot = @import("robot/mod.zig").Robot;
 pub const server = @import("server/mod.zig");
 pub const WorkServer = server.WorkServer;
+pub const smartbot = @import("smartbot/mod.zig");
+pub const message = @import("message/mod.zig");
 
 test "work 模块全部导出" {
     try std.testing.expect(@hasField(Config, "corp_id"));
@@ -55,4 +57,5 @@ test "work 模块全部导出" {
     try std.testing.expect(@hasDecl(AddressList, "init"));
     try std.testing.expect(@hasDecl(AppChat, "init"));
     try std.testing.expect(@hasDecl(Robot, "init"));
+    try std.testing.expect(@hasDecl(smartbot, "Server"));
 }
