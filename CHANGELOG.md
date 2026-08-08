@@ -7,15 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **work/smartbot（企业微信智能机器人）**：新增 `src/work/smartbot/` 回调模块，支持 WeCom 智能机器人消息签名校验与回调处理。
+- **work/message Markdown 消息**：新增 `SendMarkdownRequest` + `Message.sendMarkdown`（`msg_type='markdown'`，内部复用 `send()` 管线）。
+- **officialaccount 模块导出补齐**：menu / oauth / server / js / message 子模块对外导出（`officialaccount/mod.zig`）。
+
+### Changed
+
+- **vendor/httpz 构建跨平台化**：Linux 改用系统 OpenSSL headers（`/usr/include/{arch}-linux-gnu`），并支持 `XCOMPILE_ROOT` 交叉编译注入。
+- 测试总数提升至 **316**（合并远端提交新增 10 个测试），仍保持 0 内存泄漏。
+
 ### Fixed
 
+- **officialaccount/message**：`miniprogrampage` 加入 `ReplyMsgType`；模板消息 JSON 转义修复；media 回复 XML 嵌套结构修正。
+- **officialaccount/server**：允许 `const XmlDoc` 经 `@constCast` 调用 `deinit`；oauth JSON 解析结果保持存活，避免悬垂。
 - **工程化与合规修复（最佳实践升级）**：
   - 版本对齐：`build.zig.zon` / CHANGELOG 同步至 `v0.1.0`，与 git tag 一致。
-  - `build.zig.zon` 的 `.paths` 补充 `vendor` 与 `examples`，修复 `zig build publish` 发布包缺失 path 依赖的问题。
+  - `build.zig.zon` 的 `.paths` 精确打包 `vendor` / `doc` / `docs`，修复 `zig build publish` 发布包缺失 path 依赖的问题。
   - `vendor/httpz` 新增 `NOTICE.md` 记录上游来源与许可证状态（上游 `allain/httpz.zig` 未提供 LICENSE 文件）。
   - `util/http` 新增 `deinitDefaultClient()`，为线程局部默认客户端提供显式释放路径。
   - `build.zig` 支持 `OPENSSL_DIR` 环境变量，OpenSSL 探测不再仅依赖 macOS Homebrew 硬编码路径。
-  - CI 增强：新增 `zig fmt --check`、示例安装编译、Zig 缓存、Windows（msys2 + OpenSSL）job。
+  - CI 增强：新增 `zig build fmt` 门禁、示例安装编译、Zig 缓存、Windows（msys2 + OpenSSL）job；修复 dev 版本过期导致的 Setup Zig 失败（`dev.1422` → `dev.1567`）。
   - 源码新增 Apache-2.0 SPDX 头；`zig fmt` 全库格式化。
 
 ## [0.1.0] — 2026-07-22

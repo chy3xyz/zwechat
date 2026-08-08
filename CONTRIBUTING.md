@@ -6,7 +6,7 @@
 
 | 工具 | 版本要求 |
 |---|---|
-| Zig | ≥ 0.17.0（CI 在 `0.17.0-dev.1422+e863bf3be` 上构建通过）|
+| Zig | ≥ 0.17.0（CI 在 `0.17.0-dev.1567+f0354179a` 上构建通过）|
 | Git | 任意版本 |
 | 编辑器 | 任意；推荐 VSCode + Zig Language Server，或 `zls` |
 
@@ -20,7 +20,7 @@ cd zwechat
 
 # 验证构建 + 测试都通过
 zig build && zig build test
-# 期望：306/306 tests passed, 0 leaks
+# 期望：316/316 tests passed, 0 leaks
 ```
 
 ## 项目布局
@@ -180,7 +180,7 @@ pay: 修复 verifyPaidNotify 函数签名缺少 allocator 参数
 ### PR checklist
 
 - [ ] `zig build` 通过
-- [ ] `zig build test` 通过（**306/306 tests, 0 leaks**）
+- [ ] `zig build test` 通过（**316/316 tests, 0 leaks**）
 - [ ] 新增模块已在 `src/test_runner.zig` 追加 `@import`
 - [ ] 新增公共 API 都有 `///` 中文 doc 注释
 - [ ] 涉及加密 / 签名 / 编解码的模块附真实测试向量
