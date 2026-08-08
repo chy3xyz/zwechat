@@ -13,7 +13,10 @@ pub fn build(b: *std.Build) void {
     switch (target.result.os.tag) {
         .macos => openssl_c.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/openssl@3/include" }),
         else => {
-            if (b.graph.environ_map.get("XCOMPILE_ROOT")) |xroot| {
+            // 优先使用 OPENSSL_DIR（跨平台注入，zwechat 侧同约定；Windows CI 依赖此路径）
+            if (b.graph.environ_map.get("OPENSSL_DIR")) |openssl_dir| {
+                openssl_c.addIncludePath(.{ .cwd_relative = b.fmt("{s}/include", .{openssl_dir}) });
+            } else if (b.graph.environ_map.get("XCOMPILE_ROOT")) |xroot| {
                 openssl_c.addIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{xroot}) });
                 switch (target.result.cpu.arch) {
                     .aarch64 => openssl_c.addIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include/aarch64-linux-gnu", .{xroot}) }),

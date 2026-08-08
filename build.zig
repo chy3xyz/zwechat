@@ -47,6 +47,10 @@ pub fn build(b: *std.Build) void {
         }
     }.apply;
 
+    // httpz 模块内部已 linkSystemLibrary("ssl"/"crypto")，但 Windows/macOS 上
+    // OpenSSL 库不在 zig 默认搜索路径，需在此补 include/lib 路径。
+    setupOpenSSL(b, httpz_mod);
+
     // 顶层 lib 模块：暴露给下游包使用
     const lib_mod = b.addModule("zwechat", .{
         .root_source_file = b.path("src/root.zig"),
