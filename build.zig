@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
@@ -18,6 +19,15 @@ pub fn build(b: *std.Build) void {
             mod.linkSystemLibrary("crypto", .{});
             mod.link_libc = true;
 
+            // 1) 优先使用 OPENSSL_DIR 环境变量（跨平台通用，CI 可注入）。
+            //    期望布局：<OPENSSL_DIR>/include 与 <OPENSSL_DIR>/lib。
+            if (b_builder.graph.environ_map.get("OPENSSL_DIR")) |openssl_dir| {
+                mod.addIncludePath(.{ .cwd_relative = b_builder.pathJoin(&.{ openssl_dir, "include" }) });
+                mod.addLibraryPath(.{ .cwd_relative = b_builder.pathJoin(&.{ openssl_dir, "lib" }) });
+                return;
+            }
+
+            // 2) 回退：探测常见 Homebrew OpenSSL 3 路径（macOS）。
             const search_bases = [_][]const u8{
                 "/opt/homebrew/opt/openssl@3",
                 "/usr/local/opt/openssl@3",
@@ -129,9 +139,19 @@ pub fn build(b: *std.Build) void {
             .name = ex.name,
             .root_module = example_mod,
         });
+        // 安装示例产物（zig build 一并编译，CI 覆盖示例编译路径）。
+        b.installArtifact(example_exe);
         const run_example = b.addRunArtifact(example_exe);
         const step_name = b.fmt("run-{s}", .{ex.name});
         const example_step = b.step(step_name, b.fmt("Run example {s}", .{ex.name}));
         example_step.dependOn(&run_example.step);
     }
+
+    // —— 代码格式化检查（zig fmt --check 的封装）——
+    const fmt_check = b.addFmt(.{
+        .paths = &.{ b.path("src"), b.path("build.zig"), b.path("build.zig.zon"), b.path("examples") },
+        .check = true,
+    });
+    const fmt_step = b.step("fmt", "Check code formatting (zig fmt --check)");
+    fmt_step.dependOn(&fmt_check.step);
 }

@@ -2,7 +2,7 @@
 
 `zwechat` 是使用 Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付、开放平台、企业微信、智能对话等能力。
 
-> ✅ **当前状态**：`zig 0.17.0-dev.1422+e863bf3be`。`zig build` / `zig build test` / `zig build run` 全部通过，**297 个内联单元测试全部通过且零内存泄漏**。
+> ✅ **当前状态**：`zig 0.17.0-dev.1422+e863bf3be`。`zig build` / `zig build test` / `zig build run` 全部通过，**306 个内联单元测试全部通过且零内存泄漏**。
 >
 > 目录包括：
 > - `_ref/wechat/` — 完整克隆的 Go 参考实现（`silenceper/wechat/v2`，Apache-2.0），作为移植依据（**只读**）。
@@ -39,7 +39,7 @@
 | 构建系统 | 原生 `zig build`（`build.zig` + `build.zig.zon`） |
 | 许可证 | Apache License 2.0（与上游参考保持一致，保留 `_ref/wechat/LICENSE`） |
 | 运行目标 | 静态库 + 可执行示例 |
-| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **297 个测试，0 泄漏** |
+| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **306 个测试，0 泄漏** |
 
 外部依赖按需声明在 `build.zig.zon`，尽量减少三方依赖；优先使用 Zig 标准库。当前 vendored 依赖：`vendor/httpz`（OpenSSL 后端，用于微信支付 mTLS）。
 
@@ -361,6 +361,13 @@ const oa = wc.getOfficialAccount(cfg);
   - **开发者 API 指南**：创建 `doc/api_guide.md`，提供完整接口使用、方法速查及内存管理的最佳实践手册。
   - **编译期模板生成器 (`comptime`)**：新增 `src/util/template.zig`（`buildTemplateData`），利用 Zig `comptime` 类型反射，零堆开销将任意平铺 Zig 结构体转换为符合微信规范的 `{"field": {"value": "..."}}` 模板 JSON。
   - **CLI 开发者诊断工具箱**：升级 `src/main.zig`，适配 Zig 0.17 的 `std.process.Init` 规范，提供 `version`、`verify-sig`（签名快速验证）及 `template-demo`（模版生成调试）。
+  - **工程化与合规增强（v0.1.0）**：
+    - 版本对齐 `v0.1.0`（`build.zig.zon` / CHANGELOG / git tag 三者一致）；`build.zig.zon` 的 `.paths` 精确打包 vendor/doc/docs，修复 `zig build publish` 缺依赖问题。
+    - `vendor/httpz/NOTICE.md`：记录上游来源（`allain/httpz.zig`）与"上游未提供 LICENSE"的许可证状态。
+    - `util/http` 新增 `deinitDefaultClient()`：线程局部默认客户端的显式释放路径（首次调用传入的 allocator 决定该线程实例，文档已注明）。
+    - `build.zig` 支持 `OPENSSL_DIR` 环境变量（优先于 Homebrew 路径探测），CI 与跨平台构建可注入；`zig build fmt` 提供格式化检查；示例改为安装产物（`zig build` 一并编译）。
+    - CI 三平台（ubuntu / macos / windows-msys2-gnu），含缓存、`fmt` 检查、示例编译；新增 `.gitattributes` 强制 LF。
+    - 全库源码补 Apache-2.0 SPDX 头；`zig fmt` 全库格式化；空断言"模块导出"测试全部改为 `@hasDecl`/`@hasField` 真实断言。
 
 ---
 
@@ -374,5 +381,5 @@ const oa = wc.getOfficialAccount(cfg);
 - **新增测试时**在 `src/test_runner.zig` 中加一行 `@import`（即便内容只是占位），否则 `zig build test` 不会发现它。
 - **`build.zig.zon` 的 fingerprint 字段**：写一个占位 hex（如 `0xd658b8e96476550b`）即可；若该值不被 Zig 接受，运行 `zig build` 会提示正确的值。
 - **避免 Zig 0.17-dev 已被移除的 API**：`std.Thread.Mutex`（用 `SpinMutex`）、`std.time.timestamp()`（用 `std.Io.Clock.now`）、`std.fmt.AllocPrintError`（用 `Allocator.Error`）、`std.ArrayListUnmanaged = .{}`（用 `.empty`）。
-- **修改完任何模块后**，必须 `zig build test` 确认 297/297 测试仍全部通过；任何内存泄漏会让测试失败。
+- **修改完任何模块后**，必须 `zig build test` 确认 306/306 测试仍全部通过；任何内存泄漏会让测试失败。
 - **避免 Zig 0.17-dev 已被移除的 API**：`std.fs.cwd()`（改用 `std.Io.Dir.cwd()`）、`std.Thread.Mutex`（用 `SpinMutex`）、`std.time.timestamp()`（用 `std.Io.Clock.now`）、`std.fmt.AllocPrintError`（用 `Allocator.Error`）、`std.ArrayListUnmanaged = .{}`（用 `.empty`）。

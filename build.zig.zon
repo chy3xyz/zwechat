@@ -1,6 +1,6 @@
 .{
     .name = .zwechat,
-    .version = "0.0.1",
+    .version = "0.1.0",
     .fingerprint = 0xd658b8e96476550b,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
@@ -12,6 +12,16 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        // vendor 精确列出（仅打包编译与合规所需，不携带 httpz 的 docs/tests 等）。
+        "vendor/httpz/build.zig",
+        "vendor/httpz/build.zig.zon",
+        "vendor/httpz/src",
+        "vendor/httpz/NOTICE.md",
+        "examples",
+        "doc",
+        "docs",
+        "CHANGELOG.md",
+        "CONTRIBUTING.md",
         "LICENSE",
         "README.md",
     },

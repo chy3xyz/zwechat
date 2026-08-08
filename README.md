@@ -2,12 +2,12 @@
 
 > Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付 v2/v3、开放平台、企业微信、智能对话等能力的 Zig 原生实现。
 
-**当前版本：v0.0.1（高级生产级增强版）**
+**当前版本：v0.1.0（高级生产级增强版）**
 
 | | |
 |---|---|
 | **Zig 版本** | ≥ `0.17.0-dev` |
-| **测试覆盖** | 297+ 个内联测试，**0 内存泄漏** |
+| **测试覆盖** | 306 个内联测试，**0 内存泄漏** |
 | **基准性能** | SHA1 签名 ~274ns/op, AES 解密 ~107ns/op, XML 解析 ~148ns/op |
 | **命令行工具** | `zig build run` (CLI 开发者诊断工具) |
 | **基准测试** | `zig build bench` (基准性能评估) |
@@ -46,7 +46,7 @@
 ## 🛠 构建与常用命令
 
 ```bash
-# 1. 跑全部 297 个单元测试（自动检测内存泄漏）
+# 1. 跑全部 306 个单元测试（自动检测内存泄漏）
 zig build test
 
 # 2. 跑性能基准测试 (Benchmark)
@@ -189,7 +189,7 @@ src/
 
 - [API 使用指南与速查手册 (`doc/api_guide.md`)](doc/api_guide.md)
 - [AI Agent 架构与规范指南 (`AGENTS.md`)](AGENTS.md)
-- [上游 Go 接口参考 Markdown (`_ref/wechat/doc/api/`)](_ref/wechat/doc/api/)
+- [上游 Go 接口参考 Markdown](https://github.com/silenceper/wechat/tree/master/doc/api)（本地 `_ref/wechat/doc/api/` 为开发期对照，不入库）
 
 ---
 

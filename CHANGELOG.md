@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **工程化与合规修复（最佳实践升级）**：
+  - 版本对齐：`build.zig.zon` / CHANGELOG 同步至 `v0.1.0`，与 git tag 一致。
+  - `build.zig.zon` 的 `.paths` 补充 `vendor` 与 `examples`，修复 `zig build publish` 发布包缺失 path 依赖的问题。
+  - `vendor/httpz` 新增 `NOTICE.md` 记录上游来源与许可证状态（上游 `allain/httpz.zig` 未提供 LICENSE 文件）。
+  - `util/http` 新增 `deinitDefaultClient()`，为线程局部默认客户端提供显式释放路径。
+  - `build.zig` 支持 `OPENSSL_DIR` 环境变量，OpenSSL 探测不再仅依赖 macOS Homebrew 硬编码路径。
+  - CI 增强：新增 `zig fmt --check`、示例安装编译、Zig 缓存、Windows（msys2 + OpenSSL）job。
+  - 源码新增 Apache-2.0 SPDX 头；`zig fmt` 全库格式化。
+
+## [0.1.0] — 2026-07-22
+
 ### Added
 
 - **Wave 19 — 微信支付 mTLS 支持**：
@@ -205,5 +218,6 @@ N/A。
 - **0.x**：初始开发版本，API 可能不兼容。
 - **1.0**：计划完成 RSA / PKCS#12 完整实现、work.jsapi 完整 wire 后发布。
 
-[Unreleased]: https://github.com/your-org/zwechat/compare/v0.0.1...HEAD
-[0.0.1]: https://github.com/your-org/zwechat/releases/tag/v0.0.1
+[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/chy3xyz/zwechat/releases/tag/v0.1.0
+[0.0.1]: https://github.com/chy3xyz/zwechat/releases/tag/v0.0.1

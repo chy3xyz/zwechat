@@ -335,4 +335,4 @@ test "Menu.getMenu 解析响应" {
 
 - [`architecture.md`](architecture.md) — 完整设计模式说明
 - [`api-reference.md`](api-reference.md) — 公共 API 索引
-- [`_ref/wechat/doc/api/*.md`](../_ref/wechat/doc/api/) — 上游 Go 接口清单（移植时优先对照）
+- [上游 Go 接口清单](https://github.com/silenceper/wechat/tree/master/doc/api)（移植时优先对照；本地 `_ref/wechat/doc/api/` 为开发期对照，不入库）

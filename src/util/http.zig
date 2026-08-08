@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! util/http — HTTP 客户端封装
 //!
 //! 对应 `_ref/wechat/util/http.go`：提供 `HTTPGet` / `HTTPPost` / `PostJSON` /
@@ -42,11 +43,30 @@ threadlocal var default_client: ?HttpClient = null;
 
 /// 返回线程局部的默认 `HttpClient`。同一线程上重复调用得到的是同一份实例；
 /// 不同线程各自一份，互不影响。
+///
+/// **allocator 语义**：实例使用的 allocator 由**首次**调用本函数时传入的参数决定；
+/// 同线程后续调用传入的其他 allocator 会被忽略（分配仍走首次的 allocator）。
+/// 请保证同一线程内使用一致的 allocator，或在线程退出前调用 `deinitDefaultClient()`
+/// 释放实例，以便下次以新 allocator 重新初始化。
+///
+/// 注意：返回的指针在线程退出后失效；线程结束前应调用 `deinitDefaultClient`
+/// 释放内部连接池等资源。
 pub fn getDefaultClient(allocator: std.mem.Allocator) *HttpClient {
     if (default_client == null) {
         default_client = HttpClient.init(allocator);
     }
     return &default_client.?;
+}
+
+/// 释放线程局部的默认 `HttpClient`（若已初始化），并将该线程的实例置空。
+///
+/// 应在线程退出前调用，避免 `std.http.Client` 的连接池等资源滞留到进程结束；
+/// 之后若再次调用 `getDefaultClient` 会重新初始化一份新实例。
+pub fn deinitDefaultClient() void {
+    if (default_client) |*client| {
+        client.deinit();
+        default_client = null;
+    }
 }
 
 /// HTTP 客户端（对照 `_ref/wechat/util/http.go` 中的全局 `DefaultHTTPClient`）。
@@ -415,6 +435,20 @@ test "HttpClient.init/deinit 无泄漏" {
     try std.testing.expectEqual(allocator, client.allocator);
 }
 
+test "getDefaultClient/deinitDefaultClient 生命周期闭环" {
+    const allocator = std.testing.allocator;
+    const first = getDefaultClient(allocator);
+    const second = getDefaultClient(allocator);
+    // 同线程重复调用得到同一份实例（threadlocal 地址固定）。
+    try std.testing.expect(first == second);
+    // 释放后可再次安全调用（不 double-free、不崩溃），
+    // 再次初始化仍可用；整体循环在 testing allocator 下无泄漏。
+    deinitDefaultClient();
+    _ = getDefaultClient(allocator);
+    deinitDefaultClient();
+    deinitDefaultClient(); // 幂等：未初始化时调用是 no-op
+}
+
 test "setUriModifier 工作（设置/清除后行为正确）" {
     // 初始：未设置，原样返回。
     try std.testing.expect(uri_modifier == null);
@@ -462,7 +496,7 @@ test "postXMLWithTLS 缺少 P12 文件返回 FileNotFound" {
     const result = client.postXMLWithTLS(
         "https://api.mch.weixin.qq.com/secapi/pay/refund",
         "<xml/>",
-        "/tmp/dummy_zwechat_not_exist.p12",
+        "zwechat_test_not_exist.p12",
         "pwd",
     );
     try std.testing.expectError(error.FileNotFound, result);
@@ -471,7 +505,8 @@ test "postXMLWithTLS 缺少 P12 文件返回 FileNotFound" {
 test "postXMLWithTLS 非法 P12 文件返回 InvalidP12File" {
     const allocator = std.testing.allocator;
     const io = std.Io.Threaded.global_single_threaded.io();
-    const tmp_path = "/tmp/zwechat_bad_p12_test.p12";
+    // 相对路径：不依赖平台 /tmp 语义（Windows 上无统一 /tmp）。
+    const tmp_path = "zwechat_test_bad_p12.p12";
 
     const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{});
     defer {

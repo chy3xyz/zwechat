@@ -18,13 +18,21 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v1
         with:
           version: 0.17.0-dev.1422+e863bf3be
+
+      - name: Cache Zig
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            .zig-cache
+          key: ${{ runner.os }}-zig-${{ hashFiles('build.zig.zon', 'build.zig') }}
+          restore-keys: |
+            ${{ runner.os }}-zig-
 
       - name: Install System Dependencies (Linux)
         if: runner.os == 'Linux'
@@ -37,8 +45,58 @@ jobs:
         run: |
           brew install openssl@3 pkg-config
 
+      - name: Check Formatting
+        run: zig build fmt
+
       - name: Run Unit Tests
         run: zig build test
 
-      - name: Build Examples
+      - name: Build Library, CLI & Examples
         run: zig build
+
+  test-windows:
+    name: Build & Test (windows-latest, GNU ABI)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.17.0-dev.1422+e863bf3be
+
+      - name: Setup MSYS2 + OpenSSL
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-openssl
+
+      - name: Cache Zig
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\zig
+            .zig-cache
+          key: windows-zig-${{ hashFiles('build.zig.zon', 'build.zig') }}
+          restore-keys: |
+            windows-zig-
+
+      - name: Check Formatting
+        run: zig build fmt
+
+      - name: Run Unit Tests
+        run: |
+          # cygpath -w 把 MSYS 挂载点（/mingw64）转为原生 Win32 路径，
+          # 否则原生 zig.exe 会把 /mingw64/include 解析成盘符根。
+          export OPENSSL_DIR="$(cygpath -w "$MINGW_PREFIX")"
+          zig build -Dtarget=x86_64-windows-gnu test
+
+      - name: Build Library, CLI & Examples
+        run: |
+          export OPENSSL_DIR="$(cygpath -w "$MINGW_PREFIX")"
+          zig build -Dtarget=x86_64-windows-gnu

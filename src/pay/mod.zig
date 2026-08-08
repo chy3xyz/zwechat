@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 //! pay — 微信支付（骨架，Wave 4d 实现各子模块）
 
 const std = @import("std");
@@ -16,11 +17,14 @@ pub const Redpacket = @import("redpacket/mod.zig").Redpacket;
 pub const v3 = @import("v3/mod.zig");
 
 test "pay 模块导出" {
-    _ = Pay;
-    _ = Order;
-    _ = Refund;
-    _ = Notify;
-    _ = Transfer;
-    _ = Redpacket;
-    _ = v3;
+    try std.testing.expect(@hasDecl(Pay, "init"));
+    try std.testing.expect(@hasDecl(Pay, "getOrder"));
+    try std.testing.expect(@hasDecl(Order, "prePayOrder"));
+    try std.testing.expect(@hasDecl(Order, "bridgeAppConfig"));
+    try std.testing.expect(@hasDecl(Refund, "init"));
+    try std.testing.expect(@hasDecl(Notify, "init"));
+    try std.testing.expect(@hasDecl(Notify, "decryptRefund"));
+    try std.testing.expect(@hasDecl(Transfer, "init"));
+    try std.testing.expect(@hasDecl(Redpacket, "init"));
+    try std.testing.expect(@hasDecl(v3.OrderV3, "init"));
 }

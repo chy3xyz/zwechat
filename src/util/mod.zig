@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
 //! util — 通用工具集
 //!
 //! 对应 `_ref/wechat/util/`：HTTP、加解密、签名、参数排序、时间等。
 //! 当前为占位骨架。
+
+const std = @import("std");
 
 pub const http = @import("http.zig");
 pub const crypto = @import("crypto.zig");
@@ -17,16 +20,16 @@ pub const xml = @import("xml.zig");
 pub const template = @import("template.zig");
 
 test "util 模块全部导出" {
-    _ = http;
-    _ = crypto;
-    _ = signature;
-    _ = time;
-    _ = param;
-    _ = util;
-    _ = error_mod;
-    _ = rsa;
-    _ = asn1;
-    _ = pkcs12;
-    _ = xml;
-    _ = template;
+    try std.testing.expect(@hasDecl(http, "getDefaultClient"));
+    try std.testing.expect(@hasDecl(http, "deinitDefaultClient"));
+    try std.testing.expect(@hasDecl(crypto, "calculateSign"));
+    try std.testing.expect(@hasDecl(signature, "signature"));
+    try std.testing.expect(@hasDecl(time, "getCurrTS"));
+    try std.testing.expect(@hasDecl(param, "orderParam"));
+    try std.testing.expect(@hasDecl(rsa, "parseP12"));
+    try std.testing.expect(@hasDecl(asn1, "Reader"));
+    try std.testing.expect(@hasDecl(asn1, "Tag"));
+    try std.testing.expect(@hasDecl(pkcs12, "parse"));
+    try std.testing.expect(@hasDecl(xml, "parse"));
+    try std.testing.expect(@hasDecl(template, "buildTemplateData"));
 }

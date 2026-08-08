@@ -27,10 +27,13 @@ zig version  # 应 >= 0.17.0
 }
 ```
 
-在 `build.zig` 中把 zwechat 接到你的模块：
+在 `build.zig` 中把 zwechat 接到你的模块（Zig 0.17 使用 `b.dependency`，模块通过 `addImport` 注入）：
 
 ```zig
-const zwechat_mod = b.dependOn("zwechat");
+const zwechat_mod = b.dependency("zwechat", .{
+    .target = target,
+    .optimize = optimize,
+}).module("zwechat");
 my_module.addImport("zwechat", zwechat_mod);
 ```
 
@@ -177,4 +180,4 @@ fn myHandler(_: *anyopaque, msg: *zwechat.officialaccount.message.MixMessage) an
 - 阅读 [`architecture.md`](architecture.md) 了解模块依赖与接口设计
 - 阅读 [`migration-from-go.md`](migration-from-go.md) 把现有 Go 代码迁移到 Zig
 - 阅读 [`api-reference.md`](api-reference.md) 查看完整公共 API
-- 对照 [`_ref/wechat/doc/api/*.md`](../_ref/wechat/doc/api/) 找具体业务接口
+- 对照[上游 Go 接口清单](https://github.com/silenceper/wechat/tree/master/doc/api)找具体业务接口（本地 `_ref/wechat/doc/api/` 为开发期对照，不入库）
