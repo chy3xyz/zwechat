@@ -26,7 +26,7 @@
 > - `wechat.zig` 顶层容器，已暴露 work/pay/miniprogram/openplatform 工厂
 >
 > **已知限制**：
-> - `util/http.zig.postXMLWithTLS` 已通过 `vendor/httpz`（OpenSSL 后端）实现 mTLS；当前 macOS 构建硬链 Homebrew OpenSSL 3 路径，跨平台时需补充对应 include/lib。
+> - `util/http.zig.postXMLWithTLS` 通过 `httpz`（zhttp v0.6.0，OpenSSL 后端）实现 mTLS；OpenSSL include/lib 路径由 `build.zig` 的 `setupOpenSSL` + `resolveOpenSSLInclude` 按 `OPENSSL_DIR` → Homebrew → 系统默认 顺序探测。
 > - `pay/refund` / `pay/transfer` / `pay/redpacket` 在 `pay.Config.root_ca` 非空时自动走 `postXMLWithTLS`；空时退回到普通 HTTPS，便于无证书环境测试。
 
 ---
@@ -41,7 +41,7 @@
 | 运行目标 | 静态库 + 可执行示例 |
 | 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **316 个测试，0 泄漏** |
 
-外部依赖按需声明在 `build.zig.zon`，尽量减少三方依赖；优先使用 Zig 标准库。当前 vendored 依赖：`vendor/httpz`（OpenSSL 后端，用于微信支付 mTLS）。
+外部依赖按需声明在 `build.zig.zon`，尽量减少三方依赖；优先使用 Zig 标准库。当前唯一三方依赖：`httpz`（`chy3xyz/zhttp` v0.6.0，URL + hash 经 `zig fetch` 引入，OpenSSL 后端，用于微信支付 mTLS）。
 
 ---
 
@@ -293,7 +293,7 @@ const oa = wc.getOfficialAccount(cfg);
 ### HTTP 客户端
 
 - `src/util/http.zig` 提供 `httpGet` / `httpPost` / `postJSON` / `postXML` / `postMultipart` / `postXMLWithTLS`，对应 `_ref/wechat/util/http.go`。
-- 普通请求基于 `std.http.Client` + `std.Io`；`postXMLWithTLS` 基于 `vendor/httpz`（OpenSSL 后端），加载商户 PKCS#12 证书完成 mTLS 双向认证。
+- 普通请求基于 `std.http.Client` + `std.Io`；`postXMLWithTLS` 基于 `httpz`（zhttp v0.6.0，OpenSSL 后端），加载商户 PKCS#12 证书完成 mTLS 双向认证。
 - `HttpClient` 支持可注入 `Transport`，`MockTransport` 用于离线单元测试。
 - 微信支付回调验签需要的 PKCS#12 解析依赖 `crypto.zig` 与 `rsa.zig`。
 
@@ -344,11 +344,11 @@ const oa = wc.getOfficialAccount(cfg);
   - `std.http.Client` 集成 `std.Io` runtime；multipart / PKCS#12 需手写。
 - **Cache 接口选型**：vtable 风格（`*anyopaque` + `*const VTable`），与 std.Io / std.Build 一致，便于未来加 Redis / Memcache 实现而不破坏 ABI。
 - **Credential 抽象**：`Fetcher` 函数指针让所有微信服务端交互可被 stub，测试无需真实 HTTP；JSON 响应结构体所有字段都有默认值，能同时容忍成功响应与 `errcode != 0` 的失败响应。
-- **TLS / PKCS#12 / mTLS**：`util.pkcs12.zig` 已实现最小 PKCS#12 解析（PBES2/PBKDF2/AES-256-CBC），`util.rsa.zig` 提供 `parseP12` 包装。为接入 mTLS，引入 vendored `httpz.zig` v0.2.0 并本地打补丁：在 `vendor/httpz/src/openssl.zig` 的 `config.Client` 中新增可选 `cert: ?*const CertKeyPair`，握手时调用 `SSL_CTX_use_certificate_PEM` / `SSL_CTX_use_PrivateKey_PEM` 加载客户端证书。`util.http.postXMLWithTLS` 读取 P12 → 解析 PEM → 使用 httpz 完成 HTTPS POST。
-- **外部依赖**：`build.zig.zon` 通过 `vendor/httpz` 本地路径依赖 `httpz.zig`，构建时链接 `-lssl -lcrypto -lc`。这是项目首次引入非 stdlib 依赖，后续如需升级/替换应继续 vendoring 或 fork。
+- **TLS / PKCS#12 / mTLS**：`util.pkcs12.zig` 已实现最小 PKCS#12 解析（PBES2/PBKDF2/AES-256-CBC），`util.rsa.zig` 提供 `parseP12` 包装。`util.http.postXMLWithTLS` 读取 P12 → 解析 PEM → 使用 httpz 完成 HTTPS POST。mTLS 客户端证书支持（`tls.config.Client.auth` / `cert`）由上游 zhttp v0.6.0 官方实现（提交 `0431984`，注释明确 “required for WeChat Pay (zwechat)”），本项目**不再维护任何本地补丁**。
+- **外部依赖**：`build.zig.zon` 通过 URL 依赖 `https://github.com/chy3xyz/zhttp`（tag `v0.6.0` + hash），构建时链接 `-lssl -lcrypto -lc`。升级方式：改 `build.zig.zon` 的 `.url` 后运行 `zig fetch --save <url>` 更新 `.hash`；`build.zig` 需同步适配上游模块名/构建选项（v0.6.0 起模块名 `zhttp`、新增 `-Dh3` / `-Dopenssl-include` 选项，本项目以 `h3=false` + 探测到的 include 路径透传；dependency options 字段名须与 `b.option` 注册名逐字一致，连字符用 `@"openssl-include"` 转义）。
 - **测试基础设施**：`src/test_runner.zig` 顶部有一段「编译门」test，强制 `@import` 每个子文件，并在测试体内做 `_ = mod;` 引用 — 否则 0.17-dev 的 dead-strip 可能把带 inline test 的文件排除掉，导致 `zig build test` 报告「All 1 tests passed」假象。
 - **最新增强**：
-  - **httpz.zig 升级**：整合最新版 `vendor/httpz` 及 OpenSSL mTLS 客户端证书增强。
+  - **httpz 升级 v0.6.0**：依赖改为 git URL（`chy3xyz/zhttp` v0.6.0）经 `zig fetch` 引入，删除 `vendor/httpz/`；上游官方支持 mTLS（`auth`/`cert`）与 `-Dopenssl-include` 参数化，本地补丁全部作废。
   - **动态 OpenSSL 路径感知**：`build.zig` 中新增基于 `std.Io.Dir.cwd().access` 的安全目录校验，兼容 macOS Homebrew `/opt/homebrew/opt/openssl@3` 与 `/usr/local/opt/openssl@3`。
   - **基准测试 (Benchmark)**：新增 `src/util/benchmark.zig` 与 `zig build bench` 命令，实测 SHA1 签名 ~253 ns/op，AES-256-CBC 解密 ~116 ns/op，XML 解析 ~137 ns/op。
   - **场景示例 (Examples)**：新增 `examples/officialaccount_server.zig`（公众号消息验证与 AES 解密）、`examples/pay_order.zig`（支付统一下单与 BridgeAppConfig 调起签名）、`examples/work_robot.zig`（企微机器人与 JSAPI 实例）。可通过 `zig build run-oa-server` / `zig build run-pay-order` / `zig build run-work-robot` 运行。
@@ -361,9 +361,9 @@ const oa = wc.getOfficialAccount(cfg);
   - **开发者 API 指南**：创建 `doc/api_guide.md`，提供完整接口使用、方法速查及内存管理的最佳实践手册。
   - **编译期模板生成器 (`comptime`)**：新增 `src/util/template.zig`（`buildTemplateData`），利用 Zig `comptime` 类型反射，零堆开销将任意平铺 Zig 结构体转换为符合微信规范的 `{"field": {"value": "..."}}` 模板 JSON。
   - **CLI 开发者诊断工具箱**：升级 `src/main.zig`，适配 Zig 0.17 的 `std.process.Init` 规范，提供 `version`、`verify-sig`（签名快速验证）及 `template-demo`（模版生成调试）。
-  - **工程化与合规增强（v0.1.0）**：
-    - 版本对齐 `v0.1.0`（`build.zig.zon` / CHANGELOG / git tag 三者一致）；`build.zig.zon` 的 `.paths` 精确打包 vendor/doc/docs，修复 `zig build publish` 缺依赖问题。
-    - `vendor/httpz/NOTICE.md`：记录上游来源（`allain/httpz.zig`）与"上游未提供 LICENSE"的许可证状态。
+  - **工程化与合规增强（v0.2.0）**：
+    - 版本对齐 `v0.2.0`（`build.zig.zon` / CHANGELOG / git tag 三者一致）；httpz 依赖升级为 `chy3xyz/zhttp` v0.6.0（URL + hash 引入），删除 `vendor/httpz/`。
+    - `NOTICE.md`（项目根）：记录 httpz 上游来源（`chy3xyz/zhttp`，原 `allain/httpz.zig`）与"上游未提供 LICENSE"的许可证状态；本项目对其零本地补丁。
     - `util/http` 新增 `deinitDefaultClient()`：线程局部默认客户端的显式释放路径（首次调用传入的 allocator 决定该线程实例，文档已注明）。
     - `build.zig` 支持 `OPENSSL_DIR` 环境变量（优先于 Homebrew 路径探测），CI 与跨平台构建可注入；`zig build fmt` 提供格式化检查；示例改为安装产物（`zig build` 一并编译）。
     - CI 三平台（ubuntu / macos / windows-msys2-gnu），含缓存、`fmt` 检查、示例编译；新增 `.gitattributes` 强制 LF。

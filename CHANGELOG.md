@@ -5,7 +5,7 @@ All notable changes to `zwechat` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] — 2026-08-10
 
 ### Added
 
@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **httpz 升级 v0.6.0（git URL 方式）**：依赖从 `vendor/httpz`（v0.2.0 + 本地补丁）改为 `build.zig.zon` 声明 URL + hash，经 `zig fetch` 从 `https://github.com/chy3xyz/zhttp` 拉取 v0.6.0；删除 `vendor/httpz/` 目录。上游 v0.6.0 官方内置 mTLS 客户端证书（`tls.config.Client.auth` / `cert`，提交 `0431984`）与 `-Dopenssl-include` 参数化（提交 `46dad65`），本地补丁全部作废。`build.zig` 适配：模块名 `httpz` → `zhttp`、`-Dh3=false`、探测 OpenSSL include 路径透传（`@\"openssl-include\"`）；`util/http` 适配 `Client.init` 返回 `error{OutOfMemory}!Client`（加 `try`）。合规说明迁移至项目根 `NOTICE.md`。
 - **vendor/httpz 构建跨平台化**：Linux 改用系统 OpenSSL headers（`/usr/include/{arch}-linux-gnu`），并支持 `XCOMPILE_ROOT` 交叉编译注入。
 - 测试总数提升至 **316**（合并远端提交新增 10 个测试），仍保持 0 内存泄漏。
 
@@ -231,6 +232,7 @@ N/A。
 - **0.x**：初始开发版本，API 可能不兼容。
 - **1.0**：计划完成 RSA / PKCS#12 完整实现、work.jsapi 完整 wire 后发布。
 
-[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/chy3xyz/zwechat/releases/tag/v0.2.0
 [0.1.0]: https://github.com/chy3xyz/zwechat/releases/tag/v0.1.0
 [0.0.1]: https://github.com/chy3xyz/zwechat/releases/tag/v0.0.1

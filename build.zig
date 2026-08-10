@@ -1,16 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0
 const std = @import("std");
 
+/// 探测 OpenSSL include 目录（与 setupOpenSSL 相同的优先级），
+/// 供 zhttp 依赖的 `-Dopenssl-include` 构建选项使用。
+fn resolveOpenSSLInclude(b_builder: *std.Build) []const u8 {
+    if (b_builder.graph.environ_map.get("OPENSSL_DIR")) |openssl_dir| {
+        return b_builder.pathJoin(&.{ openssl_dir, "include" });
+    }
+    const search_bases = [_][]const u8{
+        "/opt/homebrew/opt/openssl@3",
+        "/usr/local/opt/openssl@3",
+    };
+    for (search_bases) |base| {
+        const inc = b_builder.fmt("{s}/include", .{base});
+        if (std.Io.Dir.cwd().access(b_builder.graph.io, inc, .{})) |_| {
+            return inc;
+        } else |_| {}
+    }
+    // Linux / 其他平台默认系统 include。
+    return "/usr/include";
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // httpz 依赖模块（最新版 + OpenSSL mTLS 客户端证书支持）
+    // zhttp（httpz.zig 延续仓库）依赖：v0.6.0，由 zig fetch 从
+    // https://github.com/chy3xyz/zhttp 拉取（build.zig.zon 声明 URL + hash）。
+    // - 关闭 h3：本项目不需要 HTTP/3，避免构建依赖 nghttp3/ngtcp2 系统库；
+    // - openssl-include：按 OPENSSL_DIR → Homebrew → 系统默认 探测后透传，
+    //   供上游 translateC 编译 openssl.h 使用。
+    const openssl_include = resolveOpenSSLInclude(b);
     const httpz_dep = b.dependency("httpz", .{
         .target = target,
         .optimize = optimize,
+        .h3 = false,
+        .@"openssl-include" = openssl_include,
     });
-    const httpz_mod = httpz_dep.module("httpz");
+    const httpz_mod = httpz_dep.module("zhttp");
 
     // 辅助函数：配置 OpenSSL 与 System Library 链接
     const setupOpenSSL = struct {

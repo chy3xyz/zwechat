@@ -233,7 +233,8 @@ pub const HttpClient = struct {
         };
 
         // 5. 使用 httpz 客户端完成 mTLS 请求
-        var client = httpz.Client.init(self.allocator, .{
+        //    （v0.6.0 起 `Client.init` 返回 `error{OutOfMemory}!Client`，需 `try`）
+        var client = try httpz.Client.init(self.allocator, .{
             .host = parsed.host,
             .port = parsed.port,
             .tls_config = tls_cfg,
