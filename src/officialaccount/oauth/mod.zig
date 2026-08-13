@@ -58,7 +58,8 @@ pub const Oauth = struct {
     }
 
     /// 刷新 user access_token。
-    pub fn refreshAccessToken(self: *Self, refresh_token: []const u8) !ResAccessToken {
+    /// 返回的 `std.json.Parsed(ResAccessToken)` 由调用方持有并负责 `deinit`。
+    pub fn refreshAccessToken(self: *Self, refresh_token: []const u8) !std.json.Parsed(ResAccessToken) {
         const uri = try std.fmt.allocPrint(
             self.allocator,
             "https://api.weixin.qq.com/sns/oauth2/refresh_token?appid={s}&grant_type=refresh_token&refresh_token={s}",
@@ -70,13 +71,13 @@ pub const Oauth = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(ResAccessToken, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(ResAccessToken, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 校验 user access_token 是否有效。

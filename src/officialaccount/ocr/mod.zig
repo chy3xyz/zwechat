@@ -57,7 +57,8 @@ pub const Ocr = struct {
         const client = util_http.getDefaultClient(self.allocator);
         const resp = try client.postJSON(uri, body);
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, path)) |_| {
+        if (try util_error.decodeWithCommonError(self.allocator, resp, path)) |ce| {
+            defer ce.deinit();
             self.allocator.free(resp);
             return util_error.WechatError.ApiError;
         }

@@ -400,7 +400,8 @@ pub const Message = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "SendCustomerText")) |_| {
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "SendCustomerText")) |ce| {
+            defer ce.deinit();
             return util_error.WechatError.ApiError;
         }
     }

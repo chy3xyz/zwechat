@@ -125,7 +125,7 @@ pub const Message = struct {
     ///
     /// 对应 `_ref/wechat/work/message/message.go` 的 `SendText`。
     /// 本方法会强制把 `msg_type` 置为 `"text"`。
-    pub fn sendText(self: *Self, req: SendTextRequest) !SendResponse {
+    pub fn sendText(self: *Self, req: SendTextRequest) !std.json.Parsed(SendResponse) {
         var copy = req;
         copy.common.msg_type = "text";
         return self.send(SendTextRequest, copy);
@@ -135,7 +135,7 @@ pub const Message = struct {
     ///
     /// 对应 `_ref/wechat/work/message/message.go` 的 `SendImage`。
     /// 本方法会强制把 `msg_type` 置为 `"image"`。
-    pub fn sendImage(self: *Self, req: SendImageRequest) !SendResponse {
+    pub fn sendImage(self: *Self, req: SendImageRequest) !std.json.Parsed(SendResponse) {
         var copy = req;
         copy.common.msg_type = "image";
         return self.send(SendImageRequest, copy);
@@ -145,7 +145,7 @@ pub const Message = struct {
     ///
     /// 对应 WeCom API `msgtype: "markdown"`。本方法会强制把 `msg_type`
     /// 置为 `"markdown"`。内容直接传掉 fields 中的 `markdown.content`。
-    pub fn sendMarkdown(self: *Self, req: SendMarkdownRequest) !SendResponse {
+    pub fn sendMarkdown(self: *Self, req: SendMarkdownRequest) !std.json.Parsed(SendResponse) {
         var copy = req;
         copy.common.msg_type = "markdown";
         return self.send(SendMarkdownRequest, copy);
@@ -159,7 +159,7 @@ pub const Message = struct {
     ///
     /// `T` 必须是 `SendTextRequest` 或 `SendImageRequest` 之一；调用方
     /// 应通过 `sendText` / `sendImage` 等包装方法间接调用。
-    fn send(self: *Self, comptime T: type, req: T) !SendResponse {
+    fn send(self: *Self, comptime T: type, req: T) !std.json.Parsed(SendResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -177,13 +177,13 @@ pub const Message = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(SendResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(SendResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 };
 

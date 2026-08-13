@@ -94,7 +94,8 @@ pub const Kf = struct {
     /// 拉取客服账号列表。
     ///
     /// 对应 `_ref/wechat/work/kf/account.go` 的 `AccountList`。
-    pub fn getAccountList(self: *Self) !AccountListResponse {
+    /// 返回的 `std.json.Parsed(AccountListResponse)` 由调用方持有并负责 `deinit`。
+    pub fn getAccountList(self: *Self) !std.json.Parsed(AccountListResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -109,19 +110,20 @@ pub const Kf = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(AccountListResponse, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(AccountListResponse, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 客服向客户发送文本消息。
     ///
     /// 对应 `_ref/wechat/work/kf/sendmsg.go` 的 `SendMsg`，并固定 `msgtype = "text"`。
-    pub fn sendMsg(self: *Self, msg: TextMessage) !SendMsgResponse {
+    /// 返回的 `std.json.Parsed(SendMsgResponse)` 由调用方持有并负责 `deinit`。
+    pub fn sendMsg(self: *Self, msg: TextMessage) !std.json.Parsed(SendMsgResponse) {
         if (msg.open_kfid.len == 0 or msg.touser.len == 0 or msg.content.len == 0) {
             return util_error.WechatError.InvalidArgument;
         }
@@ -143,13 +145,13 @@ pub const Kf = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(SendMsgResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(SendMsgResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 };
 

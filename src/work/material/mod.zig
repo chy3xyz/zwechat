@@ -117,7 +117,7 @@ pub const Material = struct {
         media_type: MediaType,
         file_path: []const u8,
         filename: ?[]const u8,
-    ) !UploadResponse {
+    ) !std.json.Parsed(UploadResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -144,20 +144,20 @@ pub const Material = struct {
         const resp = try client.postMultipart(uri, &fields);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(UploadResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(UploadResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 拉取永久素材列表。
     ///
     /// 对应 WeWork `/cgi-bin/material/get_materiallist` 接口。
     /// `req.media_type` 决定列表类型，`req.offset` / `req.count` 控制分页。
-    pub fn getMediaList(self: *Self, req: MediaListRequest) !MediaListResponse {
+    pub fn getMediaList(self: *Self, req: MediaListRequest) !std.json.Parsed(MediaListResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -179,13 +179,13 @@ pub const Material = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(MediaListResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(MediaListResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 };
 

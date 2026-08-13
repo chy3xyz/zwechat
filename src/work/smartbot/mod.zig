@@ -162,9 +162,10 @@ pub const Server = struct {
         // actually holds the corp_id.
         if (!std.mem.eql(u8, decoded.app_id, self.ctx.config.corp_id)) return error.CorpIDMismatch;
 
-        // 5) Parse inner XML
-        const inner_doc = try util_xml.parse(self.allocator, decoded.raw_xml_msg);
+        // 5) Parse inner XML；doc 必须基于持久副本 raw_xml_dup 解析，
+        //    否则 elements 指向 decoded.raw_xml_msg（函数返回前被释放）造成 UAF。
         const raw_xml_dup = try self.allocator.dupe(u8, decoded.raw_xml_msg);
+        const inner_doc = try util_xml.parse(self.allocator, raw_xml_dup);
 
         // 6) Pull standard fields
         const from_user = inner_doc.get("FromUserName") orelse "";

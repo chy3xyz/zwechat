@@ -30,6 +30,9 @@ pub const Params = struct {
 };
 
 /// `PreOrder` — 微信返回的 prepay 信息（XML）。
+///
+/// 各字段切片指向内部持有的 XML 响应缓冲区，读取完毕后调用方必须调用
+/// `deinit` 释放底层内存。
 pub const PreOrder = struct {
     return_code: []const u8 = "",
     return_msg: []const u8 = "",
@@ -44,6 +47,18 @@ pub const PreOrder = struct {
     mweb_url: []const u8 = "",
     err_code: []const u8 = "",
     err_code_des: []const u8 = "",
+
+    /// 持有底层 XML 响应缓冲区的所有权（字段切片均指向它）。
+    _raw: []const u8 = &.{},
+    _allocator: ?std.mem.Allocator = null,
+
+    /// 释放底层响应缓冲区。
+    pub fn deinit(self: *PreOrder) void {
+        if (self._allocator) |a| {
+            if (self._raw.len > 0) a.free(@constCast(self._raw));
+        }
+        self.* = .{};
+    }
 };
 
 /// JS SDK 用的拉起支付配置。
@@ -65,6 +80,18 @@ pub const QueryOrderResult = struct {
     trade_state: []const u8 = "",
     out_trade_no: []const u8 = "",
     transaction_id: []const u8 = "",
+
+    /// 持有底层 XML 响应缓冲区的所有权（字段切片均指向它）。
+    _raw: []const u8 = &.{},
+    _allocator: ?std.mem.Allocator = null,
+
+    /// 释放底层响应缓冲区。
+    pub fn deinit(self: *QueryOrderResult) void {
+        if (self._allocator) |a| {
+            if (self._raw.len > 0) a.free(@constCast(self._raw));
+        }
+        self.* = .{};
+    }
 };
 
 /// 关闭订单结果。
@@ -74,6 +101,18 @@ pub const CloseOrderResult = struct {
     result_code: []const u8 = "",
     err_code: []const u8 = "",
     err_code_des: []const u8 = "",
+
+    /// 持有底层 XML 响应缓冲区的所有权（字段切片均指向它）。
+    _raw: []const u8 = &.{},
+    _allocator: ?std.mem.Allocator = null,
+
+    /// 释放底层响应缓冲区。
+    pub fn deinit(self: *CloseOrderResult) void {
+        if (self._allocator) |a| {
+            if (self._raw.len > 0) a.free(@constCast(self._raw));
+        }
+        self.* = .{};
+    }
 };
 
 /// APP 拉起支付配置。
@@ -90,10 +129,20 @@ pub const AppConfig = struct {
 pub const Order = struct {
     cfg: Config,
 
+    /// 可选的可注入 transport（测试用，注入 MockTransport 拦截 HTTP）。
+    transport: ?util_http.HttpClient.Transport = null,
+    transport_ctx: ?*anyopaque = null,
+
     const Self = @This();
 
     pub fn init(cfg: Config) Self {
         return .{ .cfg = cfg };
+    }
+
+    /// 注入自定义 transport（`null` 恢复真实 HTTP）。
+    pub fn setTransport(self: *Self, t: ?util_http.HttpClient.Transport, ctx: ?*anyopaque) void {
+        self.transport = t;
+        self.transport_ctx = ctx;
     }
 
     /// 统一下单（POST XML）。
@@ -125,12 +174,13 @@ pub const Order = struct {
 
         var client = util_http.HttpClient.init(allocator);
         defer client.deinit();
+        if (self.transport) |t| client.setTransport(t, self.transport_ctx);
         const body = try client.postXML("https://api.mch.weixin.qq.com/pay/unifiedorder", xml_body);
-        defer allocator.free(body);
 
         var doc = try util_xml.parse(allocator, body);
         defer doc.deinit();
 
+        // body 的所有权随返回值转移给调用方（由 PreOrder.deinit 释放）。
         return .{
             .return_code = doc.get("return_code") orelse "",
             .return_msg = doc.get("return_msg") orelse "",
@@ -145,6 +195,8 @@ pub const Order = struct {
             .mweb_url = doc.get("mweb_url") orelse "",
             .err_code = doc.get("err_code") orelse "",
             .err_code_des = doc.get("err_code_des") orelse "",
+            ._raw = body,
+            ._allocator = allocator,
         };
     }
 
@@ -173,12 +225,13 @@ pub const Order = struct {
 
         var client = util_http.HttpClient.init(allocator);
         defer client.deinit();
+        if (self.transport) |t| client.setTransport(t, self.transport_ctx);
         const body = try client.postXML("https://api.mch.weixin.qq.com/pay/orderquery", xml_body);
-        defer allocator.free(body);
 
         var doc = try util_xml.parse(allocator, body);
         defer doc.deinit();
 
+        // body 的所有权随返回值转移给调用方（由 QueryOrderResult.deinit 释放）。
         return .{
             .return_code = doc.get("return_code") orelse "",
             .return_msg = doc.get("return_msg") orelse "",
@@ -188,6 +241,8 @@ pub const Order = struct {
             .trade_state = doc.get("trade_state") orelse "",
             .out_trade_no = doc.get("out_trade_no") orelse "",
             .transaction_id = doc.get("transaction_id") orelse "",
+            ._raw = body,
+            ._allocator = allocator,
         };
     }
 
@@ -216,18 +271,21 @@ pub const Order = struct {
 
         var client = util_http.HttpClient.init(allocator);
         defer client.deinit();
+        if (self.transport) |t| client.setTransport(t, self.transport_ctx);
         const body = try client.postXML("https://api.mch.weixin.qq.com/pay/closeorder", xml_body);
-        defer allocator.free(body);
 
         var doc = try util_xml.parse(allocator, body);
         defer doc.deinit();
 
+        // body 的所有权随返回值转移给调用方（由 CloseOrderResult.deinit 释放）。
         return .{
             .return_code = doc.get("return_code") orelse "",
             .return_msg = doc.get("return_msg") orelse "",
             .result_code = doc.get("result_code") orelse "",
             .err_code = doc.get("err_code") orelse "",
             .err_code_des = doc.get("err_code_des") orelse "",
+            ._raw = body,
+            ._allocator = allocator,
         };
     }
 
@@ -381,4 +439,43 @@ test "Order.prePayID 空值返回错误" {
     var o = Order.init(.{});
     const result = o.prePayID(std.testing.allocator, .{});
     try std.testing.expectError(error.PrepayIdEmpty, result);
+}
+
+test "prePayOrder 返回值字段指向内部缓冲区（UAF 回归）" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.mch.weixin.qq.com/pay/unifiedorder", .{
+        .body =
+        \\<xml>
+        \\  <return_code><![CDATA[SUCCESS]]></return_code>
+        \\  <return_msg><![CDATA[OK]]></return_msg>
+        \\  <result_code><![CDATA[SUCCESS]]></result_code>
+        \\  <appid><![CDATA[wx-app]]></appid>
+        \\  <mch_id><![CDATA[mch]]></mch_id>
+        \\  <prepay_id><![CDATA[wx_prepay_123]]></prepay_id>
+        \\  <trade_type><![CDATA[JSAPI]]></trade_type>
+        \\</xml>
+        ,
+    });
+
+    var o = Order.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "key" });
+    o.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var result = try o.prePayOrder(allocator, .{
+        .total_fee = "100",
+        .create_ip = "127.0.0.1",
+        .body = "test",
+        .out_trade_no = "t-1",
+        .open_id = "ox",
+        .trade_type = "JSAPI",
+        .notify_url = "https://example.com/cb",
+    });
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("SUCCESS", result.return_code);
+    try std.testing.expectEqualStrings("OK", result.return_msg);
+    try std.testing.expectEqualStrings("SUCCESS", result.result_code);
+    try std.testing.expectEqualStrings("wx_prepay_123", result.prepay_id);
 }

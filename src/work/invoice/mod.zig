@@ -129,7 +129,7 @@ pub const Invoice = struct {
     /// 查询电子发票。
     ///
     /// 对应 `_ref/wechat/work/invoice/invoice.go` 的 `GetInvoiceInfo`。
-    pub fn getInvoiceInfo(self: *Self, req: GetInvoiceInfoRequest) !GetInvoiceInfoResponse {
+    pub fn getInvoiceInfo(self: *Self, req: GetInvoiceInfoRequest) !std.json.Parsed(GetInvoiceInfoResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -151,19 +151,19 @@ pub const Invoice = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(GetInvoiceInfoResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(GetInvoiceInfoResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 批量查询电子发票。
     ///
     /// 对应 `_ref/wechat/work/invoice/invoice.go` 的 `GetInvoiceInfoBatch`。
-    pub fn getInvoiceBatch(self: *Self, req: GetInvoiceBatchRequest) !GetInvoiceBatchResponse {
+    pub fn getInvoiceBatch(self: *Self, req: GetInvoiceBatchRequest) !std.json.Parsed(GetInvoiceBatchResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -180,13 +180,13 @@ pub const Invoice = struct {
 
         _ = req; // 解析后已使用占位请求体；这里只做骨架演示。
 
-        var parsed = std.json.parseFromSlice(GetInvoiceBatchResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(GetInvoiceBatchResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 };
 

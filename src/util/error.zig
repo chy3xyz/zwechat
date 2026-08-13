@@ -32,10 +32,16 @@ pub const WechatError = error{
 ///
 /// 与上游 Go 版字段一一对应：`errcode` 为错误码（0 表示成功），`errmsg` 为错误描述，
 /// `api_name` 是调用方传入的接口名（如 "Send"），便于排错。
+///
+/// `errmsg` 由 `parseCommonError` 深拷贝而来（拥有），调用方读取完后必须调用
+/// `deinit` 释放，否则泄漏。
 pub const CommonError = struct {
     api_name: []const u8,
     errcode: i64,
     errmsg: []const u8,
+
+    /// 用于释放 `errmsg` 的 allocator（`api_name` 借用调用方，不释放）。
+    _allocator: ?std.mem.Allocator = null,
 
     /// 格式化为字符串，等价于 Go 的 `fmt.Sprintf("%s Error , errcode=%d , errmsg=%s", ...)`。
     pub fn format(self: CommonError, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
@@ -44,6 +50,13 @@ pub const CommonError = struct {
             "{s} Error , errcode={d} , errmsg={s}",
             .{ self.api_name, self.errcode, self.errmsg },
         );
+    }
+
+    /// 释放 `errmsg` 深拷贝。按值调用，释放后不应再读取 `errmsg`。
+    pub fn deinit(self: CommonError) void {
+        if (self._allocator) |a| {
+            if (self.errmsg.len > 0) a.free(@constCast(self.errmsg));
+        }
     }
 };
 
@@ -87,7 +100,7 @@ pub fn parseCommonError(
         CommonErrorJson,
         allocator,
         response,
-        .{},
+        .{ .allocate = .alloc_always },
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // JSON 结构不符合 CommonError 形态时（如空响应 / 非 JSON），不视为错误，
@@ -97,10 +110,13 @@ pub fn parseCommonError(
     defer parsed.deinit();
     const v = parsed.value;
     if (v.errcode == 0) return null;
+    // 深拷贝 errmsg，避免其在 parsed.deinit 后悬垂（UAF）。
+    const errmsg_dup = try allocator.dupe(u8, v.errmsg);
     return CommonError{
         .api_name = api_name,
         .errcode = v.errcode,
-        .errmsg = v.errmsg,
+        .errmsg = errmsg_dup,
+        ._allocator = allocator,
     };
 }
 
@@ -109,21 +125,22 @@ pub fn parseCommonError(
 ///
 /// `T` 必须是一个结构体，且（如果需要错误检测）其字段中有名为 `common_error` 的嵌套
 /// `CommonError` 字段。Go 版使用反射，Zig 版显式走模板。
+///
+/// 返回的 `std.json.Parsed(T)` 由调用方持有并负责 `deinit`，避免内部切片
+/// 在返回前被释放导致 use-after-free。
 pub fn decodeWithError(
     comptime T: type,
     allocator: std.mem.Allocator,
     response: []const u8,
     api_name: []const u8,
-) WechatErrorDecodeError!T {
+) WechatErrorDecodeError!std.json.Parsed(T) {
     _ = api_name; // reserved for future use (CommonError checking)
-    const parsed = json.parseFromSlice(
+    return json.parseFromSlice(
         T,
         allocator,
         response,
-        .{ .ignore_unknown_fields = true },
+        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
     ) catch return error.DecodeError;
-    defer parsed.deinit();
-    return parsed.value;
 }
 
 /// 错误集合：仅在 JSON 解析失败（无法解析为 CommonError 形态）时返回。
@@ -134,7 +151,8 @@ pub const WechatErrorDecodeError = WechatError || error{OutOfMemory};
 /// - 响应可解析为 JSON 且 `errcode != 0`：返回 `error.ApiError`。
 /// - 其他情况：返回 `response` 本身（不复制）。
 pub fn handleFileResponse(response: []const u8, api_name: []const u8) WechatErrorDecodeError![]const u8 {
-    if (try decodeWithCommonError(std.heap.page_allocator, response, api_name)) |_| {
+    if (try decodeWithCommonError(std.heap.page_allocator, response, api_name)) |ce| {
+        defer ce.deinit();
         return error.ApiError;
     }
     return response;
@@ -166,7 +184,8 @@ test "decodeWithCommonError 对 errcode=40013 返回错误" {
     ;
     const result = try decodeWithCommonError(allocator, body, "GetAccessToken");
     try std.testing.expect(result != null);
-    const ce = result.?;
+    var ce = result.?;
+    defer ce.deinit();
     try std.testing.expectEqualStrings("GetAccessToken", ce.api_name);
     try std.testing.expectEqual(@as(i64, 40013), ce.errcode);
     try std.testing.expectEqualStrings("invalid appid", ce.errmsg);

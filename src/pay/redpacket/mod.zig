@@ -27,15 +27,37 @@ pub const RedpacketResult = struct {
     result_code: []const u8 = "",
     err_code: []const u8 = "",
     mch_billno: []const u8 = "",
+
+    /// 持有底层 XML 响应缓冲区的所有权（字段切片均指向它）。
+    _raw: []const u8 = &.{},
+    _allocator: ?std.mem.Allocator = null,
+
+    /// 释放底层响应缓冲区。
+    pub fn deinit(self: *RedpacketResult) void {
+        if (self._allocator) |a| {
+            if (self._raw.len > 0) a.free(@constCast(self._raw));
+        }
+        self.* = .{};
+    }
 };
 
 pub const Redpacket = struct {
     cfg: Config,
 
+    /// 可选的可注入 transport（测试用，注入 MockTransport 拦截 HTTP）。
+    transport: ?util_http.HttpClient.Transport = null,
+    transport_ctx: ?*anyopaque = null,
+
     const Self = @This();
 
     pub fn init(cfg: Config) Self {
         return .{ .cfg = cfg };
+    }
+
+    /// 注入自定义 transport（`null` 恢复真实 HTTP）。
+    pub fn setTransport(self: *Self, t: ?util_http.HttpClient.Transport, ctx: ?*anyopaque) void {
+        self.transport = t;
+        self.transport_ctx = ctx;
     }
 
     pub fn sendNormal(self: *Self, allocator: std.mem.Allocator, p: RedpacketParams) !RedpacketResult {
@@ -90,22 +112,25 @@ pub const Redpacket = struct {
 
         var client = util_http.HttpClient.init(allocator);
         defer client.deinit();
+        if (self.transport) |t| client.setTransport(t, self.transport_ctx);
         const url = "https://api.mch.weixin.qq.com/mmpaymkttransfers/sendredpack";
         const body = if (self.cfg.root_ca.len > 0)
             try client.postXMLWithTLS(url, xml_body, self.cfg.root_ca, self.cfg.mch_id)
         else
             try client.postXML(url, xml_body);
-        defer allocator.free(body);
 
         var doc = try util_xml.parse(allocator, body);
         defer doc.deinit();
 
+        // body 的所有权随返回值转移给调用方（由 RedpacketResult.deinit 释放）。
         return .{
             .return_code = doc.get("return_code") orelse "",
             .return_msg = doc.get("return_msg") orelse "",
             .result_code = doc.get("result_code") orelse "",
             .err_code = doc.get("err_code") orelse "",
             .mch_billno = doc.get("mch_billno") orelse "",
+            ._raw = body,
+            ._allocator = allocator,
         };
     }
 };
@@ -121,4 +146,41 @@ test "RedpacketParams 默认值" {
         .wishing = "w",
     };
     try std.testing.expectEqualStrings("", p.remark);
+}
+
+test "sendNormal 返回值字段指向内部缓冲区（UAF 回归）" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.mch.weixin.qq.com/mmpaymkttransfers/sendredpack", .{
+        .body =
+        \\<xml>
+        \\  <return_code><![CDATA[SUCCESS]]></return_code>
+        \\  <return_msg><![CDATA[OK]]></return_msg>
+        \\  <result_code><![CDATA[SUCCESS]]></result_code>
+        \\  <err_code><![CDATA[0]]></err_code>
+        \\  <mch_billno><![CDATA[bill-1]]></mch_billno>
+        \\</xml>
+        ,
+    });
+
+    var r = Redpacket.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "key" });
+    r.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var result = try r.sendNormal(allocator, .{
+        .mch_billno = "bill-1",
+        .send_name = "x",
+        .act_name = "a",
+        .re_openid = "ox",
+        .total_amount = 100,
+        .total_num = 1,
+        .wishing = "w",
+    });
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("SUCCESS", result.return_code);
+    try std.testing.expectEqualStrings("OK", result.return_msg);
+    try std.testing.expectEqualStrings("SUCCESS", result.result_code);
+    try std.testing.expectEqualStrings("bill-1", result.mch_billno);
 }

@@ -87,7 +87,7 @@ pub const AddressList = struct {
     /// 读取成员详情。
     ///
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `UserGet`。
-    pub fn getUser(self: *Self, user_id: []const u8) !UserGetResponse {
+    pub fn getUser(self: *Self, user_id: []const u8) !std.json.Parsed(UserGetResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -102,13 +102,13 @@ pub const AddressList = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(UserGetResponse, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(UserGetResponse, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 获取部门成员（简略列表）。
@@ -119,7 +119,7 @@ pub const AddressList = struct {
         self: *Self,
         department_id: i64,
         fetch_child: i64,
-    ) !UserSimpleListResponse {
+    ) !std.json.Parsed(UserSimpleListResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -134,13 +134,13 @@ pub const AddressList = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(UserSimpleListResponse, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(UserSimpleListResponse, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 };
 

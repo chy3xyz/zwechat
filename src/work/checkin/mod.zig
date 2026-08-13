@@ -170,7 +170,8 @@ pub const Checkin = struct {
     /// 拉取打卡记录数据。
     ///
     /// 对应 `_ref/wechat/work/checkin/record.go` 的 `GetCheckinData`。
-    pub fn getCheckinData(self: *Self, req: CheckinDataRequest) !CheckinDataResponse {
+    /// 返回的 `std.json.Parsed(CheckinDataResponse)` 由调用方持有并负责 `deinit`。
+    pub fn getCheckinData(self: *Self, req: CheckinDataRequest) !std.json.Parsed(CheckinDataResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -188,19 +189,20 @@ pub const Checkin = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(CheckinDataResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(CheckinDataResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 拉取员工打卡规则。
     ///
     /// 对应 `_ref/wechat/work/checkin/record.go` 的 `GetOption`。
-    pub fn getCheckinOption(self: *Self, req: CheckinOptionRequest) !CheckinOptionResponse {
+    /// 返回的 `std.json.Parsed(CheckinOptionResponse)` 由调用方持有并负责 `deinit`。
+    pub fn getCheckinOption(self: *Self, req: CheckinOptionRequest) !std.json.Parsed(CheckinOptionResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -218,13 +220,13 @@ pub const Checkin = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(CheckinOptionResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(CheckinOptionResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 };
 

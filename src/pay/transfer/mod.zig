@@ -25,15 +25,37 @@ pub const TransferWalletResult = struct {
     err_code: []const u8 = "",
     payment_no: []const u8 = "",
     payment_time: []const u8 = "",
+
+    /// 持有底层 XML 响应缓冲区的所有权（字段切片均指向它）。
+    _raw: []const u8 = &.{},
+    _allocator: ?std.mem.Allocator = null,
+
+    /// 释放底层响应缓冲区。
+    pub fn deinit(self: *TransferWalletResult) void {
+        if (self._allocator) |a| {
+            if (self._raw.len > 0) a.free(@constCast(self._raw));
+        }
+        self.* = .{};
+    }
 };
 
 pub const Transfer = struct {
     cfg: Config,
 
+    /// 可选的可注入 transport（测试用，注入 MockTransport 拦截 HTTP）。
+    transport: ?util_http.HttpClient.Transport = null,
+    transport_ctx: ?*anyopaque = null,
+
     const Self = @This();
 
     pub fn init(cfg: Config) Self {
         return .{ .cfg = cfg };
+    }
+
+    /// 注入自定义 transport（`null` 恢复真实 HTTP）。
+    pub fn setTransport(self: *Self, t: ?util_http.HttpClient.Transport, ctx: ?*anyopaque) void {
+        self.transport = t;
+        self.transport_ctx = ctx;
     }
 
     pub fn toWallet(self: *Self, allocator: std.mem.Allocator, p: TransferWalletParams) !TransferWalletResult {
@@ -79,16 +101,17 @@ pub const Transfer = struct {
 
         var client = util_http.HttpClient.init(allocator);
         defer client.deinit();
+        if (self.transport) |t| client.setTransport(t, self.transport_ctx);
         const url = "https://api.mch.weixin.qq.com/mmpaymkttransfers/promotion/transfers";
         const body = if (self.cfg.root_ca.len > 0)
             try client.postXMLWithTLS(url, xml_body, self.cfg.root_ca, self.cfg.mch_id)
         else
             try client.postXML(url, xml_body);
-        defer allocator.free(body);
 
         var doc = try util_xml.parse(allocator, body);
         defer doc.deinit();
 
+        // body 的所有权随返回值转移给调用方（由 TransferWalletResult.deinit 释放）。
         return .{
             .return_code = doc.get("return_code") orelse "",
             .return_msg = doc.get("return_msg") orelse "",
@@ -96,6 +119,8 @@ pub const Transfer = struct {
             .err_code = doc.get("err_code") orelse "",
             .payment_no = doc.get("payment_no") orelse "",
             .payment_time = doc.get("payment_time") orelse "",
+            ._raw = body,
+            ._allocator = allocator,
         };
     }
 };
@@ -108,4 +133,40 @@ test "TransferWalletParams 默认值" {
         .partner_trade_no = "tn",
     };
     try std.testing.expectEqualStrings("NO_CHECK", p.check_name);
+}
+
+test "toWallet 返回值字段指向内部缓冲区（UAF 回归）" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.mch.weixin.qq.com/mmpaymkttransfers/promotion/transfers", .{
+        .body =
+        \\<xml>
+        \\  <return_code><![CDATA[SUCCESS]]></return_code>
+        \\  <return_msg><![CDATA[OK]]></return_msg>
+        \\  <result_code><![CDATA[SUCCESS]]></result_code>
+        \\  <err_code><![CDATA[0]]></err_code>
+        \\  <payment_no><![CDATA[pay-123]]></payment_no>
+        \\  <payment_time><![CDATA[2026-01-01 00:00:00]]></payment_time>
+        \\</xml>
+        ,
+    });
+
+    var t = Transfer.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "key" });
+    t.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var result = try t.toWallet(allocator, .{
+        .open_id = "ox",
+        .amount = 100,
+        .desc = "test",
+        .partner_trade_no = "tn-1",
+    });
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("SUCCESS", result.return_code);
+    try std.testing.expectEqualStrings("OK", result.return_msg);
+    try std.testing.expectEqualStrings("SUCCESS", result.result_code);
+    try std.testing.expectEqualStrings("pay-123", result.payment_no);
+    try std.testing.expectEqualStrings("2026-01-01 00:00:00", result.payment_time);
 }

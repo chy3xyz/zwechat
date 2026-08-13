@@ -116,13 +116,15 @@ pub const Material = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "DeleteMaterial")) |_| {
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "DeleteMaterial")) |ce| {
+            defer ce.deinit();
             return util_error.WechatError.ApiError;
         }
     }
 
     /// 获取素材总数。
-    pub fn getMaterialCount(self: *Self) !ResMaterialCount {
+    /// 返回的 `std.json.Parsed(ResMaterialCount)` 由调用方持有并负责 `deinit`。
+    pub fn getMaterialCount(self: *Self) !std.json.Parsed(ResMaterialCount) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -133,17 +135,18 @@ pub const Material = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(ResMaterialCount, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(ResMaterialCount, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 批量获取素材列表。
-    pub fn batchGetMaterial(self: *Self, mtype: PermanentMaterialType, offset: i64, count: i64) !ArticleList {
+    /// 返回的 `std.json.Parsed(ArticleList)` 由调用方持有并负责 `deinit`。
+    pub fn batchGetMaterial(self: *Self, mtype: PermanentMaterialType, offset: i64, count: i64) !std.json.Parsed(ArticleList) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -162,13 +165,13 @@ pub const Material = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(ArticleList, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(ArticleList, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     fn serializeArticles(allocator: std.mem.Allocator, articles: []const Article) ![]u8 {

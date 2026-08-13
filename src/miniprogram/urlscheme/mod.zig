@@ -31,7 +31,8 @@ pub const URLScheme = struct {
     ///
     /// `jump_wxa_json` 为 `jump_wxa` 对象的 JSON 字符串，例如：
     /// `{"path":"pages/index","query":"a=1"}`。
-    pub fn generate(self: *Self, jump_wxa_json: []const u8) !GenerateResponse {
+    /// 返回的 `std.json.Parsed(GenerateResponse)` 由调用方持有并负责 `deinit`。
+    pub fn generate(self: *Self, jump_wxa_json: []const u8) !std.json.Parsed(GenerateResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -53,13 +54,13 @@ pub const URLScheme = struct {
         const resp = try client.postJSON(uri, body_json);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(GenerateResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(GenerateResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 };
 

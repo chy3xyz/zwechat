@@ -44,7 +44,8 @@ pub const User = struct {
         return .{ .ctx = ctx, .allocator = allocator };
     }
 
-    pub fn getUserInfo(self: *Self, open_id: []const u8) !UserInfo {
+    /// 返回的 `std.json.Parsed(UserInfo)` 由调用方持有并负责 `deinit`。
+    pub fn getUserInfo(self: *Self, open_id: []const u8) !std.json.Parsed(UserInfo) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -59,14 +60,15 @@ pub const User = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(UserInfo, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(UserInfo, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
-        return parsed.value;
+        errdefer parsed.deinit();
+        return parsed;
     }
 
-    pub fn getOpenidList(self: *Self, next_openid: []const u8) !OpenidList {
+    /// 返回的 `std.json.Parsed(OpenidList)` 由调用方持有并负责 `deinit`。
+    pub fn getOpenidList(self: *Self, next_openid: []const u8) !std.json.Parsed(OpenidList) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -81,15 +83,15 @@ pub const User = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(OpenidList, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(OpenidList, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.total == 0 and parsed.value.openids.len == 0) {
             // 可能返回 errcode；调用方应当检查
         }
-        return parsed.value;
+        return parsed;
     }
 
     pub fn updateRemark(self: *Self, open_id: []const u8, remark: []const u8) !void {
@@ -114,7 +116,8 @@ pub const User = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "UpdateRemark")) |_| {
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "UpdateRemark")) |ce| {
+            defer ce.deinit();
             return util_error.WechatError.ApiError;
         }
     }

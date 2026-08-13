@@ -72,7 +72,7 @@ pub const Robot = struct {
         self: *Self,
         webhook_key: []const u8,
         msg: TextMessage,
-    ) !WebhookSendResponse {
+    ) !std.json.Parsed(WebhookSendResponse) {
         const uri = try std.fmt.allocPrint(
             self.allocator,
             "{s}?key={s}",
@@ -91,7 +91,7 @@ pub const Robot = struct {
         self: *Self,
         webhook_key: []const u8,
         msg: MarkdownMessage,
-    ) !WebhookSendResponse {
+    ) !std.json.Parsed(WebhookSendResponse) {
         const uri = try std.fmt.allocPrint(
             self.allocator,
             "{s}?key={s}",
@@ -107,18 +107,18 @@ pub const Robot = struct {
 
     // -------------------------------------------------------------------------
 
-    fn postAndDecode(self: *Self, uri: []const u8, body: []const u8) !WebhookSendResponse {
+    fn postAndDecode(self: *Self, uri: []const u8, body: []const u8) !std.json.Parsed(WebhookSendResponse) {
         const client = util_http.getDefaultClient(self.allocator);
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(WebhookSendResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(WebhookSendResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 };
 

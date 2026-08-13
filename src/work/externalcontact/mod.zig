@@ -92,7 +92,7 @@ pub const ExternalContact = struct {
         self: *Self,
         external_userid: []const u8,
         next_cursor: []const u8,
-    ) !ExternalUserDetailResponse {
+    ) !std.json.Parsed(ExternalUserDetailResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -107,13 +107,13 @@ pub const ExternalContact = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(ExternalUserDetailResponse, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(ExternalUserDetailResponse, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 按员工 `userid` 列出其所有客户的 `external_userid`。
@@ -123,7 +123,7 @@ pub const ExternalContact = struct {
     pub fn getExternalContactList(
         self: *Self,
         userid: []const u8,
-    ) !ExternalUserListResponse {
+    ) !std.json.Parsed(ExternalUserListResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -138,13 +138,13 @@ pub const ExternalContact = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(ExternalUserListResponse, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(ExternalUserListResponse, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 };
 

@@ -89,7 +89,7 @@ pub const AppChat = struct {
     ///
     /// 对应 `_ref/wechat/work/appchat/appchat.go` 之外的「创建群」接口
     /// （`/cgi-bin/appchat/create`），是群推送流程的前置步骤。
-    pub fn createChat(self: *Self, req: CreateChatRequest) !CreateChatResponse {
+    pub fn createChat(self: *Self, req: CreateChatRequest) !std.json.Parsed(CreateChatResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -107,19 +107,19 @@ pub const AppChat = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(CreateChatResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(CreateChatResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 获取群信息。
     ///
     /// 对应 `/cgi-bin/appchat/get`。
-    pub fn getChatInfo(self: *Self, chat_id: []const u8) !ChatInfo {
+    pub fn getChatInfo(self: *Self, chat_id: []const u8) !std.json.Parsed(ChatInfo) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -134,19 +134,19 @@ pub const AppChat = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(ChatInfo, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(ChatInfo, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 修改群信息。
     ///
     /// 对应 `/cgi-bin/appchat/update`。
-    pub fn updateChat(self: *Self, req: UpdateChatRequest) !CommonResponse {
+    pub fn updateChat(self: *Self, req: UpdateChatRequest) !std.json.Parsed(CommonResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -164,13 +164,13 @@ pub const AppChat = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(CommonResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(CommonResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 };
 

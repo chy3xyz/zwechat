@@ -56,7 +56,8 @@ pub const DataCube = struct {
         const client = util_http.getDefaultClient(self.allocator);
         const resp = try client.postJSON(uri, body);
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, endpoint)) |_| {
+        if (try util_error.decodeWithCommonError(self.allocator, resp, endpoint)) |ce| {
+            defer ce.deinit();
             self.allocator.free(resp);
             return util_error.WechatError.ApiError;
         }

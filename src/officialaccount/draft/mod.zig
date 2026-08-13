@@ -31,7 +31,8 @@ pub const Draft = struct {
         const client = util_http.getDefaultClient(self.allocator);
         const resp = try client.postJSON(uri, articles_json);
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "DraftAdd")) |_| {
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "DraftAdd")) |ce| {
+            defer ce.deinit();
             self.allocator.free(resp);
             return util_error.WechatError.ApiError;
         }
@@ -57,7 +58,8 @@ pub const Draft = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "DraftDelete")) |_| {
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "DraftDelete")) |ce| {
+            defer ce.deinit();
             return util_error.WechatError.ApiError;
         }
     }

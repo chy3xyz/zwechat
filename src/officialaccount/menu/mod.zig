@@ -42,12 +42,14 @@ pub const Menu = struct {
         defer self.allocator.free(body);
 
         if (try util_error.decodeWithCommonError(self.allocator, body, "SetMenu")) |ce| {
+            defer ce.deinit();
             std.debug.print("SetMenu err: {s}\n", .{ce.errmsg});
         }
     }
 
     /// 查询当前菜单。
-    pub fn getMenu(self: *Self) !ResMenu {
+    /// 返回的 `std.json.Parsed(ResMenu)` 由调用方持有并负责 `deinit`。
+    pub fn getMenu(self: *Self) !std.json.Parsed(ResMenu) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -62,13 +64,13 @@ pub const Menu = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(ResMenu, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(ResMenu, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 删除菜单。
@@ -87,7 +89,8 @@ pub const Menu = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        if (try util_error.decodeWithCommonError(self.allocator, body, "DeleteMenu")) |_| {
+        if (try util_error.decodeWithCommonError(self.allocator, body, "DeleteMenu")) |ce| {
+            defer ce.deinit();
             return util_error.WechatError.ApiError;
         }
     }
@@ -122,13 +125,15 @@ pub const Menu = struct {
         const body = try client.postJSON(uri, buf.items);
         defer self.allocator.free(body);
 
-        if (try util_error.decodeWithCommonError(self.allocator, body, "AddConditional")) |_| {
+        if (try util_error.decodeWithCommonError(self.allocator, body, "AddConditional")) |ce| {
+            defer ce.deinit();
             return util_error.WechatError.ApiError;
         }
     }
 
     /// 测试个性化菜单匹配。
-    pub fn menuTryMatch(self: *Self, user_id: []const u8) ![]Button {
+    /// 返回的 `std.json.Parsed(TryMatchResult)` 由调用方持有并负责 `deinit`。
+    pub fn menuTryMatch(self: *Self, user_id: []const u8) !std.json.Parsed(TryMatchResult) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -146,17 +151,13 @@ pub const Menu = struct {
         const body = try client.postJSON(uri, req_body);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(struct {
-            errcode: i64 = 0,
-            errmsg: []const u8 = "",
-            button: []Button = &.{},
-        }, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(TryMatchResult, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value.button;
+        return parsed;
     }
 };
 
@@ -241,6 +242,13 @@ pub const ResMenu = struct {
         matchrule: MatchRule = .{},
         menuid: i64 = 0,
     };
+};
+
+/// `MenuTryMatch` 返回结构。
+pub const TryMatchResult = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    button: []Button = &.{},
 };
 
 // ──────────────────────────────────────────────────────────────────────────────

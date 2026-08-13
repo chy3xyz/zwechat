@@ -170,11 +170,8 @@ pub const Oauth = struct {
     /// 根据 code 获取用户身份 / userid。对应 Go 的 `UserFromCode`。
     ///
     /// 命中 `UserId` 字段时为企业成员；只有 `OpenID` 时为非企业成员。
-    /// 调用方负责 `deinit` 返回值的字符串字段吗？——返回的是切片视图（来自 JSON 解析
-    /// 的内存），生命周期与 `ResUserInfo` 绑定；不要单独 free 字段，统一走 `parsed.deinit()`。
-    /// 此处我们直接返回 `ResUserInfo` 值给调用方，所有权仍归内部解析缓冲；
-    /// 调用方若需要长期持有字段，请自行 `dupe`。
-    pub fn userInfoToId(self: *Self, code: []const u8) !ResUserInfo {
+    /// 返回的 `std.json.Parsed(ResUserInfo)` 由调用方持有并负责 `deinit`。
+    pub fn userInfoToId(self: *Self, code: []const u8) !std.json.Parsed(ResUserInfo) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -189,17 +186,18 @@ pub const Oauth = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(ResUserInfo, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(ResUserInfo, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 获取访问用户身份 / 登录身份。对应 Go 的 `GetUserInfo`。
-    pub fn getUserInfo(self: *Self, code: []const u8) !GetUserInfoResponse {
+    /// 返回的 `std.json.Parsed(GetUserInfoResponse)` 由调用方持有并负责 `deinit`。
+    pub fn getUserInfo(self: *Self, code: []const u8) !std.json.Parsed(GetUserInfoResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -214,19 +212,20 @@ pub const Oauth = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(GetUserInfoResponse, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(GetUserInfoResponse, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 获取访问用户敏感信息（POST JSON）。对应 Go 的 `GetUserDetail`。
     ///
     /// 调用方只需传入 `user_ticket`；请求体由本方法拼接。
-    pub fn getUserDetail(self: *Self, user_ticket: []const u8) !GetUserDetailResponse {
+    /// 返回的 `std.json.Parsed(GetUserDetailResponse)` 由调用方持有并负责 `deinit`。
+    pub fn getUserDetail(self: *Self, user_ticket: []const u8) !std.json.Parsed(GetUserDetailResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -248,17 +247,18 @@ pub const Oauth = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(GetUserDetailResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(GetUserDetailResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 获取用户二次验证信息（POST JSON）。
-    pub fn getTfaInfo(self: *Self, code: []const u8) !GetTfaInfoResponse {
+    /// 返回的 `std.json.Parsed(GetTfaInfoResponse)` 由调用方持有并负责 `deinit`。
+    pub fn getTfaInfo(self: *Self, code: []const u8) !std.json.Parsed(GetTfaInfoResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -280,13 +280,13 @@ pub const Oauth = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(GetTfaInfoResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(GetTfaInfoResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 使用二次验证（POST JSON）。
@@ -312,7 +312,8 @@ pub const Oauth = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "TfaSucc")) |_| {
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "TfaSucc")) |ce| {
+            defer ce.deinit();
             return util_error.WechatError.ApiError;
         }
     }

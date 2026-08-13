@@ -109,7 +109,7 @@ pub const MsgAudit = struct {
     /// 拉取群聊基础信息。
     ///
     /// 对应 WeWork `/cgi-bin/msgaudit/groupchat/get_room_info` 接口。
-    pub fn getRoomInfo(self: *Self, req: RoomInfoRequest) !RoomInfoResponse {
+    pub fn getRoomInfo(self: *Self, req: RoomInfoRequest) !std.json.Parsed(RoomInfoResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -127,19 +127,19 @@ pub const MsgAudit = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(RoomInfoResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(RoomInfoResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// 拉取成员的"同意存档"状态。
     ///
     /// 对应 WeWork `/cgi-bin/msgaudit/get_agree_info` 接口。
-    pub fn getAgreeInfo(self: *Self, req: AgreeInfoRequest) !AgreeInfoResponse {
+    pub fn getAgreeInfo(self: *Self, req: AgreeInfoRequest) !std.json.Parsed(AgreeInfoResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -157,13 +157,13 @@ pub const MsgAudit = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(AgreeInfoResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(AgreeInfoResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 };
 

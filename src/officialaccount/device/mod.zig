@@ -39,7 +39,8 @@ pub const Device = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "TransMsg")) |_| {
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "TransMsg")) |ce| {
+            defer ce.deinit();
             return util_error.WechatError.ApiError;
         }
     }
@@ -73,7 +74,8 @@ pub const Device = struct {
         const client = util_http.getDefaultClient(self.allocator);
         const resp = try client.postJSON(uri, body);
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "CreateQRCode")) |_| {
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "CreateQRCode")) |ce| {
+            defer ce.deinit();
             self.allocator.free(resp);
             return util_error.WechatError.ApiError;
         }

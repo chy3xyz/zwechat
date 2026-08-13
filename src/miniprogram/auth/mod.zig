@@ -50,7 +50,8 @@ pub const Auth = struct {
     }
 
     /// `jscode2session` — 小程序登录凭证校验。
-    pub fn code2Session(self: *Self, js_code: []const u8) !ResCode2Session {
+    /// 返回的 `std.json.Parsed(ResCode2Session)` 由调用方持有并负责 `deinit`。
+    pub fn code2Session(self: *Self, js_code: []const u8) !std.json.Parsed(ResCode2Session) {
         const uri = try std.fmt.allocPrint(
             self.allocator,
             "https://api.weixin.qq.com/sns/jscode2session?appid={s}&secret={s}&js_code={s}&grant_type=authorization_code",
@@ -62,17 +63,18 @@ pub const Auth = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(ResCode2Session, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(ResCode2Session, self.allocator, body, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// `getuserphonenumber` — 通过 code 获取用户手机号。
-    pub fn getPhoneNumber(self: *Self, code: []const u8) !GetPhoneNumberResponse {
+    /// 返回的 `std.json.Parsed(GetPhoneNumberResponse)` 由调用方持有并负责 `deinit`。
+    pub fn getPhoneNumber(self: *Self, code: []const u8) !std.json.Parsed(GetPhoneNumberResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -90,17 +92,18 @@ pub const Auth = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(GetPhoneNumberResponse, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(GetPhoneNumberResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// `checkencryptedmsg` — 检查加密信息是否由微信生成。
-    pub fn checkEncryptedData(self: *Self, encrypted_msg_hash: []const u8) !RspCheckEncryptedData {
+    /// 返回的 `std.json.Parsed(RspCheckEncryptedData)` 由调用方持有并负责 `deinit`。
+    pub fn checkEncryptedData(self: *Self, encrypted_msg_hash: []const u8) !std.json.Parsed(RspCheckEncryptedData) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -122,13 +125,13 @@ pub const Auth = struct {
         const resp = try client.post(uri, body, null);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(RspCheckEncryptedData, self.allocator, resp, .{}) catch {
+        var parsed = std.json.parseFromSlice(RspCheckEncryptedData, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed.value;
+        return parsed;
     }
 
     /// `checksession` — 检验登录态。
@@ -147,7 +150,8 @@ pub const Auth = struct {
         const resp = try client.get(uri);
         defer self.allocator.free(resp);
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "CheckSession")) |_| {
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "CheckSession")) |ce| {
+            defer ce.deinit();
             return util_error.WechatError.ApiError;
         }
     }

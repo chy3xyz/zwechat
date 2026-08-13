@@ -132,9 +132,10 @@ pub const Server = struct {
         // 4) 验证 AppID 匹配
         if (!std.mem.eql(u8, decoded.app_id, self.ctx.config.app_id)) return error.AppIDMismatch;
 
-        // 5) dup 一份 raw_xml 供后续使用
+        // 5) dup 一份 raw_xml 供后续使用；doc 必须基于该持久副本解析，
+        //    否则 elements 指向 decoded.raw_xml_msg（函数返回前被释放）造成 UAF。
         const raw_xml_dup = try self.allocator.dupe(u8, decoded.raw_xml_msg);
-        const inner_doc = try util_xml.parse(self.allocator, decoded.raw_xml_msg);
+        const inner_doc = try util_xml.parse(self.allocator, raw_xml_dup);
 
         return .{
             .allocator = self.allocator,
