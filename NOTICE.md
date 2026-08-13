@@ -8,8 +8,8 @@
 - 项目：zhttp（原 httpz.zig 的延续仓库）
 - 仓库：<https://github.com/chy3xyz/zhttp>
 - 上游原始项目：<https://github.com/allain/httpz.zig>
-- 引入方式：`build.zig.zon` `.httpz` 依赖 → `https://github.com/chy3xyz/zhttp/archive/v0.6.0.tar.gz`（由 `zig fetch` 下载，hash 校验）
-- 版本：v0.6.0
+- 引入方式：`build.zig.zon` `.httpz` 依赖 → `git+https://github.com/chy3xyz/zhttp?ref=v0.6.1#60a02128e28e0f43211d831e5bc4a2b4c2c08dc6`（由 `zig fetch` 下载，hash 校验）
+- 版本：v0.6.1
 
 ## 许可证状态
 
@@ -22,6 +22,6 @@
 **无。** 本项目不再对上游打本地补丁：
 
 - mTLS 客户端证书支持（`tls.config.Client.auth` / `cert` 字段）已由上游 v0.6.0 官方实现
-  （提交 `0431984 feat(tls): add mTLS client certificate & key support (auth/cert) for Client`）。
+  （提交 `0431984 feat(tls): add mTLS client certificate & key support (auth/cert) for Client`），v0.6.1 延续。
 - OpenSSL include 路径由上游 `-Dopenssl-include` 构建选项参数化（提交 `46dad65`），
   跨平台路径由 zwechat `build.zig` 的 `setupOpenSSL` 探测并透传。

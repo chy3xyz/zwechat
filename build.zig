@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // zhttp（httpz.zig 延续仓库）依赖：v0.6.0，由 zig fetch 从
+    // zhttp（httpz.zig 延续仓库）依赖：v0.6.1，由 zig fetch 从
     // https://github.com/chy3xyz/zhttp 拉取（build.zig.zon 声明 URL + hash）。
     // - 关闭 h3：本项目不需要 HTTP/3，避免构建依赖 nghttp3/ngtcp2 系统库；
     // - openssl-include：按 OPENSSL_DIR → Homebrew → 系统默认 探测后透传，

@@ -5,6 +5,19 @@ All notable changes to `zwechat` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-08-13
+
+### Changed
+
+- **httpz 升级 v0.6.1（git 依赖）**：`build.zig.zon` 改为 `git+https://github.com/chy3xyz/zhttp?ref=v0.6.1#60a0212...` 形式；v0.6.1 为内部修复（Headers 保留头 / Request percent-encoding 安全 / chunk 边界），无破坏性 API 变化，`build.zig` / `util/http.zig` 无需改动。
+- **JSON 返回 API 改为所有权转移**：约 30 处 JSON 接口返回类型由 `T` 改为 `std.json.Parsed(T)`（调用方读取 `.value.*` 并负责 `deinit`），消除字段借用响应 body 的 use-after-free。涉及 `officialaccount` / `miniprogram` / `work` 三大域。
+
+### Fixed
+
+- **支付模块返回值 UAF**：`pay/refund` / `pay/transfer` / `pay/redpacket` / `pay/order` 的 XML 响应 body 原先被 `defer free` 而返回字段指向它，改为 body 所有权随返回值转移并新增 `deinit()`；新增 4 个离线回归测试。
+- **XML 解析 UAF**：`officialaccount/server` 与 `work/smartbot` 的 `parseEncryptedMessage` 中 `doc` 改为基于持久副本 `raw_xml_dup` 解析，避免指向被释放的 `decoded.raw_xml_msg`。
+- **`util/error` UAF**：`CommonError.errmsg` 改为深拷贝拥有并新增 `deinit()`；`decodeWithError` 改为返回 `Parsed(T)`；`decodeWithCommonError` 调用方补 `deinit`。
+
 ## [0.2.0] — 2026-08-10
 
 ### Added
@@ -232,7 +245,8 @@ N/A。
 - **0.x**：初始开发版本，API 可能不兼容。
 - **1.0**：计划完成 RSA / PKCS#12 完整实现、work.jsapi 完整 wire 后发布。
 
-[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/chy3xyz/zwechat/releases/tag/v0.3.0
 [0.2.0]: https://github.com/chy3xyz/zwechat/releases/tag/v0.2.0
 [0.1.0]: https://github.com/chy3xyz/zwechat/releases/tag/v0.1.0
 [0.0.1]: https://github.com/chy3xyz/zwechat/releases/tag/v0.0.1

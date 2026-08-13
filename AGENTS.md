@@ -26,7 +26,7 @@
 > - `wechat.zig` 顶层容器，已暴露 work/pay/miniprogram/openplatform 工厂
 >
 > **已知限制**：
-> - `util/http.zig.postXMLWithTLS` 通过 `httpz`（zhttp v0.6.0，OpenSSL 后端）实现 mTLS；OpenSSL include/lib 路径由 `build.zig` 的 `setupOpenSSL` + `resolveOpenSSLInclude` 按 `OPENSSL_DIR` → Homebrew → 系统默认 顺序探测。
+> - `util/http.zig.postXMLWithTLS` 通过 `httpz`（zhttp v0.6.1，OpenSSL 后端）实现 mTLS；OpenSSL include/lib 路径由 `build.zig` 的 `setupOpenSSL` + `resolveOpenSSLInclude` 按 `OPENSSL_DIR` → Homebrew → 系统默认 顺序探测。
 > - `pay/refund` / `pay/transfer` / `pay/redpacket` 在 `pay.Config.root_ca` 非空时自动走 `postXMLWithTLS`；空时退回到普通 HTTPS，便于无证书环境测试。
 
 ---
@@ -41,7 +41,7 @@
 | 运行目标 | 静态库 + 可执行示例 |
 | 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **316 个测试，0 泄漏** |
 
-外部依赖按需声明在 `build.zig.zon`，尽量减少三方依赖；优先使用 Zig 标准库。当前唯一三方依赖：`httpz`（`chy3xyz/zhttp` v0.6.0，URL + hash 经 `zig fetch` 引入，OpenSSL 后端，用于微信支付 mTLS）。
+外部依赖按需声明在 `build.zig.zon`，尽量减少三方依赖；优先使用 Zig 标准库。当前唯一三方依赖：`httpz`（`chy3xyz/zhttp` v0.6.1，git URL + hash 经 `zig fetch` 引入，OpenSSL 后端，用于微信支付 mTLS）。
 
 ---
 
@@ -293,7 +293,7 @@ const oa = wc.getOfficialAccount(cfg);
 ### HTTP 客户端
 
 - `src/util/http.zig` 提供 `httpGet` / `httpPost` / `postJSON` / `postXML` / `postMultipart` / `postXMLWithTLS`，对应 `_ref/wechat/util/http.go`。
-- 普通请求基于 `std.http.Client` + `std.Io`；`postXMLWithTLS` 基于 `httpz`（zhttp v0.6.0，OpenSSL 后端），加载商户 PKCS#12 证书完成 mTLS 双向认证。
+- 普通请求基于 `std.http.Client` + `std.Io`；`postXMLWithTLS` 基于 `httpz`（zhttp v0.6.1，OpenSSL 后端），加载商户 PKCS#12 证书完成 mTLS 双向认证。
 - `HttpClient` 支持可注入 `Transport`，`MockTransport` 用于离线单元测试。
 - 微信支付回调验签需要的 PKCS#12 解析依赖 `crypto.zig` 与 `rsa.zig`。
 
@@ -345,10 +345,11 @@ const oa = wc.getOfficialAccount(cfg);
 - **Cache 接口选型**：vtable 风格（`*anyopaque` + `*const VTable`），与 std.Io / std.Build 一致，便于未来加 Redis / Memcache 实现而不破坏 ABI。
 - **Credential 抽象**：`Fetcher` 函数指针让所有微信服务端交互可被 stub，测试无需真实 HTTP；JSON 响应结构体所有字段都有默认值，能同时容忍成功响应与 `errcode != 0` 的失败响应。
 - **TLS / PKCS#12 / mTLS**：`util.pkcs12.zig` 已实现最小 PKCS#12 解析（PBES2/PBKDF2/AES-256-CBC），`util.rsa.zig` 提供 `parseP12` 包装。`util.http.postXMLWithTLS` 读取 P12 → 解析 PEM → 使用 httpz 完成 HTTPS POST。mTLS 客户端证书支持（`tls.config.Client.auth` / `cert`）由上游 zhttp v0.6.0 官方实现（提交 `0431984`，注释明确 “required for WeChat Pay (zwechat)”），本项目**不再维护任何本地补丁**。
-- **外部依赖**：`build.zig.zon` 通过 URL 依赖 `https://github.com/chy3xyz/zhttp`（tag `v0.6.0` + hash），构建时链接 `-lssl -lcrypto -lc`。升级方式：改 `build.zig.zon` 的 `.url` 后运行 `zig fetch --save <url>` 更新 `.hash`；`build.zig` 需同步适配上游模块名/构建选项（v0.6.0 起模块名 `zhttp`、新增 `-Dh3` / `-Dopenssl-include` 选项，本项目以 `h3=false` + 探测到的 include 路径透传；dependency options 字段名须与 `b.option` 注册名逐字一致，连字符用 `@"openssl-include"` 转义）。
+- **外部依赖**：`build.zig.zon` 通过 git URL 依赖 `https://github.com/chy3xyz/zhttp`（tag `v0.6.1`，commit `60a0212` + hash），构建时链接 `-lssl -lcrypto -lc`。升级方式：改 `build.zig.zon` 的 `.url` 后运行 `zig fetch --save=<name> <git-url>` 更新 `.hash`；`build.zig` 需同步适配上游模块名/构建选项（v0.6.0 起模块名 `zhttp`、新增 `-Dh3` / `-Dopenssl-include` 选项，本项目以 `h3=false` + 探测到的 include 路径透传；dependency options 字段名须与 `b.option` 注册名逐字一致，连字符用 `@"openssl-include"` 转义）。
 - **测试基础设施**：`src/test_runner.zig` 顶部有一段「编译门」test，强制 `@import` 每个子文件，并在测试体内做 `_ = mod;` 引用 — 否则 0.17-dev 的 dead-strip 可能把带 inline test 的文件排除掉，导致 `zig build test` 报告「All 1 tests passed」假象。
 - **最新增强**：
   - **httpz 升级 v0.6.0**：依赖改为 git URL（`chy3xyz/zhttp` v0.6.0）经 `zig fetch` 引入，删除 `vendor/httpz/`；上游官方支持 mTLS（`auth`/`cert`）与 `-Dopenssl-include` 参数化，本地补丁全部作废。
+  - **httpz 升级 v0.6.1**：`zig fetch --save=httpz git+https://github.com/chy3xyz/zhttp#v0.6.1` 升级到 tag `v0.6.1`（commit `60a0212`），`build.zig.zon` 采用 `git+https://...#commit` 形式；v0.6.1 相对 v0.6.0 为内部修复（Headers 保留头、Request percent-encoding 安全、chunk 边界），无破坏性 API 变化，`build.zig` / `util/http.zig` 无需改动。
   - **动态 OpenSSL 路径感知**：`build.zig` 中新增基于 `std.Io.Dir.cwd().access` 的安全目录校验，兼容 macOS Homebrew `/opt/homebrew/opt/openssl@3` 与 `/usr/local/opt/openssl@3`。
   - **基准测试 (Benchmark)**：新增 `src/util/benchmark.zig` 与 `zig build bench` 命令，实测 SHA1 签名 ~253 ns/op，AES-256-CBC 解密 ~116 ns/op，XML 解析 ~137 ns/op。
   - **场景示例 (Examples)**：新增 `examples/officialaccount_server.zig`（公众号消息验证与 AES 解密）、`examples/pay_order.zig`（支付统一下单与 BridgeAppConfig 调起签名）、`examples/work_robot.zig`（企微机器人与 JSAPI 实例）。可通过 `zig build run-oa-server` / `zig build run-pay-order` / `zig build run-work-robot` 运行。

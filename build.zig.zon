@@ -1,12 +1,12 @@
 .{
     .name = .zwechat,
-    .version = "0.2.0",
+    .version = "0.3.0",
     .fingerprint = 0xd658b8e96476550b,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .httpz = .{
-            .url = "https://github.com/chy3xyz/zhttp/archive/v0.6.0.tar.gz",
-            .hash = "zhttp-0.6.0-E85Kv4WHCQBYwK9plzew1sw5asabo9X-p1mLD19CnvF8",
+            .url = "git+https://github.com/chy3xyz/zhttp?ref=v0.6.1#60a02128e28e0f43211d831e5bc4a2b4c2c08dc6",
+            .hash = "zhttp-0.6.1-E85KvyCTCQABFdR4bjuE75GrqGXr7foN4WtV5m7SHZMe",
         },
     },
     .paths = .{
