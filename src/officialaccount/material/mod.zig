@@ -202,7 +202,9 @@ pub const Material = struct {
         for (fields) |f| {
             if (f.value.len == 0) continue;
             if (!first) try buf.append(allocator, ',');
-            try buf.writer.print("\"{s}\":\"", .{f.name});
+            try buf.appendSlice(allocator, "\"");
+            try buf.appendSlice(allocator, f.name);
+            try buf.appendSlice(allocator, "\":\"");
             try appendJsonString(allocator, buf, f.value);
             try buf.append(allocator, '"');
             first = false;
