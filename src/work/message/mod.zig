@@ -205,18 +205,17 @@ fn serializeRequest(allocator: std.mem.Allocator, req: anytype) ![]u8 {
 
     try buf.append(allocator, '{');
     // 公共字段
-    inline for (.{
-        .{ "touser", &c.to_user },
-        .{ "toparty", &c.to_party },
-        .{ "totag", &c.to_tag },
-        .{ "msgtype", &c.msg_type },
-        .{ "agentid", &c.agent_id },
-    }) |pair| {
-        const k: []const u8 = pair[0];
-        const v: *const []const u8 = pair[1];
-        if (v.len != 0) {
-            try buf.print(allocator, "\"{s}\":\"", .{k});
-            try appendJsonString(allocator, &buf, v.*);
+    const common_fields = [_]struct { name: []const u8, value: []const u8 }{
+        .{ .name = "touser", .value = c.to_user },
+        .{ .name = "toparty", .value = c.to_party },
+        .{ .name = "totag", .value = c.to_tag },
+        .{ .name = "msgtype", .value = c.msg_type },
+        .{ .name = "agentid", .value = c.agent_id },
+    };
+    for (common_fields) |f| {
+        if (f.value.len != 0) {
+            try buf.print(allocator, "\"{s}\":\"", .{f.name});
+            try appendJsonString(allocator, &buf, f.value);
             try buf.append(allocator, '"');
             try buf.append(allocator, ',');
         }

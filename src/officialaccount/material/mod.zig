@@ -191,20 +191,19 @@ pub const Material = struct {
     fn writeArticleJson(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), a: *const Article) !void {
         try buf.append(allocator, '{');
         var first = true;
-        inline for (.{
-            .{ "title", &a.title },
-            .{ "thumb_media_id", &a.thumb_media_id },
-            .{ "author", &a.author },
-            .{ "digest", &a.digest },
-            .{ "content", &a.content },
-            .{ "content_source_url", &a.content_source_url },
-        }) |pair| {
-            const k: []const u8 = pair[0];
-            const v: *const []const u8 = pair[1];
-            if (v.len == 0) continue;
+        const fields = [_]struct { name: []const u8, value: []const u8 }{
+            .{ .name = "title", .value = a.title },
+            .{ .name = "thumb_media_id", .value = a.thumb_media_id },
+            .{ .name = "author", .value = a.author },
+            .{ .name = "digest", .value = a.digest },
+            .{ .name = "content", .value = a.content },
+            .{ .name = "content_source_url", .value = a.content_source_url },
+        };
+        for (fields) |f| {
+            if (f.value.len == 0) continue;
             if (!first) try buf.append(allocator, ',');
-            try buf.writer.print("\"{s}\":\"", .{k});
-            try appendJsonString(allocator, buf, v.*);
+            try buf.writer.print("\"{s}\":\"", .{f.name});
+            try appendJsonString(allocator, buf, f.value);
             try buf.append(allocator, '"');
             first = false;
         }

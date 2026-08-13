@@ -330,21 +330,20 @@ fn writeJsonButtons(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u
 fn writeJsonMatchRule(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), r: *const MatchRule) !void {
     try buf.append(allocator, '{');
     var first = true;
-    inline for (.{
-        .{ "group_id", &r.group_id },
-        .{ "sex", &r.sex },
-        .{ "country", &r.country },
-        .{ "province", &r.province },
-        .{ "city", &r.city },
-        .{ "client_platform_type", &r.client_platform_type },
-        .{ "language", &r.language },
-    }) |pair| {
-        const key: []const u8 = pair[0];
-        const val: *const []const u8 = pair[1];
-        if (val.len == 0) continue;
+    const fields = [_]struct { name: []const u8, value: []const u8 }{
+        .{ .name = "group_id", .value = r.group_id },
+        .{ .name = "sex", .value = r.sex },
+        .{ .name = "country", .value = r.country },
+        .{ .name = "province", .value = r.province },
+        .{ .name = "city", .value = r.city },
+        .{ .name = "client_platform_type", .value = r.client_platform_type },
+        .{ .name = "language", .value = r.language },
+    };
+    for (fields) |f| {
+        if (f.value.len == 0) continue;
         if (!first) try buf.append(allocator, ',');
-        try buf.writer.print("\"{s}\":\"", .{key});
-        try appendJsonString(allocator, buf, val.*);
+        try buf.writer.print("\"{s}\":\"", .{f.name});
+        try appendJsonString(allocator, buf, f.value);
         try buf.append(allocator, '"');
         first = false;
     }

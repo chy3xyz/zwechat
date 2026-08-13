@@ -374,20 +374,21 @@ fn jsonStringifyJsErrDetail(allocator: std.mem.Allocator, req: GetJsErrDetailReq
     defer out.deinit();
     var s: std.json.Stringify = .{ .writer = &out.writer };
     try s.beginObject();
-    inline for (.{
-        .{ "startTime", req.startTime },
-        .{ "endTime", req.endTime },
-        .{ "errorMsgMd5", req.errorMsgMd5 },
-        .{ "errorStackMd5", req.errorStackMd5 },
-        .{ "appVersion", req.appVersion },
-        .{ "sdkVersion", req.sdkVersion },
-        .{ "osName", req.osName },
-        .{ "clientVersion", req.clientVersion },
-        .{ "openid", req.openid },
-        .{ "desc", req.desc },
-    }) |pair| {
-        try s.objectField(pair[0]);
-        try s.write(pair[1]);
+    const fields = [_]struct { name: []const u8, value: []const u8 }{
+        .{ .name = "startTime", .value = req.startTime },
+        .{ .name = "endTime", .value = req.endTime },
+        .{ .name = "errorMsgMd5", .value = req.errorMsgMd5 },
+        .{ .name = "errorStackMd5", .value = req.errorStackMd5 },
+        .{ .name = "appVersion", .value = req.appVersion },
+        .{ .name = "sdkVersion", .value = req.sdkVersion },
+        .{ .name = "osName", .value = req.osName },
+        .{ .name = "clientVersion", .value = req.clientVersion },
+        .{ .name = "openid", .value = req.openid },
+        .{ .name = "desc", .value = req.desc },
+    };
+    for (fields) |f| {
+        try s.objectField(f.name);
+        try s.write(f.value);
     }
     try s.objectField("offset");
     try s.write(req.offset);
@@ -402,18 +403,19 @@ fn jsonStringifyJsErrList(allocator: std.mem.Allocator, req: GetJsErrListRequest
     defer out.deinit();
     var s: std.json.Stringify = .{ .writer = &out.writer };
     try s.beginObject();
-    inline for (.{
-        .{ "appVersion", req.appVersion },
-        .{ "errType", req.errType },
-        .{ "startTime", req.startTime },
-        .{ "endTime", req.endTime },
-        .{ "keyword", req.keyword },
-        .{ "openid", req.openid },
-        .{ "orderby", req.orderby },
-        .{ "desc", req.desc },
-    }) |pair| {
-        try s.objectField(pair[0]);
-        try s.write(pair[1]);
+    const fields = [_]struct { name: []const u8, value: []const u8 }{
+        .{ .name = "appVersion", .value = req.appVersion },
+        .{ .name = "errType", .value = req.errType },
+        .{ .name = "startTime", .value = req.startTime },
+        .{ .name = "endTime", .value = req.endTime },
+        .{ .name = "keyword", .value = req.keyword },
+        .{ .name = "openid", .value = req.openid },
+        .{ .name = "orderby", .value = req.orderby },
+        .{ .name = "desc", .value = req.desc },
+    };
+    for (fields) |f| {
+        try s.objectField(f.name);
+        try s.write(f.value);
     }
     try s.objectField("offset");
     try s.write(req.offset);
