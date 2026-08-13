@@ -50,7 +50,7 @@ pub const ArticleListItem = struct {
 };
 
 pub const ArticleListContent = struct {
-    news_item: []Article = &.{},
+    news_item: []const Article = &.{},
     update_time: i64 = 0,
     create_time: i64 = 0,
 };
@@ -60,7 +60,7 @@ pub const ArticleList = struct {
     errmsg: []const u8 = "",
     total_count: i64 = 0,
     item_count: i64 = 0,
-    item: []ArticleListItem = &.{},
+    item: []const ArticleListItem = &.{},
 };
 
 pub const Material = struct {
@@ -98,7 +98,8 @@ pub const Material = struct {
         defer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return self.allocator.dupe(u8, parsed.value.media_id);
+        const media_id = try self.allocator.dupe(u8, parsed.value.media_id);
+        return media_id;
     }
 
     /// 删除永久素材。
