@@ -5,6 +5,20 @@ All notable changes to `zwechat` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-08-13
+
+### Added
+
+- **miniprogram 补齐 17 个子模块**（共 24 个，与 Go 参考实现 1:1 对齐）：`shortlink`、`encryptor`、`werun`、`urllink`、`riskcontrol`、`redpacketcover`、`privacy`、`content`、`business`、`order`（发货）、`ocr`、`subscribe`、`analysis`、`operation`、`tcb`（云开发）、`express`（物流）、`minidrama`（微短剧，含分片上传）、`virtualpayment`（虚拟支付，含 HMAC-SHA256 支付/用户态签名）。
+- **顶层容器懒加载工厂**：`OfficialAccount` 新增 15 个 `getXxx`、`Work` 新增 13 个 `getXxx`、`MiniProgram` 新增 18 个 `getXxx`。
+- **导出补齐**：`officialaccount` 补齐 10 个子模块导出、`work` 补齐 4 个、`pay` 补齐参数/返回类型、`miniprogram` 补齐 Context 与 auth 返回类型。
+- **`util_http.MultipartField.data`**：支持内存字节直接上传（微短剧分片）。
+- **`util_crypto.DecryptedMessage`**：`aesDecryptMsg` 返回命名类型。
+
+### Fixed
+
+- **test_runner 遗漏注册**：补齐 `mp_message/mp_security/pay_transfer/pay_redpacket/pay_v3/work_server/work_smartbot` 等显式注册，暴露并修复 `work/server` 长期隐藏的编译错误（`crypto.DecryptedMessage` 不存在、对非 optional 字段误用 `orelse`）。
+
 ## [0.3.0] — 2026-08-13
 
 ### Changed
@@ -245,7 +259,8 @@ N/A。
 - **0.x**：初始开发版本，API 可能不兼容。
 - **1.0**：计划完成 RSA / PKCS#12 完整实现、work.jsapi 完整 wire 后发布。
 
-[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.0
 [0.3.0]: https://github.com/chy3xyz/zwechat/releases/tag/v0.3.0
 [0.2.0]: https://github.com/chy3xyz/zwechat/releases/tag/v0.2.0
 [0.1.0]: https://github.com/chy3xyz/zwechat/releases/tag/v0.1.0

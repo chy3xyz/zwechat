@@ -2,7 +2,7 @@
 
 `zwechat` 是使用 Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付、开放平台、企业微信、智能对话等能力。
 
-> ✅ **当前状态**：`zig 0.17.0-dev.1567+f0354179a`。`zig build` / `zig build test` / `zig build run` 全部通过，**316 个内联单元测试全部通过且零内存泄漏**。
+> ✅ **当前状态**：`zig 0.17.0-dev.1567+f0354179a`。`zig build` / `zig build test` / `zig build run` 全部通过，**357 个内联单元测试全部通过且零内存泄漏**。
 >
 > 目录包括：
 > - `_ref/wechat/` — 完整克隆的 Go 参考实现（`silenceper/wechat/v2`，Apache-2.0），作为移植依据（**只读**）。
@@ -18,7 +18,7 @@
 > - `util`（http / crypto AES-CBC/ECB+PKCS7+MD5+HMAC-SHA256 / signature SHA1 / RSA-SHA256+PKCS#8+PKCS#1-decrypt / PKCS#12 / XML codec / 错误 / 时间 / 参数 / 通用）
 > - `officialaccount` 14 个子模块（menu/oauth/basic/server/message/material/js/user/datacube/broadcast/device/customerservice/ocr/draft/freepublish）均含真实 HTTP 接口
 > - `pay` 6 个子模块（order/refund/notify/transfer/redpacket + 顶层），order 增加 query/close/bridgeAppConfig/prePayID
-> - `miniprogram` + `auth`（jscode2session / getPhoneNumber）+ `qrcode` / `urlscheme`
+> - `miniprogram` 24 个子模块全量实现（auth / qrcode / urlscheme / shortlink / encryptor / werun / urllink / riskcontrol / redpacketcover / privacy / content / business / order / ocr / subscribe / analysis / operation / tcb / express / minidrama / virtualpayment / message / security）
 > - `work` 13 个子模块（oauth/jsapi/message/material/msgaudit/checkin/kf/externalcontact/invoice/addresslist/appchat/robot/smartbot），jsapi 完整支持 corp / agent ticket
 > - `openplatform` + `account/miniprogram/officialaccount`，account 支持 component_access_token 缓存与 bind/unbind
 > - `minigame` 顶层 + config + context
@@ -39,7 +39,7 @@
 | 构建系统 | 原生 `zig build`（`build.zig` + `build.zig.zon`） |
 | 许可证 | Apache License 2.0（与上游参考保持一致，保留 `_ref/wechat/LICENSE`） |
 | 运行目标 | 静态库 + 可执行示例 |
-| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **316 个测试，0 泄漏** |
+| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **357 个测试，0 泄漏** |
 
 外部依赖按需声明在 `build.zig.zon`，尽量减少三方依赖；优先使用 Zig 标准库。当前唯一三方依赖：`httpz`（`chy3xyz/zhttp` v0.6.1，git URL + hash 经 `zig fetch` 引入，OpenSSL 后端，用于微信支付 mTLS）。
 
@@ -100,13 +100,13 @@ src/
 │   ├── ocr/               # TODO
 │   ├── draft/             # TODO
 │   └── freepublish/       # TODO
-├── miniprogram/           # 小程序 API：auth + qrcode + urlscheme 已实现，其余子模块待补齐
+├── miniprogram/           # 小程序 API：24 个子模块全量实现
 ├── minigame/              # 小游戏 API（骨架）
 ├── pay/                   # 微信支付（config + 顶层 + order/refund/notify/transfer/redpacket 子模块）
 ├── openplatform/          # 开放平台：account/component_access_token 已实现，其余子模块待补齐
 ├── work/                  # 企业微信（顶层 Work + context + config + oauth + jsapi 已实现；addresslist/appchat/checkin/externalcontact/invoice/kf/material/message/msgaudit/robot 持续补齐）
 ├── aispeech/              # 智能对话（占位）
-└── test_runner.zig        # ✅ 编译门（强制 @import 每个模块），296 个测试全部发现
+└── test_runner.zig        # ✅ 编译门（强制 @import 每个模块），357 个测试全部发现
 ```
 
 ---
@@ -382,5 +382,5 @@ const oa = wc.getOfficialAccount(cfg);
 - **新增测试时**在 `src/test_runner.zig` 中加一行 `@import`（即便内容只是占位），否则 `zig build test` 不会发现它。
 - **`build.zig.zon` 的 fingerprint 字段**：写一个占位 hex（如 `0xd658b8e96476550b`）即可；若该值不被 Zig 接受，运行 `zig build` 会提示正确的值。
 - **避免 Zig 0.17-dev 已被移除的 API**：`std.Thread.Mutex`（用 `SpinMutex`）、`std.time.timestamp()`（用 `std.Io.Clock.now`）、`std.fmt.AllocPrintError`（用 `Allocator.Error`）、`std.ArrayListUnmanaged = .{}`（用 `.empty`）。
-- **修改完任何模块后**，必须 `zig build test` 确认 316/316 测试仍全部通过；任何内存泄漏会让测试失败。
+- **修改完任何模块后**，必须 `zig build test` 确认 357/357 测试仍全部通过；任何内存泄漏会让测试失败。
 - **避免 Zig 0.17-dev 已被移除的 API**：`std.fs.cwd()`（改用 `std.Io.Dir.cwd()`）、`std.Thread.Mutex`（用 `SpinMutex`）、`std.time.timestamp()`（用 `std.Io.Clock.now`）、`std.fmt.AllocPrintError`（用 `Allocator.Error`）、`std.ArrayListUnmanaged = .{}`（用 `.empty`）。
