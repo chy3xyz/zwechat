@@ -30,7 +30,8 @@ pub const WorkServer = struct {
         encrypt_msg: []const u8,
         query: WorkCallbackQuery,
     ) bool {
-        const token = self.ctx.config.token orelse return false;
+        const token = self.ctx.config.token;
+        if (token.len == 0) return false;
         const params = [_][]const u8{ token, query.timestamp, query.nonce, encrypt_msg };
         const computed = signature.signature(allocator, &params) catch return false;
         defer allocator.free(computed);
@@ -43,7 +44,8 @@ pub const WorkServer = struct {
         allocator: std.mem.Allocator,
         encrypted_xml: []const u8,
     ) !crypto.DecryptedMessage {
-        const aes_key = self.ctx.config.encoding_aes_key orelse return error.ConfigMissing;
+        const aes_key = self.ctx.config.encoding_aes_key;
+        if (aes_key.len == 0) return error.ConfigMissing;
         if (aes_key.len < 32) return error.InvalidArgument;
 
         const res = try crypto.aesDecryptMsg(allocator, encrypted_xml, aes_key[0..32]);

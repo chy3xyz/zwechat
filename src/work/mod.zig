@@ -26,6 +26,10 @@ pub const Invoice = @import("invoice/mod.zig").Invoice;
 pub const AddressList = @import("addresslist/mod.zig").AddressList;
 pub const AppChat = @import("appchat/mod.zig").AppChat;
 pub const Robot = @import("robot/mod.zig").Robot;
+pub const Checkin = @import("checkin/mod.zig").Checkin;
+pub const Kf = @import("kf/mod.zig").Kf;
+pub const Material = @import("material/mod.zig").Material;
+pub const MsgAudit = @import("msgaudit/mod.zig").MsgAudit;
 pub const server = @import("server/mod.zig");
 pub const WorkServer = server.WorkServer;
 pub const smartbot = @import("smartbot/mod.zig");
@@ -45,6 +49,20 @@ test "work 模块全部导出" {
     try std.testing.expect(@hasDecl(Work, "getCorpJsTicket"));
     try std.testing.expect(@hasDecl(Work, "getAgentJsTicket"));
     try std.testing.expect(@hasDecl(Work, "getJs"));
+    // 子模块懒加载工厂。
+    try std.testing.expect(@hasDecl(Work, "getOauth"));
+    try std.testing.expect(@hasDecl(Work, "getMessage"));
+    try std.testing.expect(@hasDecl(Work, "getExternalContact"));
+    try std.testing.expect(@hasDecl(Work, "getInvoice"));
+    try std.testing.expect(@hasDecl(Work, "getAddressList"));
+    try std.testing.expect(@hasDecl(Work, "getAppChat"));
+    try std.testing.expect(@hasDecl(Work, "getCheckin"));
+    try std.testing.expect(@hasDecl(Work, "getKf"));
+    try std.testing.expect(@hasDecl(Work, "getMaterial"));
+    try std.testing.expect(@hasDecl(Work, "getMsgAudit"));
+    try std.testing.expect(@hasDecl(Work, "getRobot"));
+    try std.testing.expect(@hasDecl(Work, "getServer"));
+    try std.testing.expect(@hasDecl(Work, "getSmartbot"));
     try std.testing.expect(@hasDecl(Oauth, "getRedirectURL"));
     try std.testing.expect(@hasDecl(Oauth, "userInfoToId"));
     try std.testing.expect(@hasDecl(Oauth, "getUserInfo"));
@@ -57,5 +75,9 @@ test "work 模块全部导出" {
     try std.testing.expect(@hasDecl(AddressList, "init"));
     try std.testing.expect(@hasDecl(AppChat, "init"));
     try std.testing.expect(@hasDecl(Robot, "init"));
+    try std.testing.expect(@hasDecl(Checkin, "init"));
+    try std.testing.expect(@hasDecl(Kf, "init"));
+    try std.testing.expect(@hasDecl(Material, "init"));
+    try std.testing.expect(@hasDecl(MsgAudit, "init"));
     try std.testing.expect(@hasDecl(smartbot, "Server"));
 }

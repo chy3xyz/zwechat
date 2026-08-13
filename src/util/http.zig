@@ -17,12 +17,15 @@ const rsa = @import("rsa.zig");
 ///
 /// `is_file = true` 时使用 `file_path` 读取文件内容（按需再扩展为流式读取）；
 /// `is_file = false` 时把 `value` 作为字符串体提交。
+/// 当 `is_file = true` 且 `data.len > 0` 时，直接以 `data` 字节作为文件内容
+/// （用于内存中的二进制数据上传，如小程序微短剧分片）。
 pub const MultipartField = struct {
     is_file: bool,
     field_name: []const u8,
     filename: []const u8,
     value: []const u8,
-    file_path: []const u8,
+    file_path: []const u8 = "",
+    data: []const u8 = "",
 };
 
 /// URI 修改器（对照 `URIModifier`）：在每个请求前对 URI 做可选改写。
@@ -401,22 +404,27 @@ fn writeMultipartPart(
     try body_buf.appendSlice(allocator, "\r\n");
 
     if (field.is_file) {
-        const io = std.Io.Threaded.global_single_threaded.io();
-        const file = std.Io.Dir.cwd().openFile(
-            field.file_path,
-            io,
-            .{ .mode = .read_only },
-        ) catch |err| switch (err) {
-            error.FileNotFound => return error.FileNotFound,
-            else => return err,
-        };
-        defer file.close(io);
-        const stat = try file.stat(io);
-        if (stat.size > 0) {
-            const file_buf = try allocator.alloc(u8, stat.size);
-            defer allocator.free(file_buf);
-            const read = try file.readPositionalAll(io, file_buf, 0);
-            try body_buf.appendSlice(allocator, file_buf[0..read]);
+        if (field.data.len > 0) {
+            // 直接使用内存中的二进制数据。
+            try body_buf.appendSlice(allocator, field.data);
+        } else {
+            const io = std.Io.Threaded.global_single_threaded.io();
+            const file = std.Io.Dir.cwd().openFile(
+                field.file_path,
+                io,
+                .{ .mode = .read_only },
+            ) catch |err| switch (err) {
+                error.FileNotFound => return error.FileNotFound,
+                else => return err,
+            };
+            defer file.close(io);
+            const stat = try file.stat(io);
+            if (stat.size > 0) {
+                const file_buf = try allocator.alloc(u8, stat.size);
+                defer allocator.free(file_buf);
+                const read = try file.readPositionalAll(io, file_buf, 0);
+                try body_buf.appendSlice(allocator, file_buf[0..read]);
+            }
         }
     } else {
         try body_buf.appendSlice(allocator, field.value);

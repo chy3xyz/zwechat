@@ -4,13 +4,35 @@
 const std = @import("std");
 const credential = @import("../credential/mod.zig");
 pub const Config = @import("config.zig").Config;
-const Context = @import("context/mod.zig").Context;
+pub const Context = @import("context/mod.zig").Context;
 
 pub const Auth = @import("auth/mod.zig").Auth;
+pub const ResCode2Session = @import("auth/mod.zig").ResCode2Session;
+pub const RspCheckEncryptedData = @import("auth/mod.zig").RspCheckEncryptedData;
+pub const PhoneInfo = @import("auth/mod.zig").PhoneInfo;
+pub const GetPhoneNumberResponse = @import("auth/mod.zig").GetPhoneNumberResponse;
 pub const qrcode = @import("qrcode/mod.zig");
 pub const urlscheme = @import("urlscheme/mod.zig");
 pub const message = @import("message/mod.zig");
 pub const security = @import("security/mod.zig");
+pub const shortlink = @import("shortlink/mod.zig");
+pub const encryptor = @import("encryptor/mod.zig");
+pub const werun = @import("werun/mod.zig");
+pub const urllink = @import("urllink/mod.zig");
+pub const riskcontrol = @import("riskcontrol/mod.zig");
+pub const redpacketcover = @import("redpacketcover/mod.zig");
+pub const privacy = @import("privacy/mod.zig");
+pub const content = @import("content/mod.zig");
+pub const business = @import("business/mod.zig");
+pub const order = @import("order/mod.zig");
+pub const ocr = @import("ocr/mod.zig");
+pub const subscribe = @import("subscribe/mod.zig");
+pub const analysis = @import("analysis/mod.zig");
+pub const operation = @import("operation/mod.zig");
+pub const tcb = @import("tcb/mod.zig");
+pub const express = @import("express/mod.zig");
+pub const minidrama = @import("minidrama/mod.zig");
+pub const virtualpayment = @import("virtualpayment/mod.zig");
 
 pub const MiniProgram = struct {
     ctx: Context,
@@ -54,6 +76,96 @@ pub const MiniProgram = struct {
     /// 懒加载 Security 内容安全审核子模块。
     pub fn getSecurity(self: *Self) security.Security {
         return security.Security.init(&self.ctx);
+    }
+
+    /// 懒加载 ShortLink 短链接子模块。
+    pub fn getShortLink(self: *Self) shortlink.ShortLink {
+        return shortlink.ShortLink.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 Encryptor 加密数据解密子模块。
+    pub fn getEncryptor(self: *Self) encryptor.Encryptor {
+        return encryptor.Encryptor.init(&self.ctx);
+    }
+
+    /// 懒加载 WeRun 微信运动子模块。
+    pub fn getWeRun(self: *Self) werun.WeRun {
+        return werun.WeRun.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 URLLink 子模块。
+    pub fn getURLLink(self: *Self) urllink.URLLink {
+        return urllink.URLLink.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 RiskControl 安全风控子模块。
+    pub fn getRiskControl(self: *Self) riskcontrol.RiskControl {
+        return riskcontrol.RiskControl.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 RedPacketCover 红包封面子模块。
+    pub fn getRedPacketCover(self: *Self) redpacketcover.RedPacketCover {
+        return redpacketcover.RedPacketCover.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 Privacy 隐私设置子模块。
+    pub fn getPrivacy(self: *Self) privacy.Privacy {
+        return privacy.Privacy.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 Content 内容安全（旧接口）子模块。
+    pub fn getContent(self: *Self) content.Content {
+        return content.Content.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 Business 业务子模块。
+    pub fn getBusiness(self: *Self) business.Business {
+        return business.Business.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 Order 订单发货子模块。
+    pub fn getOrder(self: *Self) order.Shipping {
+        return order.Shipping.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 OCR 识别子模块。
+    pub fn getOCR(self: *Self) ocr.OCR {
+        return ocr.OCR.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 Subscribe 订阅消息子模块。
+    pub fn getSubscribe(self: *Self) subscribe.Subscribe {
+        return subscribe.Subscribe.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 Analysis 数据分析子模块。
+    pub fn getAnalysis(self: *Self) analysis.Analysis {
+        return analysis.Analysis.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 Operation 运维中心子模块。
+    pub fn getOperation(self: *Self) operation.Operation {
+        return operation.Operation.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 Tcb 云开发子模块。
+    pub fn getTcb(self: *Self) tcb.Tcb {
+        return tcb.Tcb.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 Express 物流子模块。
+    pub fn getExpress(self: *Self) express.Express {
+        return express.Express.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 MiniDrama 微短剧子模块。
+    pub fn getMiniDrama(self: *Self) minidrama.MiniDrama {
+        return minidrama.MiniDrama.init(&self.ctx, self.allocator);
+    }
+
+    /// 懒加载 VirtualPayment 虚拟支付子模块。
+    pub fn getVirtualPayment(self: *Self) virtualpayment.VirtualPayment {
+        return virtualpayment.VirtualPayment.init(&self.ctx, self.allocator);
     }
 };
 

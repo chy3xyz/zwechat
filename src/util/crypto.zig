@@ -148,16 +148,19 @@ pub fn aesEncryptMsg(
     return out;
 }
 
-/// AESDecryptMsg — 解密微信加密消息。返回 `{ random, rawXMLMsg, appID }`。
+/// 微信加密消息解密结果：`random` / `raw_xml_msg` / `app_id` 均由调用方负责 `free`。
+pub const DecryptedMessage = struct {
+    random: []u8,
+    raw_xml_msg: []u8,
+    app_id: []u8,
+};
+
+/// AESDecryptMsg — 解密微信加密消息。返回 `DecryptedMessage`。
 pub fn aesDecryptMsg(
     allocator: Allocator,
     ciphertext: []const u8,
     aes_key: []const u8,
-) (Allocator.Error || WechatError)!struct {
-    random: []u8,
-    raw_xml_msg: []u8,
-    app_id: []u8,
-} {
+) (Allocator.Error || WechatError)!DecryptedMessage {
     if (aes_key.len != 32) return WechatError.InvalidArgument;
     if (ciphertext.len < BlockSize) return WechatError.InvalidArgument;
     if (ciphertext.len & BlockMask != 0) return WechatError.InvalidArgument;

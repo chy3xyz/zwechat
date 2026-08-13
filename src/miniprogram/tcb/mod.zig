@@ -1,0 +1,485 @@
+// SPDX-License-Identifier: Apache-2.0
+//! miniprogram/tcb — 云开发（Tencent Cloud Base）
+//!
+//! 对应 `_ref/wechat/miniprogram/tcb/`：云函数调用、文件上传/下载/删除、数据库导入/
+//! 导出/迁移状态/索引/集合/增删改查/统计。
+
+const std = @import("std");
+const Context = @import("../context/mod.zig").Context;
+const util_http = @import("../../util/http.zig");
+const util_error = @import("../../util/error.zig");
+
+pub const ConflictMode = enum(i64) {
+    insert = 1,
+    upsert = 2,
+};
+
+pub const FileType = enum(i64) {
+    json = 1,
+    csv = 2,
+};
+
+pub const InvokeCloudFunctionRes = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    resp_data: []const u8 = "",
+};
+
+pub const UploadFileReq = struct {
+    env: []const u8 = "",
+    path: []const u8 = "",
+};
+
+pub const UploadFileRes = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    url: []const u8 = "",
+    token: []const u8 = "",
+    authorization: []const u8 = "",
+    file_id: []const u8 = "",
+    cos_file_id: []const u8 = "",
+};
+
+pub const DownloadFile = struct {
+    fileid: []const u8 = "",
+    max_age: i64 = 0,
+};
+
+pub const BatchDownloadFileRes = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    file_list: []const DownloadedFile = &.{},
+};
+
+pub const DownloadedFile = struct {
+    file_id: []const u8 = "",
+    download_url: []const u8 = "",
+    status: i64 = 0,
+    errmsg: []const u8 = "",
+};
+
+pub const BatchDeleteFileRes = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    delete_list: []const DeletedFile = &.{},
+};
+
+pub const DeletedFile = struct {
+    fileid: []const u8 = "",
+    status: i64 = 0,
+    errmsg: []const u8 = "",
+};
+
+pub const DatabaseMigrateExportReq = struct {
+    env: []const u8 = "",
+    file_path: []const u8 = "",
+    file_type: FileType = .json,
+    query: []const u8 = "",
+};
+
+pub const DatabaseMigrateExportRes = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    job_id: i64 = 0,
+};
+
+pub const DatabaseMigrateImportReq = struct {
+    env: []const u8 = "",
+    collection_name: []const u8 = "",
+    file_path: []const u8 = "",
+    file_type: FileType = .json,
+    stop_on_error: bool = false,
+    conflict_mode: ConflictMode = .insert,
+};
+
+pub const DatabaseMigrateImportRes = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    job_id: i64 = 0,
+};
+
+pub const DatabaseMigrateQueryInfoRes = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    status: []const u8 = "",
+    record_success: i64 = 0,
+    record_fail: i64 = 0,
+    err_msg: []const u8 = "",
+    file_url: []const u8 = "",
+};
+
+pub const UpdateIndexReq = struct {
+    env: []const u8 = "",
+    collection_name: []const u8 = "",
+    create_indexes: []const CreateIndex = &.{},
+    drop_indexes: []const DropIndex = &.{},
+};
+
+pub const CreateIndex = struct {
+    name: []const u8 = "",
+    unique: bool = false,
+    keys: []const CreateIndexKey = &.{},
+};
+
+pub const CreateIndexKey = struct {
+    name: []const u8 = "",
+    direction: []const u8 = "",
+};
+
+pub const DropIndex = struct {
+    name: []const u8 = "",
+};
+
+pub const DatabaseCollectionGetRes = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    pager: Pager = .{},
+    collections: []const CollectionInfo = &.{},
+};
+
+pub const Pager = struct {
+    limit: i64 = 0,
+    offset: i64 = 0,
+    total: i64 = 0,
+};
+
+pub const CollectionInfo = struct {
+    name: []const u8 = "",
+    count: i64 = 0,
+    size: i64 = 0,
+    index_count: i64 = 0,
+    index_size: i64 = 0,
+};
+
+pub const DatabaseAddRes = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    id_list: []const []const u8 = &.{},
+};
+
+pub const DatabaseDeleteRes = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    deleted: i64 = 0,
+};
+
+pub const DatabaseUpdateRes = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    matched: i64 = 0,
+    modified: i64 = 0,
+    id: []const u8 = "",
+};
+
+pub const DatabaseQueryRes = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    pager: Pager = .{},
+    data: []const []const u8 = &.{},
+};
+
+pub const DatabaseCountRes = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    count: i64 = 0,
+};
+
+/// 云开发模块。
+pub const Tcb = struct {
+    ctx: *Context,
+    allocator: std.mem.Allocator,
+
+    const Self = @This();
+
+    pub fn init(ctx: *Context, allocator: std.mem.Allocator) Self {
+        return .{ .ctx = ctx, .allocator = allocator };
+    }
+
+    /// 云函数调用。
+    pub fn invokeCloudFunction(self: *Self, env: []const u8, name: []const u8, args: []const u8) !std.json.Parsed(InvokeCloudFunctionRes) {
+        const access_token = try self.ctx.getAccessToken(self.allocator);
+        defer self.allocator.free(access_token);
+        const uri = try std.fmt.allocPrint(
+            self.allocator,
+            "https://api.weixin.qq.com/tcb/invokecloudfunction?access_token={s}&env={s}&name={s}",
+            .{ access_token, env, name },
+        );
+        defer self.allocator.free(uri);
+
+        const client = util_http.getDefaultClient(self.allocator);
+        const resp = try client.post(uri, args, null);
+        defer self.allocator.free(resp);
+        return parseParsed(InvokeCloudFunctionRes, self.allocator, resp);
+    }
+
+    /// 上传文件。
+    pub fn uploadFile(self: *Self, env: []const u8, path: []const u8) !std.json.Parsed(UploadFileRes) {
+        const body = try std.fmt.allocPrint(self.allocator, "{{\"env\":\"{s}\",\"path\":\"{s}\"}}", .{ env, path });
+        defer self.allocator.free(body);
+        return self.postParsed("tcb/uploadfile", body, UploadFileRes);
+    }
+
+    /// 获取文件下载链接。
+    pub fn batchDownloadFile(self: *Self, env: []const u8, file_list: []const DownloadFile) !std.json.Parsed(BatchDownloadFileRes) {
+        const body = try jsonStringifyDownload(self.allocator, env, file_list);
+        defer self.allocator.free(body);
+        return self.postParsed("tcb/batchdownloadfile", body, BatchDownloadFileRes);
+    }
+
+    /// 批量删除文件。
+    pub fn batchDeleteFile(self: *Self, env: []const u8, file_id_list: []const []const u8) !std.json.Parsed(BatchDeleteFileRes) {
+        const body = try jsonStringifyDelete(self.allocator, env, file_id_list);
+        defer self.allocator.free(body);
+        return self.postParsed("tcb/batchdeletefile", body, BatchDeleteFileRes);
+    }
+
+    /// 数据库导入。
+    pub fn databaseMigrateImport(self: *Self, req: DatabaseMigrateImportReq) !std.json.Parsed(DatabaseMigrateImportRes) {
+        const body = try jsonStringifyMigrateImport(self.allocator, req);
+        defer self.allocator.free(body);
+        return self.postParsed("tcb/databasemigrateimport", body, DatabaseMigrateImportRes);
+    }
+
+    /// 数据库导出。
+    pub fn databaseMigrateExport(self: *Self, req: DatabaseMigrateExportReq) !std.json.Parsed(DatabaseMigrateExportRes) {
+        const body = try jsonStringifyMigrateExport(self.allocator, req);
+        defer self.allocator.free(body);
+        return self.postParsed("tcb/databasemigrateexport", body, DatabaseMigrateExportRes);
+    }
+
+    /// 数据库迁移状态查询。
+    pub fn databaseMigrateQueryInfo(self: *Self, env: []const u8, job_id: i64) !std.json.Parsed(DatabaseMigrateQueryInfoRes) {
+        const body = try std.fmt.allocPrint(self.allocator, "{{\"env\":\"{s}\",\"job_id\":{d}}}", .{ env, job_id });
+        defer self.allocator.free(body);
+        return self.postParsed("tcb/databasemigratequeryinfo", body, DatabaseMigrateQueryInfoRes);
+    }
+
+    /// 变更数据库索引。
+    pub fn updateIndex(self: *Self, req: UpdateIndexReq) !void {
+        const body = try jsonStringifyUpdateIndex(self.allocator, req);
+        defer self.allocator.free(body);
+        try self.postCommon("tcb/updateindex", body, "UpdateIndex");
+    }
+
+    /// 新增集合。
+    pub fn databaseCollectionAdd(self: *Self, env: []const u8, collection_name: []const u8) !void {
+        const body = try std.fmt.allocPrint(self.allocator, "{{\"env\":\"{s}\",\"collection_name\":\"{s}\"}}", .{ env, collection_name });
+        defer self.allocator.free(body);
+        try self.postCommon("tcb/databasecollectionadd", body, "DatabaseCollectionAdd");
+    }
+
+    /// 删除集合。
+    pub fn databaseCollectionDelete(self: *Self, env: []const u8, collection_name: []const u8) !void {
+        const body = try std.fmt.allocPrint(self.allocator, "{{\"env\":\"{s}\",\"collection_name\":\"{s}\"}}", .{ env, collection_name });
+        defer self.allocator.free(body);
+        try self.postCommon("tcb/databasecollectiondelete", body, "DatabaseCollectionDelete");
+    }
+
+    /// 获取特定云环境下集合信息。
+    pub fn databaseCollectionGet(self: *Self, env: []const u8, limit: i64, offset: i64) !std.json.Parsed(DatabaseCollectionGetRes) {
+        const body = try std.fmt.allocPrint(self.allocator, "{{\"env\":\"{s}\",\"limit\":{d},\"offset\":{d}}}", .{ env, limit, offset });
+        defer self.allocator.free(body);
+        return self.postParsed("tcb/databasecollectionget", body, DatabaseCollectionGetRes);
+    }
+
+    /// 数据库插入记录。
+    pub fn databaseAdd(self: *Self, env: []const u8, query: []const u8) !std.json.Parsed(DatabaseAddRes) {
+        return self.databaseReq("tcb/databaseadd", env, query, DatabaseAddRes);
+    }
+
+    /// 数据库删除记录。
+    pub fn databaseDelete(self: *Self, env: []const u8, query: []const u8) !std.json.Parsed(DatabaseDeleteRes) {
+        return self.databaseReq("tcb/databasedelete", env, query, DatabaseDeleteRes);
+    }
+
+    /// 数据库更新记录。
+    pub fn databaseUpdate(self: *Self, env: []const u8, query: []const u8) !std.json.Parsed(DatabaseUpdateRes) {
+        return self.databaseReq("tcb/databaseupdate", env, query, DatabaseUpdateRes);
+    }
+
+    /// 数据库查询记录。
+    pub fn databaseQuery(self: *Self, env: []const u8, query: []const u8) !std.json.Parsed(DatabaseQueryRes) {
+        return self.databaseReq("tcb/databasequery", env, query, DatabaseQueryRes);
+    }
+
+    /// 统计集合记录数。
+    pub fn databaseCount(self: *Self, env: []const u8, query: []const u8) !std.json.Parsed(DatabaseCountRes) {
+        return self.databaseReq("tcb/databasecount", env, query, DatabaseCountRes);
+    }
+
+    fn databaseReq(self: *Self, comptime T: type, endpoint: []const u8, env: []const u8, query: []const u8) !std.json.Parsed(T) {
+        const body = try std.fmt.allocPrint(self.allocator, "{{\"env\":\"{s}\",\"query\":\"{s}\"}}", .{ env, query });
+        defer self.allocator.free(body);
+        return self.postParsed(endpoint, body, T);
+    }
+
+    fn postParsed(self: *Self, comptime T: type, endpoint: []const u8, body: []const u8) !std.json.Parsed(T) {
+        const access_token = try self.ctx.getAccessToken(self.allocator);
+        defer self.allocator.free(access_token);
+        const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
+        defer self.allocator.free(uri);
+
+        const client = util_http.getDefaultClient(self.allocator);
+        const resp = try client.postJSON(uri, body);
+        defer self.allocator.free(resp);
+        return parseParsed(T, self.allocator, resp);
+    }
+
+    fn postCommon(self: *Self, endpoint: []const u8, body: []const u8, api_name: []const u8) !void {
+        const access_token = try self.ctx.getAccessToken(self.allocator);
+        defer self.allocator.free(access_token);
+        const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
+        defer self.allocator.free(uri);
+
+        const client = util_http.getDefaultClient(self.allocator);
+        const resp = try client.postJSON(uri, body);
+        defer self.allocator.free(resp);
+
+        if (try util_error.decodeWithCommonError(self.allocator, resp, api_name)) |ce| {
+            defer ce.deinit();
+            return util_error.WechatError.ApiError;
+        }
+    }
+};
+
+fn parseParsed(comptime T: type, allocator: std.mem.Allocator, resp: []const u8) !std.json.Parsed(T) {
+    var parsed = std.json.parseFromSlice(T, allocator, resp, .{ .allocate = .alloc_always }) catch {
+        return util_error.WechatError.DecodeError;
+    };
+    errdefer parsed.deinit();
+    if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
+    return parsed;
+}
+
+fn jsonStringifyDownload(allocator: std.mem.Allocator, env: []const u8, file_list: []const DownloadFile) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+    try s.beginObject();
+    try s.objectField("env");
+    try s.write(env);
+    try s.objectField("file_list");
+    try s.beginArray();
+    for (file_list) |f| {
+        try s.beginObject();
+        try s.objectField("fileid");
+        try s.write(f.fileid);
+        try s.objectField("max_age");
+        try s.write(f.max_age);
+        try s.endObject();
+    }
+    try s.endArray();
+    try s.endObject();
+    return out.toOwnedSlice();
+}
+
+fn jsonStringifyDelete(allocator: std.mem.Allocator, env: []const u8, file_id_list: []const []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+    try s.beginObject();
+    try s.objectField("env");
+    try s.write(env);
+    try s.objectField("fileid_list");
+    try s.beginArray();
+    for (file_id_list) |id| try s.write(id);
+    try s.endArray();
+    try s.endObject();
+    return out.toOwnedSlice();
+}
+
+fn jsonStringifyMigrateImport(allocator: std.mem.Allocator, req: DatabaseMigrateImportReq) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+    try s.beginObject();
+    try s.objectField("env");
+    try s.write(req.env);
+    try s.objectField("collection_name");
+    try s.write(req.collection_name);
+    try s.objectField("file_path");
+    try s.write(req.file_path);
+    try s.objectField("file_type");
+    try s.write(@backingInt(req.file_type));
+    try s.objectField("stop_on_error");
+    try s.write(req.stop_on_error);
+    try s.objectField("conflict_mode");
+    try s.write(@backingInt(req.conflict_mode));
+    try s.endObject();
+    return out.toOwnedSlice();
+}
+
+fn jsonStringifyMigrateExport(allocator: std.mem.Allocator, req: DatabaseMigrateExportReq) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+    try s.beginObject();
+    try s.objectField("env");
+    try s.write(req.env);
+    try s.objectField("file_path");
+    try s.write(req.file_path);
+    try s.objectField("file_type");
+    try s.write(@backingInt(req.file_type));
+    try s.objectField("query");
+    try s.write(req.query);
+    try s.endObject();
+    return out.toOwnedSlice();
+}
+
+fn jsonStringifyUpdateIndex(allocator: std.mem.Allocator, req: UpdateIndexReq) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+    try s.beginObject();
+    try s.objectField("env");
+    try s.write(req.env);
+    try s.objectField("collection_name");
+    try s.write(req.collection_name);
+    try s.objectField("create_indexes");
+    try s.beginArray();
+    for (req.create_indexes) |ci| {
+        try s.beginObject();
+        try s.objectField("name");
+        try s.write(ci.name);
+        try s.objectField("unique");
+        try s.write(ci.unique);
+        try s.objectField("keys");
+        try s.beginArray();
+        for (ci.keys) |k| {
+            try s.beginObject();
+            try s.objectField("name");
+            try s.write(k.name);
+            try s.objectField("direction");
+            try s.write(k.direction);
+            try s.endObject();
+        }
+        try s.endArray();
+        try s.endObject();
+    }
+    try s.endArray();
+    try s.objectField("drop_indexes");
+    try s.beginArray();
+    for (req.drop_indexes) |di| {
+        try s.beginObject();
+        try s.objectField("name");
+        try s.write(di.name);
+        try s.endObject();
+    }
+    try s.endArray();
+    try s.endObject();
+    return out.toOwnedSlice();
+}
+
+test "Tcb.init 持有 ctx 与 allocator" {
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-tcb" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = undefined },
+    };
+    const t = Tcb.init(&ctx, std.heap.page_allocator);
+    try std.testing.expectEqualStrings("wx-tcb", t.ctx.config.app_id);
+}
+
+test "UploadFileRes 默认值" {
+    const r = UploadFileRes{};
+    try std.testing.expectEqualStrings("", r.url);
+}

@@ -12,6 +12,19 @@ const credential = @import("../credential/mod.zig");
 const Config = @import("config.zig").Config;
 const Context = @import("context/mod.zig").Context;
 const jsapi = @import("jsapi/mod.zig");
+const oauth = @import("oauth/mod.zig");
+const message = @import("message/mod.zig");
+const externalcontact = @import("externalcontact/mod.zig");
+const invoice = @import("invoice/mod.zig");
+const addresslist = @import("addresslist/mod.zig");
+const appchat = @import("appchat/mod.zig");
+const checkin = @import("checkin/mod.zig");
+const kf = @import("kf/mod.zig");
+const material = @import("material/mod.zig");
+const msgaudit = @import("msgaudit/mod.zig");
+const robot = @import("robot/mod.zig");
+const server = @import("server/mod.zig");
+const smartbot = @import("smartbot/mod.zig");
 
 /// 企业微信业务 API 聚合入口。
 ///
@@ -106,6 +119,51 @@ pub const Work = struct {
         j.setJsTicketHandle(self.corp_js_adapter.?.asHandle());
         j.setAgentJsTicketHandle(self.agent_js_adapter.?.asHandle());
         return j;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 子模块懒加载工厂（与 Go 参考的 GetXxx 对齐）
+    // ─────────────────────────────────────────────────────────────────────────
+
+    pub fn getOauth(self: *Work, allocator: std.mem.Allocator) oauth.Oauth {
+        return oauth.Oauth.init(&self.ctx, allocator);
+    }
+    pub fn getMessage(self: *Work, allocator: std.mem.Allocator) message.Message {
+        return message.Message.init(&self.ctx, allocator);
+    }
+    pub fn getExternalContact(self: *Work, allocator: std.mem.Allocator) externalcontact.ExternalContact {
+        return externalcontact.ExternalContact.init(&self.ctx, allocator);
+    }
+    pub fn getInvoice(self: *Work, allocator: std.mem.Allocator) invoice.Invoice {
+        return invoice.Invoice.init(&self.ctx, allocator);
+    }
+    pub fn getAddressList(self: *Work, allocator: std.mem.Allocator) addresslist.AddressList {
+        return addresslist.AddressList.init(&self.ctx, allocator);
+    }
+    pub fn getAppChat(self: *Work, allocator: std.mem.Allocator) appchat.AppChat {
+        return appchat.AppChat.init(&self.ctx, allocator);
+    }
+    pub fn getCheckin(self: *Work, allocator: std.mem.Allocator) checkin.Checkin {
+        return checkin.Checkin.init(&self.ctx, allocator);
+    }
+    pub fn getKf(self: *Work, allocator: std.mem.Allocator) kf.Kf {
+        return kf.Kf.init(&self.ctx, allocator);
+    }
+    pub fn getMaterial(self: *Work, allocator: std.mem.Allocator) material.Material {
+        return material.Material.init(&self.ctx, allocator);
+    }
+    pub fn getMsgAudit(self: *Work, allocator: std.mem.Allocator) msgaudit.MsgAudit {
+        return msgaudit.MsgAudit.init(&self.ctx, allocator);
+    }
+    pub fn getRobot(self: *Work, allocator: std.mem.Allocator) robot.Robot {
+        _ = self; // webhook 机器人不需要 ctx
+        return robot.Robot.init(allocator);
+    }
+    pub fn getServer(self: *Work) server.WorkServer {
+        return server.WorkServer.init(&self.ctx);
+    }
+    pub fn getSmartbot(self: *Work, allocator: std.mem.Allocator) smartbot.Server {
+        return smartbot.Server.init(&self.ctx, allocator);
     }
 
     /// 获取 access_token。
