@@ -5,6 +5,12 @@ All notable changes to `zwechat` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-08-13
+
+### Fixed
+
+- **material.addNews 编译失败**：`return dupe(...)` 的复合隐式类型转换（`Allocator.Error![]u8` → `anyerror![]const u8`，错误集扩大 + 负载 const 化）在部分 Zig 版本下编译失败，级联拖垮整个 `officialaccount` 模块；改为 `try` 解包后返回，并将 `ArticleListContent.news_item` / `ArticleList.item` 改为 const 切片。
+
 ## [0.4.0] — 2026-08-13
 
 ### Added
@@ -259,7 +265,8 @@ N/A。
 - **0.x**：初始开发版本，API 可能不兼容。
 - **1.0**：计划完成 RSA / PKCS#12 完整实现、work.jsapi 完整 wire 后发布。
 
-[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.1
 [0.4.0]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.0
 [0.3.0]: https://github.com/chy3xyz/zwechat/releases/tag/v0.3.0
 [0.2.0]: https://github.com/chy3xyz/zwechat/releases/tag/v0.2.0
