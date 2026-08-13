@@ -5,6 +5,12 @@ All notable changes to `zwechat` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] — 2026-08-13
+
+### Fixed
+
+- **writeArticleJson/writeJsonMatchRule 编译失败**：v0.4.2 引入的 `buf.writer.print`（`std.ArrayListUnmanaged` 无 `writer` 字段）改为三条 `buf.appendSlice`（`"` + name + `":"`）。
+
 ## [0.4.2] — 2026-08-13
 
 ### Fixed
@@ -271,7 +277,8 @@ N/A。
 - **0.x**：初始开发版本，API 可能不兼容。
 - **1.0**：计划完成 RSA / PKCS#12 完整实现、work.jsapi 完整 wire 后发布。
 
-[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.3
 [0.4.2]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.2
 [0.4.1]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.1
 [0.4.0]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.0
