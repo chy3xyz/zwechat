@@ -42,6 +42,10 @@ pub const SendRequestCommon = struct {
     /// 指定接收消息的标签，标签 ID 列表（多个用 `|` 分隔，最多 100 个）；
     /// `to_user = "@all"` 时本参数被忽略。
     to_tag: []const u8 = "",
+    /// 群聊 id，指定后向该群发送消息（应用消息群）。
+    /// 企业微信约定：`chat_id` 与 `to_user` / `to_party` / `to_tag` 互斥，
+    /// 指定本字段后三者均不生效。
+    chat_id: []const u8 = "",
     /// 消息类型，由具体 `SendText` / `SendImage` 等函数负责设置。
     msg_type: []const u8 = "",
     /// 企业应用的 id，整型。
@@ -209,6 +213,7 @@ fn serializeRequest(allocator: std.mem.Allocator, req: anytype) ![]u8 {
         .{ .name = "touser", .value = c.to_user },
         .{ .name = "toparty", .value = c.to_party },
         .{ .name = "totag", .value = c.to_tag },
+        .{ .name = "chatid", .value = c.chat_id },
         .{ .name = "msgtype", .value = c.msg_type },
         .{ .name = "agentid", .value = c.agent_id },
     };
@@ -349,4 +354,20 @@ test "serializeRequest 空 content 返回 InvalidArgument" {
         .content = "",
     });
     try std.testing.expectError(error.InvalidArgument, result);
+}
+
+test "serializeRequest 群推送 chat_id 序列化为 chatid 且与 touser 互斥" {
+    const alloc = std.testing.allocator;
+    const body = try serializeRequest(alloc, SendMarkdownRequest{
+        .common = .{
+            .chat_id = "wrk_group_1",
+            .msg_type = "markdown",
+        },
+        .content = "群周报",
+    });
+    defer alloc.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"chatid\":\"wrk_group_1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"touser\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"msgtype\":\"markdown\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"markdown\":{\"content\":\"群周报\"}") != null);
 }
