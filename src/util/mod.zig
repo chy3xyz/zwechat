@@ -19,6 +19,9 @@ pub const pkcs12 = @import("pkcs12.zig");
 pub const xml = @import("xml.zig");
 pub const template = @import("template.zig");
 pub const sync = @import("sync.zig");
+pub const retry = @import("retry.zig");
+pub const uri = @import("uri.zig");
+pub const json = @import("json.zig");
 
 test "util 模块全部导出" {
     try std.testing.expect(@hasDecl(http, "getDefaultClient"));
@@ -34,4 +37,8 @@ test "util 模块全部导出" {
     try std.testing.expect(@hasDecl(xml, "parse"));
     try std.testing.expect(@hasDecl(template, "buildTemplateData"));
     try std.testing.expect(@hasDecl(sync, "SpinMutex"));
+    try std.testing.expect(@hasDecl(retry, "callApi"));
+    try std.testing.expect(@hasDecl(uri, "queryEscape"));
+    try std.testing.expect(@hasDecl(json, "appendEscapedString"));
+    try std.testing.expect(@hasDecl(json, "stringFieldObject"));
 }

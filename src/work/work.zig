@@ -252,6 +252,32 @@ pub const Work = struct {
         access_token: []const u8,
         ticket_type: credential.TicketType,
     ) ![]u8 {
+        try self.ensureTicketCache();
+        return self.work_ticket_cache.?.getTicket(allocator, access_token, ticket_type);
+    }
+
+    /// 按类型作废缓存中的 jsapi_ticket，使下一次取值必须回源。
+    ///
+    /// **必须与 `getCorpJsTicket` / `getAgentJsTicket` 成对使用**：这两个取值入口
+    /// 走的是缓存侧 `WorkJsTicket`（忽略 `ctx.js_ticket_handle`），因此作废也只能
+    /// 清缓存侧的 key——用 `WorkJsTicket.invalidate(allocator, ticket_type)` 精确
+    /// 清当前类型，另一种 ticket 由微信分别签发、有效期互不相关，保留其缓存避免
+    /// 无谓回源（需要两者一起清时用 `WorkJsTicket.invalidateAll`）。
+    ///
+    /// `config.cache` 为空时返回 `error.CacheUnavailable`（与取值路径一致）；
+    /// 键不存在不是错误（`cache.delete` 契约）。
+    pub fn invalidateJsTicket(
+        self: *Work,
+        allocator: std.mem.Allocator,
+        ticket_type: credential.TicketType,
+    ) !void {
+        try self.ensureTicketCache();
+        try self.work_ticket_cache.?.invalidate(allocator, ticket_type);
+    }
+
+    /// 惰性构造缓存侧 `WorkJsTicket`；`config.cache == null` 时返回
+    /// `error.CacheUnavailable`（`Work` 自己无法凭空造出缓存后端）。
+    fn ensureTicketCache(self: *Work) !void {
         const cache_inst = self.ctx.config.cache orelse return error.CacheUnavailable;
         if (self.work_ticket_cache == null) {
             self.work_ticket_cache = credential.WorkJsTicket.init(
@@ -261,7 +287,6 @@ pub const Work = struct {
                 cache_inst,
             );
         }
-        return self.work_ticket_cache.?.getTicket(allocator, access_token, ticket_type);
     }
 };
 
@@ -294,18 +319,43 @@ pub const WorkJsTicketAdapter = struct {
             .agent_js => adapter.work.getAgentJsTicket(allocator, access_token),
         };
     }
+
+    /// 作废本 adapter 所属类型的 ticket。
+    ///
+    /// 只清 `adapter.ticket_type` 对应的那一个缓存 key，而不是 `invalidateAll`：
+    /// adapter 是**类型化**的（`getTicket` 只会取 `.corp_js` 或 `.agent_js`），
+    /// 作废范围必须与取值范围严丝合缝——从 corp handle 作废时顺手清掉 agent key
+    /// 会让 agent 侧凭空多一次回源，而 agent ticket 的失效由它自己的 handle 负责。
+    /// 另外 corp-only 配置（`agent_id` 为空）下，`invalidateAll` 会跳过 agent key
+    /// 而 `invalidate(.corp_js)` 语义完全等价，因此按类型精确作废在两种配置下都成立。
+    fn invalidate(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        const adapter: *WorkJsTicketAdapter = @ptrCast(@alignCast(ctx));
+        return adapter.work.invalidateJsTicket(allocator, adapter.ticket_type);
+    }
 };
 
 const work_js_ticket_vtable = credential.JsTicketHandle.VTable{
     .getTicket = WorkJsTicketAdapter.getTicket,
+    .invalidate = WorkJsTicketAdapter.invalidate,
 };
 
 // WorkAccessToken handle 的 vtable（包装到 access_token_handle 抽象接口）。
+//
+// `invalidate` 必须与 `WorkAccessToken.asHandle` 保持一致：`newDefaultWork` 构造的
+// `Work` 走的是这条 vtable，缺了它 `ctx.invalidateAccessToken` 会返回
+// `error.InvalidateNotSupported`，`util/retry.callApi` 只能退化成「用旧 token 再试一次」，
+// access_token 失效时就无法自愈。
 const work_access_token_handle_vtable = credential.AccessTokenHandle.VTable{
     .getAccessToken = struct {
         fn f(ctx: *anyopaque, alloc: std.mem.Allocator) anyerror![]u8 {
             const ak: *credential.WorkAccessToken = @ptrCast(@alignCast(ctx));
             return ak.getAccessToken(alloc);
+        }
+    }.f,
+    .invalidate = struct {
+        fn f(ctx: *anyopaque, alloc: std.mem.Allocator) anyerror!void {
+            const ak: *credential.WorkAccessToken = @ptrCast(@alignCast(ctx));
+            return ak.invalidate(alloc);
         }
     }.f,
 };
@@ -545,4 +595,196 @@ test "Work.getJs 自动注入 corp / agent ticket handle" {
 
     // 由于 Js 内部会调用 ctx.getAccessToken，但 ctx 没有可用 handle，
     // 这里只验证 adapter 存在性；完整签名测试在 work/jsapi 模块中。
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ticket 失效自愈：业务接口 40001 → handle.invalidate → 下次取值回源
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 桩 fetcher：记录回源次数，按 `version` 拼出可区分的 ticket（版本变化模拟
+/// 微信换发新 ticket）。
+const TicketFetchStub = struct {
+    calls: usize = 0,
+    version: usize = 1,
+
+    fn fetch(ctx: *anyopaque, allocator: std.mem.Allocator, url: []const u8) credential.CredentialError![]u8 {
+        _ = url;
+        const self: *TicketFetchStub = @ptrCast(@alignCast(ctx));
+        self.calls += 1;
+        return std.fmt.allocPrint(
+            allocator,
+            "{{\"errcode\":0,\"errmsg\":\"ok\",\"ticket\":\"ticket-v{d}\",\"expires_in\":7200}}",
+            .{self.version},
+        ) catch return credential.CredentialError.HttpError;
+    }
+};
+
+/// 构造注入了桩 fetcher 的 `Work`（缓存侧 `WorkJsTicket` 已就绪）。
+fn makeTicketWork(mem: *cache.Memory, stub: *TicketFetchStub, corp_id: []const u8, agent_id: []const u8) Work {
+    var w = Work.newWork(
+        .{ .corp_id = corp_id, .agent_id = agent_id, .cache = mem.asCache() },
+        .{ .ptr = undefined, .vtable = undefined },
+        null,
+    );
+    w.work_ticket_cache = credential.WorkJsTicket.initWithFetcher(
+        corp_id,
+        agent_id,
+        credential.CacheKeyWorkPrefix,
+        mem.asCache(),
+        TicketFetchStub.fetch,
+        @ptrCast(stub),
+    );
+    return w;
+}
+
+test "Work.getJs 的 corp ticket handle 支持 invalidate：40001 后作废缓存并重取" {
+    const allocator = std.testing.allocator;
+    var mem = try cache.Memory.create(allocator);
+    defer {
+        mem.deinit();
+        allocator.destroy(mem);
+    }
+
+    var stub = TicketFetchStub{};
+    var w = makeTicketWork(mem, &stub, "ww-ticket-heal", "1000001");
+
+    const j = w.getJs();
+    const corp_handle = j.ticket_handle.?;
+
+    const first = try corp_handle.getTicket(allocator, "ak");
+    defer allocator.free(first);
+    try std.testing.expectEqualStrings("ticket-v1", first);
+    try std.testing.expectEqual(@as(usize, 1), stub.calls);
+
+    // 缓存命中：不再回源（作废测试的分界点）。
+    const cached = try corp_handle.getTicket(allocator, "ak");
+    defer allocator.free(cached);
+    try std.testing.expectEqual(@as(usize, 1), stub.calls);
+
+    // 业务接口返回 40001，调用方按标准恢复动作作废 ticket。改造前 adapter 的
+    // vtable 没有 invalidate，这条路径会返回 error.InvalidateNotSupported。
+    w.ctx.js_ticket_handle = corp_handle;
+    stub.version = 2;
+    try w.ctx.invalidateJsTicket(allocator);
+
+    const refreshed = try corp_handle.getTicket(allocator, "ak");
+    defer allocator.free(refreshed);
+    try std.testing.expectEqualStrings("ticket-v2", refreshed);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+}
+
+test "Work.getJs 的 corp / agent handle 各自只作废自己的缓存键" {
+    const allocator = std.testing.allocator;
+    var mem = try cache.Memory.create(allocator);
+    defer {
+        mem.deinit();
+        allocator.destroy(mem);
+    }
+
+    var stub = TicketFetchStub{};
+    var w = makeTicketWork(mem, &stub, "ww-ticket-scope", "1000003");
+
+    const j = w.getJs();
+    const corp_handle = j.ticket_handle.?;
+    const agent_handle = j.agent_ticket_handle.?;
+
+    const corp = try corp_handle.getTicket(allocator, "ak");
+    defer allocator.free(corp);
+    const agent = try agent_handle.getTicket(allocator, "ak");
+    defer allocator.free(agent);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+
+    // 从 corp handle 作废：agent ticket 仍命中缓存（不回源）。
+    stub.version = 2;
+    try corp_handle.invalidateTicket(allocator);
+
+    const agent_cached = try agent_handle.getTicket(allocator, "ak");
+    defer allocator.free(agent_cached);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+
+    const corp_refetched = try corp_handle.getTicket(allocator, "ak");
+    defer allocator.free(corp_refetched);
+    try std.testing.expectEqualStrings("ticket-v2", corp_refetched);
+    try std.testing.expectEqual(@as(usize, 3), stub.calls);
+}
+
+test "Work.invalidateJsTicket 无缓存后端时返回 CacheUnavailable" {
+    var w = Work.newWork(
+        .{ .corp_id = "ww-ticket-nocache" },
+        .{ .ptr = undefined, .vtable = undefined },
+        null,
+    );
+    try std.testing.expectError(
+        error.CacheUnavailable,
+        w.invalidateJsTicket(std.testing.allocator, .corp_js),
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// access_token 失效自愈：newDefaultWork 构造的 handle 也必须能作废
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 桩 fetcher：按 `version` 返回可区分的 access_token。
+const TokenFetchStub = struct {
+    calls: usize = 0,
+    version: usize = 1,
+
+    fn fetch(ctx: *anyopaque, allocator: std.mem.Allocator, url: []const u8) credential.CredentialError![]u8 {
+        _ = url;
+        const self: *TokenFetchStub = @ptrCast(@alignCast(ctx));
+        self.calls += 1;
+        return std.fmt.allocPrint(
+            allocator,
+            "{{\"errcode\":0,\"errmsg\":\"ok\",\"access_token\":\"work-token-v{d}\",\"expires_in\":7200}}",
+            .{self.version},
+        ) catch return credential.CredentialError.HttpError;
+    }
+};
+
+test "Work.newDefaultWork 的 access_token handle 支持 invalidate：40001 后作废并重取" {
+    const allocator = std.testing.allocator;
+    var mem = try cache.Memory.create(allocator);
+    defer {
+        mem.deinit();
+        allocator.destroy(mem);
+    }
+
+    var w = try Work.newDefaultWork(.{
+        .corp_id = "ww-ak-heal",
+        .corp_secret = "secret",
+        .agent_id = "1000001",
+        .cache = mem.asCache(),
+    }, allocator);
+    defer w.deinit(allocator);
+
+    // 把 box 内的实例换成注入了桩 fetcher 的版本（handle 指向同一个 box）。
+    var stub = TokenFetchStub{};
+    w.owned_access_token.?.* = credential.WorkAccessToken.initWithFetcher(
+        "ww-ak-heal",
+        "secret",
+        credential.CacheKeyWorkPrefix,
+        mem.asCache(),
+        TokenFetchStub.fetch,
+        @ptrCast(&stub),
+    );
+
+    const first = try w.getAccessToken(allocator);
+    defer allocator.free(first);
+    try std.testing.expectEqualStrings("work-token-v1", first);
+    try std.testing.expectEqual(@as(usize, 1), stub.calls);
+
+    // 缓存命中：不再回源。
+    const cached = try w.getAccessToken(allocator);
+    defer allocator.free(cached);
+    try std.testing.expectEqual(@as(usize, 1), stub.calls);
+
+    // token 失效码（40001）后的标准恢复动作。改造前 vtable 没有 invalidate，
+    // 这条路径会返回 error.InvalidateNotSupported。
+    stub.version = 2;
+    try w.ctx.invalidateAccessToken(allocator);
+
+    const refreshed = try w.getAccessToken(allocator);
+    defer allocator.free(refreshed);
+    try std.testing.expectEqualStrings("work-token-v2", refreshed);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
 }

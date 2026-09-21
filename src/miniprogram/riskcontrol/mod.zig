@@ -8,6 +8,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// 获取用户安全等级请求。
 pub const UserRiskRankRequest = struct {
@@ -58,17 +59,9 @@ pub const RiskControl = struct {
     }
 
     /// 获取用户安全等级（返回 `std.json.Parsed(UserRiskRank)`，调用方负责 `deinit`）。
+    ///
+    /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次。
     pub fn getUserRiskRank(self: *Self, req: UserRiskRankRequest) !std.json.Parsed(UserRiskRank) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/getuserriskrank?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
         var out: std.Io.Writer.Allocating = .init(self.allocator);
         defer out.deinit();
         var s: std.json.Stringify = .{ .writer = &out.writer };
@@ -99,8 +92,26 @@ pub const RiskControl = struct {
         const body = try out.toOwnedSlice();
         defer self.allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const Sender = struct {
+            allocator: std.mem.Allocator,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/getuserriskrank?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                const client = util_http.getDefaultClient(c.allocator);
+                return client.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "GetUserRiskRank", Sender{
+            .allocator = self.allocator,
+            .body = body,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(UserRiskRank, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -215,4 +226,45 @@ test "getUserRiskRank 两者并存时取非零者" {
     try std.testing.expectEqual(@as(i64, 789), only_typo.getUnionId());
     const neither = UserRiskRank{};
     try std.testing.expectEqual(@as(i64, 0), neither.getUnionId());
+}
+
+test "getUserRiskRank token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/wxa/getuserriskrank?access_token=";
+    try mt.addRoute(base ++ "token-rc", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+    });
+    try mt.addRoute(base ++ "token-new", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"unoin_id\":123,\"risk_rank\":1}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    const retry_testing = @import("../retry_testing.zig");
+    var stub = retry_testing.RotatingToken{ .tokens = &.{ "token-rc", "token-new" } };
+    var ctx = Context{
+        .config = .{ .app_id = "wx-rc" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var rc = RiskControl.init(&ctx, allocator);
+    var parsed = try rc.getUserRiskRank(.{
+        .appid = "wx-rc",
+        .openid = "oAAA",
+        .scene = 1,
+        .client_ip = "127.0.0.1",
+    });
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(u8, 1), parsed.value.risk_rank);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-rc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
 }

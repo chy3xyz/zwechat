@@ -9,6 +9,7 @@ const Context = @import("../context/mod.zig").Context;
 const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// 运单状态。
 pub const WaybillStatus = enum(i64) {
@@ -159,12 +160,27 @@ pub const Express = struct {
     }
 
     fn postParsed(self: *Self, endpoint: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
-        defer self.allocator.free(uri);
+        const Sender = struct {
+            express: *Self,
+            endpoint: []const u8,
+            body: []const u8,
 
-        const resp = try self.postJSON(uri, body);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/{s}?access_token={s}",
+                    .{ c.endpoint, token },
+                );
+                defer allocator.free(uri);
+                return c.express.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, endpoint, Sender{
+            .express = self,
+            .endpoint = endpoint,
+            .body = body,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(T, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -176,18 +192,28 @@ pub const Express = struct {
     }
 
     fn postCommon(self: *Self, endpoint: []const u8, body: []const u8, api_name: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
-        defer self.allocator.free(uri);
+        const Sender = struct {
+            express: *Self,
+            endpoint: []const u8,
+            body: []const u8,
 
-        const resp = try self.postJSON(uri, body);
-        defer self.allocator.free(resp);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/{s}?access_token={s}",
+                    .{ c.endpoint, token },
+                );
+                defer allocator.free(uri);
+                return c.express.postJSON(uri, c.body);
+            }
+        };
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, api_name)) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+        const resp = try util_retry.callApi(self.ctx, self.allocator, api_name, Sender{
+            .express = self,
+            .endpoint = endpoint,
+            .body = body,
+        });
+        self.allocator.free(resp);
     }
 
     /// POST JSON；注入 transport 时使用之，否则走线程默认 client。
@@ -367,4 +393,68 @@ test "queryTrace POST 查询运单并解析状态" {
     try std.testing.expectEqualStrings("{\"waybill_token\":\"wb-token-xyz\"}", tt.payload);
     try std.testing.expectEqual(WaybillStatus.signed, parsed.value.waybill_info.status);
     try std.testing.expectEqualStrings("顺丰速运", parsed.value.delivery_info.delivery_name);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "traceWaybill token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/cgi-bin/express/delivery/open_msg/trace_waybill?access_token=";
+    try mt.addRoute(base ++ "token-abc", .{
+        .body = "{\"errcode\":42001,\"errmsg\":\"access_token expired\"}",
+    });
+    try mt.addRoute(base ++ "token-new", .{
+        .body = "{\"waybill_token\":\"wb-token-new\"}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-test" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var e = Express.init(&ctx, allocator);
+    e.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try e.traceWaybill(.{
+        .openid = "openid-1",
+        .delivery_id = "SF",
+        .waybill_id = "SF123456789",
+        .trans_id = "wxpay-tx-1",
+    });
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("wb-token-new", parsed.value.waybill_token);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
+}
+
+test "updateWaybillGoods 非 token 类 errcode 不重试也不作废" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/express/delivery/open_msg/update_waybill_goods?access_token=token-abc", .{
+        .body = "{\"errcode\":9300501,\"errmsg\":\"invalid waybill_token\"}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-test" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var e = Express.init(&ctx, allocator);
+    e.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    try std.testing.expectError(
+        util_error.WechatError.ApiError,
+        e.updateWaybillGoods(.{ .waybill_token = "wb-token-x" }),
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
 }

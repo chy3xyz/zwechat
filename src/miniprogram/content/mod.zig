@@ -9,6 +9,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// 内容安全模块（旧接口）。
 pub const Content = struct {
@@ -48,68 +49,68 @@ pub const Content = struct {
     /// `scene` 取值 1: 资料，2: 评论，3: 论坛，4: 社交日志。
     ///
     /// 返回微信原始响应体，调用方负责 `allocator.free`；
-    /// 响应 errcode 非 0 时返回 `WechatError.ApiError`。
+    /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次，
+    /// 其他非 0 errcode 返回 `WechatError.ApiError`。
     pub fn checkText(self: *Self, openid: []const u8, text: []const u8, scene: u8) ![]u8 {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/msg_sec_check?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
         const body = try encodeCheckTextBody(self.allocator, openid, text, scene);
         defer self.allocator.free(body);
 
-        const resp = try self.postJSON(uri, body);
-        errdefer self.allocator.free(resp);
+        const Sender = struct {
+            content: *Self,
+            body: []const u8,
 
-        var parsed = std.json.parseFromSlice(struct {
-            errcode: i64 = 0,
-            errmsg: []const u8 = "",
-        }, self.allocator, resp, .{ .ignore_unknown_fields = true }) catch {
-            // errdefer 负责释放 resp。
-            return util_error.WechatError.DecodeError;
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/msg_sec_check?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                return c.content.postJSON(uri, c.body);
+            }
         };
-        defer parsed.deinit();
 
-        if (parsed.value.errcode != 0) {
-            return util_error.WechatError.ApiError;
-        }
-        return resp;
+        return util_retry.callApi(self.ctx, self.allocator, "ContentCheckText", Sender{
+            .content = self,
+            .body = body,
+        });
     }
 
     /// 检测图片内容（`media` 为图片文件绝对路径）。
+    ///
+    /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次。
     pub fn checkImage(self: *Self, media: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Sender = struct {
+            content: *Self,
+            media: []const u8,
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/img_sec_check?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/img_sec_check?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const fields = [_]util_http.MultipartField{
-            .{
-                .is_file = true,
-                .field_name = "media",
-                .filename = "media",
-                .value = "",
-                .file_path = media,
-            },
+                const client = util_http.getDefaultClient(c.content.allocator);
+                const fields = [_]util_http.MultipartField{
+                    .{
+                        .is_file = true,
+                        .field_name = "media",
+                        .filename = "media",
+                        .value = "",
+                        .file_path = c.media,
+                    },
+                };
+                return client.postMultipart(uri, &fields);
+            }
         };
-        const resp = try client.postMultipart(uri, &fields);
-        defer self.allocator.free(resp);
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "ContentCheckImage")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "ContentCheckImage", Sender{
+            .content = self,
+            .media = media,
+        });
+        self.allocator.free(resp);
     }
 };
 
@@ -229,4 +230,38 @@ test "checkText errcode 非 0 返回 ApiError" {
 
     const result = c.checkText("oABC", "违规内容", 3);
     try std.testing.expectError(util_error.WechatError.ApiError, result);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "checkText token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/wxa/msg_sec_check?access_token=";
+    try mt.addRoute(base ++ "token-abc", .{
+        .body = "{\"errcode\":42001,\"errmsg\":\"access_token expired\"}",
+    });
+    try mt.addRoute(base ++ "token-new", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-ct" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var c = Content.init(&ctx, allocator);
+    c.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    const resp = try c.checkText("oABC", "hello", 2);
+    defer allocator.free(resp);
+    try std.testing.expectEqualStrings("{\"errcode\":0,\"errmsg\":\"ok\"}", resp);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
 }

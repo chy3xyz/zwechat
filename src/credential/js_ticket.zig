@@ -168,6 +168,24 @@ pub const DefaultJsTicket = struct {
         return allocator.dupe(u8, resp.ticket);
     }
 
+    /// 作废缓存的 jsapi_ticket：删除缓存条目，使下一次 `getTicket` 必须回源。
+    ///
+    /// 本实现不额外持有 ticket 副本（唯一副本就在 cache 里），删除缓存即作废完成；
+    /// 删除的 key 与 `getTicket` 使用的完全一致（`"{prefix}_jsapi_ticket_{app_id}"`），
+    /// 锁范围与 `getTicket` 的缓存临界区一致，与并发 `set` / `delete` 互斥。
+    /// 键不存在不视为错误（`cache.delete` 契约）。
+    ///
+    /// 用途：ticket 会随 access_token 失效而一起失效，`JsTicketHandle.invalidateTicket`
+    /// （如 `work/context/mod.zig` 的 `Context.invalidateJsTicket`）在识别到失效后调用本方法。
+    pub fn invalidate(self: *DefaultJsTicket, allocator: std.mem.Allocator) CredentialError!void {
+        const key = try self.cacheKey(allocator);
+        defer allocator.free(key);
+
+        self.lock.lock();
+        defer self.lock.unlock();
+        try self.cache.delete(key);
+    }
+
     /// 包装为抽象接口 `JsTicketHandle`。
     pub fn asHandle(self: *DefaultJsTicket) JsTicketHandle {
         return .{
@@ -179,6 +197,7 @@ pub const DefaultJsTicket = struct {
     /// vtable 单例：所有 `DefaultJsTicket` 实例共用。
     const vtable_instance = JsTicketHandle.VTable{
         .getTicket = handleGetTicket,
+        .invalidate = handleInvalidate,
     };
 
     fn handleGetTicket(
@@ -188,6 +207,11 @@ pub const DefaultJsTicket = struct {
     ) anyerror![]u8 {
         const self: *DefaultJsTicket = @ptrCast(@alignCast(ctx));
         return self.getTicket(allocator, access_token);
+    }
+
+    fn handleInvalidate(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        const self: *DefaultJsTicket = @ptrCast(@alignCast(ctx));
+        return self.invalidate(allocator);
     }
 };
 
@@ -203,9 +227,13 @@ const StubFetcherCtx = struct {
 
 fn stubFetcher(ctx: *anyopaque, allocator: std.mem.Allocator, url: []const u8) CredentialError![]u8 {
     const self: *StubFetcherCtx = @ptrCast(@alignCast(ctx));
-    self.called_count += 1;
     // 注意：调用方在 fetcher 返回后会立即 free 掉 url 缓冲；这里必须 dup 一份独立副本。
-    self.last_url = allocator.dupe(u8, url) catch return error.OutOfMemory;
+    // 先分配新副本再释放旧副本：多次回源（如 invalidate 后再取）时不会泄漏，
+    // 且分配失败时 `last_url` 仍指向有效旧值。
+    const url_dup = try allocator.dupe(u8, url);
+    if (self.last_url) |old| allocator.free(old);
+    self.called_count += 1;
+    self.last_url = url_dup;
     return allocator.dupe(u8, self.response);
 }
 
@@ -414,4 +442,82 @@ test "DefaultJsTicket: cacheKey 拼接正确" {
     defer allocator.free(key);
 
     try std.testing.expectEqualStrings("pfx_jsapi_ticket_wxid", key);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// invalidate：缓存写入 → 作废 → 下次 getTicket 重新回源
+// ──────────────────────────────────────────────────────────────────────────────
+
+test "DefaultJsTicket: invalidate 后缓存条目消失，下一次 getTicket 重新回源" {
+    const allocator = std.testing.allocator;
+    const ctx = makeMemoryCache(allocator);
+    defer {
+        ctx.mem.deinit();
+        allocator.destroy(ctx.mem);
+    }
+
+    var stub_ctx = StubFetcherCtx{
+        .response = "{\"ticket\":\"ticket_v1\",\"expires_in\":7200,\"errcode\":0,\"errmsg\":\"ok\"}",
+    };
+    defer if (stub_ctx.last_url) |u| allocator.free(u);
+
+    var t = DefaultJsTicket.initWithFetcher(
+        "wx_t_invalidate",
+        "gowechat_test_",
+        ctx.cache,
+        stubFetcher,
+        @ptrCast(&stub_ctx),
+    );
+
+    // 作废用的 key 必须是 getTicket 真正写入的那个（"{prefix}_jsapi_ticket_{app_id}"）。
+    const key = try t.cacheKey(allocator);
+    defer allocator.free(key);
+    try std.testing.expectEqualStrings("gowechat_test__jsapi_ticket_wx_t_invalidate", key);
+
+    // 1) 首次回源并写入缓存
+    const first = try t.getTicket(allocator, "ak_1");
+    defer allocator.free(first);
+    try std.testing.expectEqualStrings("ticket_v1", first);
+    try std.testing.expectEqual(@as(usize, 1), stub_ctx.called_count);
+    try std.testing.expect((try ctx.cache.get(key)) != null);
+
+    // 2) 缓存命中：不再回源
+    const cached = try t.getTicket(allocator, "ak_1");
+    defer allocator.free(cached);
+    try std.testing.expectEqual(@as(usize, 1), stub_ctx.called_count);
+
+    // 3) 作废：缓存条目被删除，且可重复调用不报错（键不存在不视为错误）
+    try t.invalidate(allocator);
+    try std.testing.expect((try ctx.cache.get(key)) == null);
+    try t.invalidate(allocator);
+
+    // 4) 再取必须重新回源
+    const refreshed = try t.getTicket(allocator, "ak_1");
+    defer allocator.free(refreshed);
+    try std.testing.expectEqualStrings("ticket_v1", refreshed);
+    try std.testing.expectEqual(@as(usize, 2), stub_ctx.called_count);
+
+    // 5) 抽象 handle 转发到同一实现（不是 InvalidateNotSupported）
+    const handle = t.asHandle();
+    try handle.invalidateTicket(allocator);
+    try std.testing.expect((try ctx.cache.get(key)) == null);
+
+    // 6) 经 handle 重复作废（键已不存在）同样不报错
+    try handle.invalidateTicket(allocator);
+}
+
+test "DefaultJsTicket: invalidate 对空缓存不报错（仅构造未使用过）" {
+    const allocator = std.testing.allocator;
+    const ctx = makeMemoryCache(allocator);
+    defer {
+        ctx.mem.deinit();
+        allocator.destroy(ctx.mem);
+    }
+
+    var t = DefaultJsTicket.init("wx_no_cache_entry", "gowechat_test_", ctx.cache);
+    try t.invalidate(allocator);
+    try t.invalidate(allocator);
+
+    const handle = t.asHandle();
+    try handle.invalidateTicket(allocator);
 }

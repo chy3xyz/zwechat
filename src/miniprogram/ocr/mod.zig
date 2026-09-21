@@ -8,6 +8,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 pub const Position = struct {
     left_top: Coordinate = .{},
@@ -165,9 +166,6 @@ pub const OCR = struct {
     }
 
     fn fetch(self: *Self, comptime T: type, path: []const u8, img_url: []const u8) !std.json.Parsed(T) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
         // img_url 作为 query 参数需先按 URI 规则转义（空格、&、?、# 等）。
         var encoded_buf: std.Io.Writer.Allocating = .init(self.allocator);
         defer encoded_buf.deinit();
@@ -175,14 +173,27 @@ pub const OCR = struct {
         const encoded = try encoded_buf.toOwnedSlice();
         defer self.allocator.free(encoded);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cv/ocr/{s}?img_url={s}&access_token={s}",
-            .{ path, encoded, access_token },
-        );
-        defer self.allocator.free(uri);
+        const Sender = struct {
+            ocr: *Self,
+            path: []const u8,
+            encoded: []const u8,
 
-        const resp = try self.post(uri);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/cv/ocr/{s}?img_url={s}&access_token={s}",
+                    .{ c.path, c.encoded, token },
+                );
+                defer allocator.free(uri);
+                return c.ocr.post(uri);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, path, Sender{
+            .ocr = self,
+            .path = path,
+            .encoded = encoded,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(T, self.allocator, resp, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
@@ -307,4 +318,40 @@ test "img_url 含特殊字符时按 URI 规则转义" {
     try std.testing.expectEqual(@as(i64, 100), parsed.value.img_size.w);
     try std.testing.expectEqual(@as(i64, 50), parsed.value.img_size.h);
     try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "idCard token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    // token 位于 img_url 之后，重试后仅该段变化。
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/idcard?img_url=https://example.com/a.jpg&access_token=token-abc", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+    });
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/idcard?img_url=https://example.com/a.jpg&access_token=token-new", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"type\":\"Front\",\"name\":\"张三\"}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-ocr" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var o = OCR.init(&ctx, allocator);
+    o.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try o.idCard("https://example.com/a.jpg");
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("张三", parsed.value.name);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cv/ocr/idcard?img_url=https://example.com/a.jpg&access_token=token-new",
+        mt.history.items[1],
+    );
 }

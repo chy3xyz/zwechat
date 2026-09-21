@@ -17,6 +17,9 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
+const util_json = @import("../../util/json.zig");
+const credential = @import("../../credential/mod.zig");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL 常量
@@ -113,22 +116,32 @@ pub const MsgAudit = struct {
     ///
     /// 对应企业微信 `POST /cgi-bin/msgaudit/groupchat/get`，
     /// 请求体为 `{"roomid":"..."}`，`roomid` 为待查询的群 id。
+    /// 走 `util/retry.callApi`：token 失效（40001 等）时自动作废缓存并重试一次。
     pub fn getRoomInfo(self: *Self, roomid: []const u8) !std.json.Parsed(RoomInfoResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ getRoomInfoURL, access_token },
-        );
-        defer self.allocator.free(uri);
-
         const body = try encodeRoomIdJson(self.allocator, roomid);
         defer self.allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const Sender = struct {
+            self: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "{s}?access_token={s}",
+                    .{ getRoomInfoURL, token },
+                );
+                defer allocator.free(uri);
+                return util_http.getDefaultClient(c.self.allocator).postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(
+            self.ctx,
+            self.allocator,
+            "GetRoomInfo",
+            Sender{ .self = self, .body = body },
+        );
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(RoomInfoResponse, self.allocator, resp, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
@@ -136,7 +149,6 @@ pub const MsgAudit = struct {
         };
         errdefer parsed.deinit();
 
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
         return parsed;
     }
 
@@ -145,22 +157,32 @@ pub const MsgAudit = struct {
     /// 对应企业微信 `POST /cgi-bin/msgaudit/check_single_agree`。
     /// 请求条目必须同时携带 `userid` 与 `exteranalopenid`
     /// （注意是微信官方拼写，见 `AgreeInfoEntry`）。
+    /// 与 `getRoomInfo` 一样走 `util/retry.callApi` 的失效自愈链路。
     pub fn getAgreeInfo(self: *Self, req: AgreeInfoRequest) !std.json.Parsed(AgreeInfoResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ getAgreeInfoURL, access_token },
-        );
-        defer self.allocator.free(uri);
-
         const body = try encodeAgreeInfoJson(self.allocator, req.info);
         defer self.allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const Sender = struct {
+            self: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "{s}?access_token={s}",
+                    .{ getAgreeInfoURL, token },
+                );
+                defer allocator.free(uri);
+                return util_http.getDefaultClient(c.self.allocator).postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(
+            self.ctx,
+            self.allocator,
+            "GetAgreeInfo",
+            Sender{ .self = self, .body = body },
+        );
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(AgreeInfoResponse, self.allocator, resp, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
@@ -168,7 +190,6 @@ pub const MsgAudit = struct {
         };
         errdefer parsed.deinit();
 
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
         return parsed;
     }
 };
@@ -207,28 +228,10 @@ fn encodeAgreeInfoJson(allocator: std.mem.Allocator, info: []const AgreeInfoEntr
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendJsonString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => {
-                if (c < 0x20) {
-                    // 其余 <0x20 控制字符必须转义为 \u00XX，否则生成非法 JSON。
-                    const digits = "0123456789ABCDEF";
-                    try buf.appendSlice(allocator, "\\u00");
-                    try buf.append(allocator, digits[c >> 4]);
-                    try buf.append(allocator, digits[c & 0x0f]);
-                } else {
-                    try buf.append(allocator, c);
-                }
-            },
-        }
-    }
-}
+/// JSON 字符串转义（实现收敛到 `util.json.appendEscapedString`）。
+/// 控制字符输出 `\u00xx`：此前本模块手写版用**大写** hex（如 `\u001F`），
+/// 与 Go `encoding/json` / `std.json` 的小写约定不一致，现统一为小写。
+const appendJsonString = util_json.appendEscapedString;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 测试
@@ -295,12 +298,12 @@ test "encodeAgreeInfoJson 生成正确 JSON（exteranalopenid 拼写）" {
     try std.testing.expectEqualStrings("{\"info\":[{\"userid\":\"u1\",\"exteranalopenid\":\"o1\"}]}", body);
 }
 
-test "appendJsonString 转义控制字符为 \\u00XX" {
+test "appendJsonString 转义控制字符为 \\u00xx（小写 hex，与 std.json 一致）" {
     const alloc = std.testing.allocator;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(alloc);
     try appendJsonString(alloc, &buf, "a\x01b\x1fc");
-    try std.testing.expectEqualStrings("a\\u0001b\\u001Fc", buf.items);
+    try std.testing.expectEqualStrings("a\\u0001b\\u001fc", buf.items);
 }
 
 // ── Mock transport 测试 ──────────────────────────────────────────────────────
@@ -310,7 +313,38 @@ const StubToken = struct {
         return allocator.dupe(u8, "token-abc");
     }
 };
-const token_vtable = @import("../../credential/mod.zig").AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+const token_vtable = credential.AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+
+/// 可自愈的假 token handle：`invalidate` 后把 `idx` 推进到下一个 token。
+const HealState = struct {
+    invalidates: usize = 0,
+    idx: usize = 0,
+    tokens: []const []const u8 = &.{ "old-token", "new-token" },
+
+    fn getToken(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const st: *HealState = @ptrCast(@alignCast(ctx));
+        return allocator.dupe(u8, st.tokens[st.idx]);
+    }
+
+    fn invalidate(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const st: *HealState = @ptrCast(@alignCast(ctx));
+        st.invalidates += 1;
+        if (st.idx + 1 < st.tokens.len) st.idx += 1;
+    }
+
+    const vtable = credential.AccessTokenHandle.VTable{
+        .getAccessToken = getToken,
+        .invalidate = invalidate,
+    };
+};
+
+fn makeHealCtx(state: *HealState) Context {
+    return .{
+        .config = .{ .corp_id = "ww-audit" },
+        .access_token_handle = .{ .ptr = @ptrCast(state), .vtable = &HealState.vtable },
+    };
+}
 
 /// 捕获 uri / method / payload 的 transport，用于断言请求契约。
 const Capture = struct {
@@ -404,4 +438,62 @@ test "getAgreeInfo 请求与响应契约" {
     try std.testing.expectEqualStrings("zhangsan", info.userid);
     try std.testing.expectEqualStrings("o-1", info.exteranalopenid);
     try std.testing.expectEqualStrings("Agree", info.agree_status);
+}
+
+test "getRoomInfo token 失效自愈：40014 → 作废缓存 → 新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/msgaudit/groupchat/get?access_token=old-token", .{
+        .body = "{\"errcode\":40014,\"errmsg\":\"invalid access_token\"}",
+    });
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/msgaudit/groupchat/get?access_token=new-token", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"roomname\":\"研发群\",\"creator\":\"zhangsan\",\"members\":[{\"memberid\":\"lisi\"}]}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = HealState{};
+    var ctx = makeHealCtx(&state);
+    var m = MsgAudit.init(&ctx, allocator);
+    var parsed = try m.getRoomInfo("ROOM_ID_1");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("研发群", parsed.value.roomname);
+    try std.testing.expectEqual(@as(usize, 1), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-token") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-token") != null);
+}
+
+test "getAgreeInfo 非 token 类 errcode（60011）直接 ApiError，不重试也不作废" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/msgaudit/check_single_agree?access_token=old-token", .{
+        .body = "{\"errcode\":60011,\"errmsg\":\"no privilege to access the data\"}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = HealState{};
+    var ctx = makeHealCtx(&state);
+    var m = MsgAudit.init(&ctx, allocator);
+
+    try std.testing.expectError(error.ApiError, m.getAgreeInfo(.{
+        .info = &.{.{ .userid = "zhangsan", .exteranalopenid = "o-1" }},
+    }));
+
+    try std.testing.expectEqual(@as(usize, 0), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
 }

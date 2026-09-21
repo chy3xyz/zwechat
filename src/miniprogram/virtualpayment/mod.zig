@@ -4,11 +4,16 @@
 //! 对应 `_ref/wechat/miniprogram/virtualpayment/`：查询余额、代币支付、订单查询/取消/
 //! 发货/赠送/账单/退款/提现等。请求 URL 需要 HMAC-SHA256 支付签名（pay_sig）与
 //! 用户态签名（signature）。
+//!
+//! `access_token` 由 `util/retry.callApi` 注入：遇到 40001 等失效码会作废缓存、
+//! 取新 token 后**只重试一次**。`pay_sig` / `signature` 只与 path + 请求体有关，
+//! 重试时这些字节逐字不变（只有 `?access_token=` 的值被替换）。
 
 const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// 环境：0 正式，1 沙箱。
 pub const Env = enum(i64) {
@@ -708,40 +713,61 @@ pub const VirtualPayment = struct {
     // ─────────────────────────────────────────────────────────────────────────
 
     fn callUser(self: *Self, path: []const u8, req: anytype, comptime R: type) !std.json.Parsed(R) {
-        const body = try jsonStringify(self.allocator, req);
-        defer self.allocator.free(body);
-        const uri = try self.requestAddress(path, body, true);
-        defer self.allocator.free(uri);
-        return self.postBody(uri, body, R);
+        return self.callSigned(path, req, true, R);
     }
 
     fn callPay(self: *Self, path: []const u8, req: anytype, comptime R: type) !std.json.Parsed(R) {
+        return self.callSigned(path, req, false, R);
+    }
+
+    /// 带签名的接口调用。
+    ///
+    /// 请求体只序列化一次（pay_sig / signature 都基于同一份字节），发送交给
+    /// `util_retry.callApi`：它负责「识别 40001 / 40014 / 41001 / 42001 → 作废缓存
+    /// access_token → 取新 token → 只重试一次」。URI 组装与 transport 注入仍留在
+    /// 本模块内（见 `SignedReq.send` / `requestAddress`），重试只是把 `?access_token=`
+    /// 换成新值，`pay_sig` / `signature` 与 token 无关、逐字不变。
+    fn callSigned(self: *Self, path: []const u8, req: anytype, with_signature: bool, comptime R: type) !std.json.Parsed(R) {
         const body = try jsonStringify(self.allocator, req);
         defer self.allocator.free(body);
-        const uri = try self.requestAddress(path, body, false);
-        defer self.allocator.free(uri);
-        return self.postBody(uri, body, R);
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, path, SignedReq{
+            .vp = self,
+            .path = path,
+            .content = body,
+            .with_signature = with_signature,
+        });
+        defer self.allocator.free(resp);
+
+        return parseResponse(R, self.allocator, resp);
     }
 
     /// 计算请求地址（带 pay_sig，可选 signature）。
-    fn requestAddress(self: *Self, path: []const u8, content: []const u8, with_signature: bool) ![]u8 {
+    ///
+    /// `access_token` 由调用方注入——`SignedReq.send` 从 `util_retry.callApi` 拿到
+    /// 当前 token（失效重试时是刷新后的新 token），本方法不再自己去取。
+    fn requestAddress(
+        self: *Self,
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        content: []const u8,
+        with_signature: bool,
+        access_token: []const u8,
+    ) ![]u8 {
         const pay_sig = try self.paySign(path, content);
         defer self.allocator.free(pay_sig);
-
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
 
         if (with_signature) {
             const sig = try self.signature(content);
             defer self.allocator.free(sig);
             return std.fmt.allocPrint(
-                self.allocator,
+                allocator,
                 "https://api.weixin.qq.com{s}?access_token={s}&pay_sig={s}&signature={s}",
                 .{ path, access_token, pay_sig, sig },
             );
         }
         return std.fmt.allocPrint(
-            self.allocator,
+            allocator,
             "https://api.weixin.qq.com{s}?access_token={s}&pay_sig={s}",
             .{ path, access_token, pay_sig },
         );
@@ -764,12 +790,20 @@ pub const VirtualPayment = struct {
         return hmacSha256Hex(self.allocator, self.session_key, content);
     }
 
-    fn postBody(self: *Self, uri: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
+    /// 发送请求并返回原始响应体：所有权在返回时转移给调用方
+    /// （`util_retry.callApi` 持有并在失败路径上释放）。
+    ///
+    /// 走 `getDefaultClient`（线程局部单例），测试通过 `setupTestClient` 注入
+    /// transport，因此重试链路复用同一份注入。
+    fn postRaw(self: *Self, uri: []const u8, body: []const u8) ![]u8 {
         const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.post(uri, body, "application/json;charset=utf-8");
-        defer self.allocator.free(resp);
+        return client.post(uri, body, "application/json;charset=utf-8");
+    }
 
-        var parsed = std.json.parseFromSlice(T, self.allocator, resp, .{
+    /// 解析响应体。errcode 检查已由 `util_retry.callApi` 完成（失败即抛 ApiError），
+    /// 这里再兜一层「callApi 认不出错误体、但响应里 errcode 非 0」的情况，与改造前一致。
+    fn parseResponse(comptime T: type, allocator: std.mem.Allocator, resp: []const u8) !std.json.Parsed(T) {
+        var parsed = std.json.parseFromSlice(T, allocator, resp, .{
             .allocate = .alloc_always,
             .ignore_unknown_fields = true,
         }) catch {
@@ -778,6 +812,24 @@ pub const VirtualPayment = struct {
         errdefer parsed.deinit();
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
         return parsed;
+    }
+};
+
+/// 带签名的请求发送器（`util_retry.callApi` 的 `sender`）。
+///
+/// URI 组装与 transport 注入仍由本模块负责，`callApi` 只注入 / 刷新
+/// `access_token`：token 失效重试时除 `access_token` 外的所有字节
+/// （path、body、pay_sig、signature）逐字不变。
+const SignedReq = struct {
+    vp: *VirtualPayment,
+    path: []const u8,
+    content: []const u8,
+    with_signature: bool,
+
+    pub fn send(self: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+        const uri = try self.vp.requestAddress(allocator, self.path, self.content, self.with_signature, token);
+        defer allocator.free(uri);
+        return self.vp.postRaw(uri, self.content);
     }
 };
 
@@ -810,7 +862,7 @@ fn jsonStringify(allocator: std.mem.Allocator, value: anytype) ![]u8 {
             // 微信 xpay 契约要求 env 为数字（0 正式 / 1 沙箱，见 Go 参考 domain.go），
             // 而 exhaustive enum 经 stringify 会写成 tag 名字符串，这里特判写 backing int。
             if (comptime (ftype == Env)) {
-                try s.write(@intFromEnum(fv));
+                try s.write(@backingInt(fv));
             } else {
                 try s.write(fv);
             }
@@ -875,8 +927,18 @@ const test_token_vtable = credential.AccessTokenHandle.VTable{
 const TestCapture = struct {
     allocator: std.mem.Allocator,
     response: []const u8,
+    /// 非空时按调用次序取响应（越界复用最后一项），用于 token 失效重试测试。
+    responses: []const []const u8 = &.{},
+    /// 收到过的请求次数。
+    calls: usize = 0,
+    /// 最近一次请求的副本（借用 arena / 测试 allocator，测试结束前一直有效）。
     uri: []u8 = &.{},
     payload: []u8 = &.{},
+    /// 每次请求 URI / 请求体的副本（越界不记录），用 `uriAt` / `payloadAt` 读取。
+    uri_history: [4][400]u8 = @splat(@splat(0)),
+    uri_lens: [4]usize = @splat(0),
+    payload_history: [4][400]u8 = @splat(@splat(0)),
+    payload_lens: [4]usize = @splat(0),
 
     fn dispatch(
         ctx: *anyopaque,
@@ -889,9 +951,30 @@ const TestCapture = struct {
         _ = method;
         _ = content_type;
         const self: *TestCapture = @ptrCast(@alignCast(ctx));
+        if (self.calls < self.uri_history.len and uri.len <= self.uri_history[0].len) {
+            @memcpy(self.uri_history[self.calls][0..uri.len], uri);
+            self.uri_lens[self.calls] = uri.len;
+        }
+        if (self.calls < self.payload_history.len and payload.len <= self.payload_history[0].len) {
+            @memcpy(self.payload_history[self.calls][0..payload.len], payload);
+            self.payload_lens[self.calls] = payload.len;
+        }
         self.uri = try allocator.dupe(u8, uri);
         self.payload = try allocator.dupe(u8, payload);
-        return allocator.dupe(u8, self.response);
+        const body = if (self.responses.len > 0)
+            self.responses[@min(self.calls, self.responses.len - 1)]
+        else
+            self.response;
+        self.calls += 1;
+        return allocator.dupe(u8, body);
+    }
+
+    fn uriAt(self: *const TestCapture, idx: usize) []const u8 {
+        return self.uri_history[idx][0..self.uri_lens[idx]];
+    }
+
+    fn payloadAt(self: *const TestCapture, idx: usize) []const u8 {
+        return self.payload_history[idx][0..self.payload_lens[idx]];
     }
 };
 
@@ -901,8 +984,8 @@ fn setupTestClient(alloc: std.mem.Allocator, cap: *TestCapture) void {
 }
 
 fn releaseTestClient() void {
-    const client = util_http.getDefaultClient(std.heap.page_allocator);
-    client.setTransport(null, null);
+    // 不依赖「用别的 allocator 再取一次指针」的宽容语义：直接销毁线程局部实例，
+    // 注入的 transport 随实例一起消失（下次 getDefaultClient 会重新初始化）。
     util_http.deinitDefaultClient();
 }
 
@@ -988,4 +1071,117 @@ test "queryUserBalance 用户态签名与支付签名共用同一份序列化结
     try data.appendSlice(alloc, cap.payload);
     const expected_pay = try hmacSha256Hex(alloc, "appkey-123", data.items);
     try std.testing.expect(std.mem.indexOf(u8, cap.uri, expected_pay) != null);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// token 失效自愈：业务接口返回 40001 → 作废缓存 token → 换新 token 重试一次
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 可作废的假凭据：作废前发 `tok-1`，作废后发 `tok-2`（模拟微信换发新 token）。
+const HealToken = struct {
+    cached: []const u8 = "tok-1",
+    invalidates: usize = 0,
+
+    fn getToken(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *HealToken = @ptrCast(@alignCast(ptr));
+        return allocator.dupe(u8, self.cached);
+    }
+
+    fn invalidate(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const self: *HealToken = @ptrCast(@alignCast(ptr));
+        self.invalidates += 1;
+        self.cached = "tok-2";
+    }
+
+    const vtable = credential.AccessTokenHandle.VTable{
+        .getAccessToken = getToken,
+        .invalidate = invalidate,
+    };
+};
+
+test "queryOrder token 失效自愈：40001 → 作废缓存 → 换新 token 只重试一次" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "",
+        .responses = &.{
+            "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+            "{\"errcode\":0,\"errmsg\":\"ok\",\"order\":null}",
+        },
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var tk = HealToken{};
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-vp", .app_key = "appkey-123" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var v = VirtualPayment.init(&ctx, alloc);
+
+    var parsed = try v.queryOrder(.{ .openid = "ou-1", .order_id = "o-1" });
+    defer parsed.deinit();
+
+    // 恰好作废一次、发送两次（40001 后只重试一次）。
+    try std.testing.expectEqual(@as(usize, 1), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), cap.calls);
+    try std.testing.expectEqualStrings("tok-1", tokenOf(cap.uriAt(0)));
+    try std.testing.expectEqualStrings("tok-2", tokenOf(cap.uriAt(1)));
+
+    // 除 access_token 外两次请求逐字一致：path 前缀相同、请求体相同、
+    // pay_sig（与 token 无关）也相同——重试没有改动任何签名输入。
+    try std.testing.expectEqualStrings(cap.payloadAt(0), cap.payloadAt(1));
+    const prefix = "https://api.weixin.qq.com/xpay/query_order?access_token=";
+    try std.testing.expect(std.mem.startsWith(u8, cap.uriAt(0), prefix));
+    try std.testing.expect(std.mem.startsWith(u8, cap.uriAt(1), prefix));
+
+    var sig_input = std.ArrayList(u8).empty;
+    defer sig_input.deinit(alloc);
+    try sig_input.appendSlice(alloc, "/xpay/query_order");
+    try sig_input.appendSlice(alloc, "&");
+    try sig_input.appendSlice(alloc, cap.payloadAt(1));
+    const expected_pay_sig = try hmacSha256Hex(alloc, "appkey-123", sig_input.items);
+    try std.testing.expect(std.mem.indexOf(u8, cap.uriAt(0), expected_pay_sig) != null);
+    try std.testing.expect(std.mem.indexOf(u8, cap.uriAt(1), expected_pay_sig) != null);
+}
+
+test "queryUserBalance 非 token 错误（45009）不重试也不作废" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":45009,\"errmsg\":\"reach max api daily quota limit\"}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var tk = HealToken{};
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-vp", .app_key = "appkey-123" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var v = VirtualPayment.init(&ctx, alloc);
+    v.setSessionKey("sk-1");
+
+    try std.testing.expectError(
+        util_error.WechatError.ApiError,
+        v.queryUserBalance(.{ .openid = "ou-1", .user_ip = "1.2.3.4" }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), cap.calls);
+}
+
+/// 从 `...?access_token=X&pay_sig=...` 中取出 access_token 的值。
+fn tokenOf(uri: []const u8) []const u8 {
+    const key = "access_token=";
+    const start = (std.mem.indexOf(u8, uri, key) orelse return "") + key.len;
+    const rest = uri[start..];
+    const end = std.mem.indexOfScalar(u8, rest, '&') orelse rest.len;
+    return rest[0..end];
 }

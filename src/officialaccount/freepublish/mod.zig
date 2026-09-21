@@ -5,11 +5,15 @@
 //! `freepublish/submit`（发布）、`freepublish/get`（发布状态轮询）、
 //! `freepublish/delete`（撤回）、`freepublish/getarticle`（单篇已发布文章）、
 //! `freepublish/batchget`（成功发布列表）。
+//!
+//! token 注入 / errcode 检查 / token 失效自愈（40001 等 → 作废缓存 → 只重试一次）
+//! 交给 `util/retry.callApi` 统一处理。
 
 const std = @import("std");
 const Context = @import("../context.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// 发布状态（与 Go 参考 `PublishStatus` 常量一一对应）。
 pub const PublishStatus = enum(i32) {
@@ -67,83 +71,83 @@ pub const FreePublish = struct {
     /// 返回微信原始响应字节（含 `publish_id`），由本结构体的 allocator 分配，
     /// **调用方负责 `free`**。
     pub fn publish(self: *Self, media_id: []const u8) ![]u8 {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Req = struct {
+            media_id: []const u8,
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/freepublish/submit?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    a,
+                    "https://api.weixin.qq.com/cgi-bin/freepublish/submit?access_token={s}",
+                    .{token},
+                );
+                defer a.free(uri);
 
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"media_id\":\"{s}\"}}", .{media_id});
-        defer self.allocator.free(body);
+                const body = try std.fmt.allocPrint(a, "{{\"media_id\":\"{s}\"}}", .{c.media_id});
+                defer a.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+                const client = util_http.getDefaultClient(a);
+                return client.postJSON(uri, body);
+            }
+        };
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "FreePublishSubmit")) |ce| {
-            defer ce.deinit();
-            self.allocator.free(resp);
-            return util_error.WechatError.ApiError;
-        }
-        return resp;
+        return util_retry.callApi(self.ctx, self.allocator, "FreePublishSubmit", Req{ .media_id = media_id });
     }
 
     /// 撤回发布。
     pub fn delete(self: *Self, article_id: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Req = struct {
+            article_id: []const u8,
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/freepublish/delete?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    a,
+                    "https://api.weixin.qq.com/cgi-bin/freepublish/delete?access_token={s}",
+                    .{token},
+                );
+                defer a.free(uri);
 
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"article_id\":\"{s}\"}}", .{article_id});
-        defer self.allocator.free(body);
+                const body = try std.fmt.allocPrint(a, "{{\"article_id\":\"{s}\"}}", .{c.article_id});
+                defer a.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
-        defer self.allocator.free(resp);
+                const client = util_http.getDefaultClient(a);
+                return client.postJSON(uri, body);
+            }
+        };
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "FreePublishDelete")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "FreePublishDelete", Req{ .article_id = article_id });
+        self.allocator.free(resp);
     }
 
     /// 发布状态轮询（`freepublish/get`）。
     ///
     /// 返回的 `std.json.Parsed(PublishStatusList)` 由调用方持有并负责 `deinit`。
     pub fn selectStatus(self: *Self, publish_id: i64) !std.json.Parsed(PublishStatusList) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Req = struct {
+            publish_id: i64,
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/freepublish/get?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    a,
+                    "https://api.weixin.qq.com/cgi-bin/freepublish/get?access_token={s}",
+                    .{token},
+                );
+                defer a.free(uri);
 
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"publish_id\":{d}}}", .{publish_id});
-        defer self.allocator.free(body);
+                const body = try std.fmt.allocPrint(a, "{{\"publish_id\":{d}}}", .{c.publish_id});
+                defer a.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+                const client = util_http.getDefaultClient(a);
+                return client.postJSON(uri, body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "FreePublishGet", Req{ .publish_id = publish_id });
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(PublishStatusList, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
+        // errcode 已由 callApi 检查（非 0 直接 ApiError）。
+        return std.json.parseFromSlice(PublishStatusList, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
-        errdefer parsed.deinit();
-
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed;
     }
 
     /// 获取成功发布列表。
@@ -153,32 +157,36 @@ pub const FreePublish = struct {
     ///
     /// 返回微信原始响应字节，由本结构体的 allocator 分配，**调用方负责 `free`**。
     pub fn list(self: *Self, offset: i64, count_n: i64, no_content: bool) ![]u8 {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Req = struct {
+            offset: i64,
+            count_n: i64,
+            no_content: bool,
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/freepublish/batchget?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    a,
+                    "https://api.weixin.qq.com/cgi-bin/freepublish/batchget?access_token={s}",
+                    .{token},
+                );
+                defer a.free(uri);
 
-        const body = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"offset\":{d},\"count\":{d},\"no_content\":{}}}",
-            .{ offset, count_n, no_content },
-        );
-        defer self.allocator.free(body);
+                const body = try std.fmt.allocPrint(
+                    a,
+                    "{{\"offset\":{d},\"count\":{d},\"no_content\":{}}}",
+                    .{ c.offset, c.count_n, c.no_content },
+                );
+                defer a.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+                const client = util_http.getDefaultClient(a);
+                return client.postJSON(uri, body);
+            }
+        };
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "FreePublishBatchGet")) |ce| {
-            defer ce.deinit();
-            self.allocator.free(resp);
-            return util_error.WechatError.ApiError;
-        }
-        return resp;
+        return util_retry.callApi(self.ctx, self.allocator, "FreePublishBatchGet", Req{
+            .offset = offset,
+            .count_n = count_n,
+            .no_content = no_content,
+        });
     }
 };
 
@@ -189,22 +197,38 @@ pub const FreePublish = struct {
 const credential = @import("../../credential/mod.zig");
 
 const TestTokenState = struct {
+    /// 当前（缓存中的）token；`invalidate` 后换成 `refreshed`。
     token: []const u8,
-};
+    /// 作废后换发的新 token（模拟微信换发）；`null` 表示作废后仍返回同一 token。
+    refreshed: ?[]const u8 = null,
+    /// `invalidate` 被调用的次数。
+    invalidates: usize = 0,
 
-fn testGetAccessToken(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
-    const state: *const TestTokenState = @ptrCast(@alignCast(ctx));
-    return allocator.dupe(u8, state.token);
-}
+    fn getAccessToken(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const state: *const TestTokenState = @ptrCast(@alignCast(ptr));
+        return allocator.dupe(u8, state.token);
+    }
 
-const test_token_vtable = credential.AccessTokenHandle.VTable{
-    .getAccessToken = testGetAccessToken,
+    fn invalidate(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const state: *TestTokenState = @ptrCast(@alignCast(ptr));
+        state.invalidates += 1;
+        if (state.refreshed) |t| {
+            state.token = t;
+            state.refreshed = null;
+        }
+    }
+
+    const vtable = credential.AccessTokenHandle.VTable{
+        .getAccessToken = getAccessToken,
+        .invalidate = invalidate,
+    };
 };
 
 fn makeFakeTokenHandle(state: *TestTokenState) credential.AccessTokenHandle {
     return .{
         .ptr = @ptrCast(state),
-        .vtable = &test_token_vtable,
+        .vtable = &TestTokenState.vtable,
     };
 }
 
@@ -238,9 +262,15 @@ fn setupTestClient(alloc: std.mem.Allocator, cap: *TestCapture) void {
 }
 
 fn releaseTestClient() void {
-    const client = util_http.getDefaultClient(std.heap.page_allocator);
-    client.setTransport(null, null);
+    // 不依赖「用别的 allocator 再取一次指针」的宽容语义：直接销毁线程局部实例，
+    // 注入的 transport 随实例一起消失（下次 getDefaultClient 会重新初始化）。
     util_http.deinitDefaultClient();
+}
+
+/// 用 `MockTransport` 路由表替代 capture（按 URI 命中不同响应，见失效重试测试）。
+fn setupMockClient(alloc: std.mem.Allocator, mt: *util_http.MockTransport) void {
+    const client = util_http.getDefaultClient(alloc);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(mt));
 }
 
 test "FreePublish.init 持有 ctx" {
@@ -329,4 +359,80 @@ test "FreePublish.delete errcode 非 0 返回 ApiError" {
     var fp = FreePublish.init(&ctx, alloc);
 
     try std.testing.expectError(util_error.WechatError.ApiError, fp.delete("AID"));
+}
+
+test "FreePublish token 失效自愈：40001 → 作废缓存 → 新 token 重试成功" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/freepublish/batchget?access_token=old-ak", .{
+        .body = "{\"errcode\":40014,\"errmsg\":\"invalid access_token\"}",
+    });
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/freepublish/batchget?access_token=new-ak", .{
+        .body = "{\"total_count\":1,\"item\":[]}",
+    });
+    setupMockClient(allocator, &mt);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "old-ak", .refreshed = "new-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var fp = FreePublish.init(&ctx, allocator);
+
+    const resp = try fp.list(0, 10, true);
+    defer allocator.free(resp);
+
+    try std.testing.expectEqualStrings("{\"total_count\":1,\"item\":[]}", resp);
+    try std.testing.expectEqual(@as(usize, 1), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-ak") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-ak") != null);
+}
+
+test "FreePublish.selectStatus 走 token 失效自愈后仍解析发布状态" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/freepublish/get?access_token=old-ak", .{
+        .body = "{\"errcode\":41001,\"errmsg\":\"access_token missing\"}",
+    });
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/freepublish/get?access_token=new-ak", .{
+        .body = "{\"publish_id\":123,\"publish_status\":0,\"article_id\":\"AID\"}",
+    });
+    setupMockClient(allocator, &mt);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "old-ak", .refreshed = "new-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var fp = FreePublish.init(&ctx, allocator);
+
+    var parsed = try fp.selectStatus(123);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(i64, 123), parsed.value.publish_id);
+    try std.testing.expectEqual(@as(i32, 0), parsed.value.publish_status);
+    try std.testing.expectEqualStrings("AID", parsed.value.article_id);
+    try std.testing.expectEqual(@as(usize, 1), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+}
+
+test "FreePublish 非 token 类 errcode（45009）直接 ApiError：不作废、只请求一次" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/freepublish/submit?access_token=old-ak", .{
+        .body = "{\"errcode\":45009,\"errmsg\":\"reach max api daily quota limit\"}",
+    });
+    setupMockClient(allocator, &mt);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "old-ak", .refreshed = "new-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var fp = FreePublish.init(&ctx, allocator);
+
+    try std.testing.expectError(util_error.WechatError.ApiError, fp.publish("MEDIA1"));
+    try std.testing.expectEqual(@as(usize, 0), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
 }

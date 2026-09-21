@@ -11,6 +11,10 @@
 //! 与官方账号 `Context` 的差异：
 //! - 多了一个可选的 `js_ticket_handle` 字段（用于 JS-SDK 签名）；
 //! - 业务字段中包含企业微信特有的 `corp_id` / `corp_secret` / `agent_id` 等。
+//!
+//! 业务模块不应自己写「token 失效重试」，而是把发送逻辑包成一个 `sender`
+//! 交给 `util/retry.callApi`——它负责「识别 40001 → 作废缓存 → 取新 token →
+//! **只重试一次**」。
 
 const std = @import("std");
 const Config = @import("../config.zig").Config;
@@ -55,6 +59,25 @@ pub const Context = struct {
     ) ![]u8 {
         const handle = self.js_ticket_handle orelse return error.JsTicketHandleNotSet;
         return handle.getTicket(allocator, access_token);
+    }
+
+    /// 作废缓存的 access_token，使下一次 `getAccessToken` 必须回源。
+    ///
+    /// 转发给 `access_token_handle.invalidateAccessToken`；注入的 handle 未提供
+    /// `invalidate` 钩子时返回 `error.InvalidateNotSupported`。
+    /// 业务模块通常不直接调用，而是走 `util/retry.callApi` 的失效恢复链路。
+    pub fn invalidateAccessToken(self: *Context, allocator: std.mem.Allocator) anyerror!void {
+        return self.access_token_handle.invalidateAccessToken(allocator);
+    }
+
+    /// 作废缓存的 jsapi_ticket（ticket 会随 access_token 失效一起作废）。
+    ///
+    /// 当 `js_ticket_handle == null` 时返回 `error.JsTicketHandleNotSet`（与
+    /// `getJsTicket` 一致）；注入的 handle 未提供 `invalidate` 钩子时返回
+    /// `error.InvalidateNotSupported`。
+    pub fn invalidateJsTicket(self: *Context, allocator: std.mem.Allocator) anyerror!void {
+        const handle = self.js_ticket_handle orelse return error.JsTicketHandleNotSet;
+        return handle.invalidateTicket(allocator);
     }
 };
 
@@ -107,4 +130,72 @@ test "Context.getJsTicket handle 为空时返回 JsTicketHandleNotSet" {
     };
     const result = ctx.getJsTicket(std.testing.allocator, "any_ak");
     try std.testing.expectError(error.JsTicketHandleNotSet, result);
+}
+
+/// 假凭据 / ticket handle：验证 Context 的作废转发与「未实现钩子」的明确报错。
+const StubHandles = struct {
+    var token_invalidates: usize = 0;
+    var ticket_invalidates: usize = 0;
+
+    fn getAccessToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        return allocator.dupe(u8, "work_token");
+    }
+
+    fn getTicket(_: *anyopaque, allocator: std.mem.Allocator, _: []const u8) anyerror![]u8 {
+        return allocator.dupe(u8, "work_ticket");
+    }
+
+    fn invalidateToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        token_invalidates += 1;
+    }
+
+    fn invalidateTicket(_: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        ticket_invalidates += 1;
+    }
+
+    const token_vtable = credential.AccessTokenHandle.VTable{
+        .getAccessToken = getAccessToken,
+        .invalidate = invalidateToken,
+    };
+    const ticket_vtable = credential.JsTicketHandle.VTable{
+        .getTicket = getTicket,
+        .invalidate = invalidateTicket,
+    };
+    /// 旧式 ticket vtable：只实现 getTicket。
+    const legacy_ticket_vtable = credential.JsTicketHandle.VTable{ .getTicket = getTicket };
+};
+
+test "Context.invalidateAccessToken / invalidateJsTicket 转发到各自 handle" {
+    const allocator = std.testing.allocator;
+    var dummy: u8 = 0;
+    var ctx = Context{
+        .config = .{ .corp_id = "ww-invalidate" },
+        .access_token_handle = .{ .ptr = @ptrCast(&dummy), .vtable = &StubHandles.token_vtable },
+        .js_ticket_handle = .{ .ptr = @ptrCast(&dummy), .vtable = &StubHandles.ticket_vtable },
+    };
+
+    try ctx.invalidateAccessToken(allocator);
+    try ctx.invalidateJsTicket(allocator);
+    try std.testing.expectEqual(@as(usize, 1), StubHandles.token_invalidates);
+    try std.testing.expectEqual(@as(usize, 1), StubHandles.ticket_invalidates);
+}
+
+test "Context.invalidateJsTicket 未设置 handle 时返回 JsTicketHandleNotSet" {
+    var ctx = Context{
+        .config = .{ .corp_id = "ww-no-ticket" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = undefined },
+    };
+    try std.testing.expectError(error.JsTicketHandleNotSet, ctx.invalidateJsTicket(std.testing.allocator));
+}
+
+test "Context.invalidateJsTicket 旧式 handle（无 invalidate）返回 InvalidateNotSupported" {
+    var dummy: u8 = 0;
+    var ctx = Context{
+        .config = .{ .corp_id = "ww-legacy-ticket" },
+        .access_token_handle = .{ .ptr = @ptrCast(&dummy), .vtable = &StubHandles.token_vtable },
+        .js_ticket_handle = .{ .ptr = @ptrCast(&dummy), .vtable = &StubHandles.legacy_ticket_vtable },
+    };
+    try std.testing.expectError(error.InvalidateNotSupported, ctx.invalidateJsTicket(std.testing.allocator));
 }

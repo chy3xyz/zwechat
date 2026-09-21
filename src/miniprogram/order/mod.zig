@@ -9,6 +9,7 @@ const Context = @import("../context/mod.zig").Context;
 const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// 发货模式。
 pub const DeliveryMode = enum(u8) {
@@ -194,37 +195,52 @@ pub const Shipping = struct {
     }
 
     fn postCommon(self: *Self, path: []const u8, body: []const u8, api_name: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Sender = struct {
+            shipping: *Self,
+            path: []const u8,
+            body: []const u8,
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/sec/order/{s}?access_token={s}",
-            .{ path, access_token },
-        );
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/sec/order/{s}?access_token={s}",
+                    .{ c.path, token },
+                );
+                defer allocator.free(uri);
+                return c.shipping.postJSON(uri, c.body);
+            }
+        };
 
-        const resp = try self.postJSON(uri, body);
-        defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, api_name)) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+        const resp = try util_retry.callApi(self.ctx, self.allocator, api_name, Sender{
+            .shipping = self,
+            .path = path,
+            .body = body,
+        });
+        self.allocator.free(resp);
     }
 
     fn postParsed(self: *Self, path: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Sender = struct {
+            shipping: *Self,
+            path: []const u8,
+            body: []const u8,
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/sec/order/{s}?access_token={s}",
-            .{ path, access_token },
-        );
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/sec/order/{s}?access_token={s}",
+                    .{ c.path, token },
+                );
+                defer allocator.free(uri);
+                return c.shipping.postJSON(uri, c.body);
+            }
+        };
 
-        const resp = try self.postJSON(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, path, Sender{
+            .shipping = self,
+            .path = path,
+            .body = body,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(T, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -468,4 +484,39 @@ test "getShippingOrderList POST 查询订单列表并解析" {
     try std.testing.expectEqual(@as(usize, 1), parsed.value.order_list.len);
     try std.testing.expectEqualStrings("tx-2", parsed.value.order_list[0].transaction_id);
     try std.testing.expectEqual(State.wait_shipment, parsed.value.order_list[0].order_state);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "getShippingOrder token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/wxa/sec/order/get_order?access_token=";
+    try mt.addRoute(base ++ "token-abc", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+    });
+    try mt.addRoute(base ++ "token-new", .{
+        .body = "{\"order\":{\"transaction_id\":\"tx-9\",\"order_state\":2}}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-test" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var sh = Shipping.init(&ctx, allocator);
+    sh.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try sh.getShippingOrder(.{ .transaction_id = "tx-9" });
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("tx-9", parsed.value.order.transaction_id);
+    try std.testing.expectEqual(State.shipped, parsed.value.order.order_state);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
 }

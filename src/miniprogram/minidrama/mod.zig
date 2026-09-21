@@ -9,6 +9,7 @@ const Context = @import("../context/mod.zig").Context;
 const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 pub const SingleFileUploadRequest = struct {
     media_name: []const u8 = "",
@@ -321,31 +322,43 @@ pub const MiniDrama = struct {
     }
 
     /// 单文件上传（multipart）。
+    ///
+    /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次（重试会重建 multipart 体）。
     pub fn singleFileUpload(self: *Self, req: SingleFileUploadRequest) !std.json.Parsed(SingleFileUploadResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/sec/vod/singlefileupload?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
+        const Sender = struct {
+            allocator: std.mem.Allocator,
+            req: SingleFileUploadRequest,
 
-        var fields = std.ArrayList(util_http.MultipartField).empty;
-        defer fields.deinit(self.allocator);
-        try fields.append(self.allocator, .{ .is_file = true, .field_name = "media_data", .filename = req.media_name, .value = "", .data = req.media_data });
-        try fields.append(self.allocator, .{ .is_file = false, .field_name = "media_name", .filename = "", .value = req.media_name });
-        try fields.append(self.allocator, .{ .is_file = false, .field_name = "media_type", .filename = "", .value = req.media_type });
-        if (req.cover_type.len > 0 and req.cover_data.len > 0) {
-            try fields.append(self.allocator, .{ .is_file = false, .field_name = "cover_type", .filename = "", .value = req.cover_type });
-            try fields.append(self.allocator, .{ .is_file = true, .field_name = "cover_data", .filename = "cover", .value = "", .data = req.cover_data });
-        }
-        if (req.source_context.len > 0) {
-            try fields.append(self.allocator, .{ .is_file = false, .field_name = "source_context", .filename = "", .value = req.source_context });
-        }
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/sec/vod/singlefileupload?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postMultipart(uri, fields.items);
+                var fields = std.ArrayList(util_http.MultipartField).empty;
+                defer fields.deinit(c.allocator);
+                try fields.append(c.allocator, .{ .is_file = true, .field_name = "media_data", .filename = c.req.media_name, .value = "", .data = c.req.media_data });
+                try fields.append(c.allocator, .{ .is_file = false, .field_name = "media_name", .filename = "", .value = c.req.media_name });
+                try fields.append(c.allocator, .{ .is_file = false, .field_name = "media_type", .filename = "", .value = c.req.media_type });
+                if (c.req.cover_type.len > 0 and c.req.cover_data.len > 0) {
+                    try fields.append(c.allocator, .{ .is_file = false, .field_name = "cover_type", .filename = "", .value = c.req.cover_type });
+                    try fields.append(c.allocator, .{ .is_file = true, .field_name = "cover_data", .filename = "cover", .value = "", .data = c.req.cover_data });
+                }
+                if (c.req.source_context.len > 0) {
+                    try fields.append(c.allocator, .{ .is_file = false, .field_name = "source_context", .filename = "", .value = c.req.source_context });
+                }
+
+                const client = util_http.getDefaultClient(c.allocator);
+                return client.postMultipart(uri, fields.items);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "SingleFileUpload", Sender{
+            .allocator = self.allocator,
+            .req = req,
+        });
         defer self.allocator.free(resp);
         return parseParsed(self.allocator, resp, SingleFileUploadResponse);
     }
@@ -368,29 +381,41 @@ pub const MiniDrama = struct {
     }
 
     /// 上传分片（multipart）。
+    ///
+    /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次（重试会重建 multipart 体）。
     pub fn uploadPart(self: *Self, req: UploadPartRequest) !std.json.Parsed(UploadPartResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/sec/vod/uploadpart?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
+        const Sender = struct {
+            allocator: std.mem.Allocator,
+            req: UploadPartRequest,
 
-        var fields = std.ArrayList(util_http.MultipartField).empty;
-        defer fields.deinit(self.allocator);
-        var part_buf: [32]u8 = undefined;
-        var res_buf: [32]u8 = undefined;
-        const part_str = try std.fmt.bufPrint(&part_buf, "{d}", .{req.part_number});
-        const res_str = try std.fmt.bufPrint(&res_buf, "{d}", .{req.resource_type});
-        try fields.append(self.allocator, .{ .is_file = false, .field_name = "upload_id", .filename = "", .value = req.upload_id });
-        try fields.append(self.allocator, .{ .is_file = false, .field_name = "part_number", .filename = "", .value = part_str });
-        try fields.append(self.allocator, .{ .is_file = false, .field_name = "resource_type", .filename = "", .value = res_str });
-        try fields.append(self.allocator, .{ .is_file = true, .field_name = "data", .filename = "part", .value = "", .data = req.data });
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/sec/vod/uploadpart?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postMultipart(uri, fields.items);
+                var fields = std.ArrayList(util_http.MultipartField).empty;
+                defer fields.deinit(c.allocator);
+                var part_buf: [32]u8 = undefined;
+                var res_buf: [32]u8 = undefined;
+                const part_str = try std.fmt.bufPrint(&part_buf, "{d}", .{c.req.part_number});
+                const res_str = try std.fmt.bufPrint(&res_buf, "{d}", .{c.req.resource_type});
+                try fields.append(c.allocator, .{ .is_file = false, .field_name = "upload_id", .filename = "", .value = c.req.upload_id });
+                try fields.append(c.allocator, .{ .is_file = false, .field_name = "part_number", .filename = "", .value = part_str });
+                try fields.append(c.allocator, .{ .is_file = false, .field_name = "resource_type", .filename = "", .value = res_str });
+                try fields.append(c.allocator, .{ .is_file = true, .field_name = "data", .filename = "part", .value = "", .data = c.req.data });
+
+                const client = util_http.getDefaultClient(c.allocator);
+                return client.postMultipart(uri, fields.items);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "UploadPart", Sender{
+            .allocator = self.allocator,
+            .req = req,
+        });
         defer self.allocator.free(resp);
         return parseParsed(self.allocator, resp, UploadPartResponse);
     }
@@ -462,12 +487,23 @@ pub const MiniDrama = struct {
     }
 
     fn postBody(self: *Self, endpoint: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
-        defer self.allocator.free(uri);
+        const Sender = struct {
+            drama: *Self,
+            endpoint: []const u8,
+            body: []const u8,
 
-        const resp = try self.postJSON(uri, body);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ c.endpoint, token });
+                defer allocator.free(uri);
+                return c.drama.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, endpoint, Sender{
+            .drama = self,
+            .endpoint = endpoint,
+            .body = body,
+        });
         defer self.allocator.free(resp);
         return parseParsed(self.allocator, resp, T);
     }
@@ -755,4 +791,38 @@ test "pullUpload POST 拉取上传并解析（回归：postJson→postBody 泛�
     try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"media_name\":\"drama-ep1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"media_url\":\"https://cdn.example.com/ep1.mp4\"") != null);
     try std.testing.expectEqual(@as(i64, 789), parsed.value.task_id);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "getTask token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/wxa/sec/vod/gettask?access_token=";
+    try mt.addRoute(base ++ "token-abc", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+    });
+    try mt.addRoute(base ++ "token-new", .{
+        .body = "{\"task_info\":{\"id\":123,\"status\":2}}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-test" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var m = MiniDrama.init(&ctx, allocator);
+    m.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try m.getTask(.{ .task_id = 123 });
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 2), parsed.value.task_info.status);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
 }

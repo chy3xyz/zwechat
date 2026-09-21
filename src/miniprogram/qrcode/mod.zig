@@ -8,6 +8,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// 小程序码模块。
 pub const QRCode = struct {
@@ -37,43 +38,45 @@ pub const QRCode = struct {
     /// - `width`：二维码宽度，默认 430。
     ///
     /// 返回图片二进制切片，调用方负责 `allocator.free`。
+    /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次；其余非 0
+    /// errcode（微信在二进制端点上以 JSON 错误体回包）抛 `WechatError.ApiError`。
     pub fn getUnlimited(
         self: *Self,
         scene: []const u8,
         page: ?[]const u8,
         width: u32,
     ) ![]u8 {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
         const body_json = try encodeGetUnlimitedBody(self.allocator, scene, page, width);
         defer self.allocator.free(body_json);
 
-        const resp = blk: {
-            if (self.transport) |t| {
-                var client = util_http.HttpClient.init(self.allocator);
-                defer client.deinit();
-                client.setTransport(t, self.transport_ctx);
-                break :blk try client.postJSON(uri, body_json);
+        const Sender = struct {
+            qr: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                if (c.qr.transport) |t| {
+                    var client = util_http.HttpClient.init(c.qr.allocator);
+                    defer client.deinit();
+                    client.setTransport(t, c.qr.transport_ctx);
+                    return client.postJSON(uri, c.body);
+                }
+                const client = util_http.getDefaultClient(c.qr.allocator);
+                return client.postJSON(uri, c.body);
             }
-            const client = util_http.getDefaultClient(self.allocator);
-            break :blk try client.postJSON(uri, body_json);
         };
 
-        // 二进制端点失败时微信返回 JSON 错误体；可识别为错误响应时抛 ApiError，
-        // 正常图片字节原样返回（等价 Go util.HandleFileResponse）。
-        const checked = util_error.handleFileResponse(resp, "GetUnlimited") catch |err| {
-            self.allocator.free(resp);
-            return err;
-        };
-        return @constCast(checked);
+        // 二进制端点失败时微信返回 JSON 错误体；`callApi` 的 errcode 检查与
+        // `handleFileResponse` 等价（非 JSON 响应视为成功，原样返回图片字节）。
+        return util_retry.callApi(self.ctx, self.allocator, "GetUnlimited", Sender{
+            .qr = self,
+            .body = body_json,
+        });
     }
 };
 
@@ -205,4 +208,37 @@ test "getUnlimited 返回 JSON 错误体时抛 ApiError" {
 
     const result = q.getUnlimited("scene-1", "pages/index", 430);
     try std.testing.expectError(util_error.WechatError.ApiError, result);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "getUnlimited token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token=";
+    try mt.addRoute(base ++ "token-abc", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+    });
+    // 第二次成功：二进制端点上返回图片字节（非 JSON → 视为成功）。
+    try mt.addRoute(base ++ "token-new", .{ .body = "\xff\xd8\xff\xe0" });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-qr" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var q = QRCode.init(&ctx, allocator);
+    q.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    const img = try q.getUnlimited("scene-1", "pages/index", 430);
+    defer allocator.free(img);
+    try std.testing.expectEqualSlices(u8, "\xff\xd8\xff\xe0", img);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
 }

@@ -9,6 +9,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL 常量
@@ -591,17 +592,7 @@ pub const AddressList = struct {
     ///
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `UserGet`。
     pub fn getUser(self: *Self, user_id: []const u8) !std.json.Parsed(UserGetResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&userid={s}",
-            .{ userGetURL, access_token, user_id },
-        );
-        defer self.allocator.free(uri);
-
-        return self.getAndDecode(uri, UserGetResponse);
+        return self.getDecode(userGetURL, "&userid={s}", .{user_id}, UserGetResponse);
     }
 
     /// 获取部门成员（简略列表）。
@@ -613,78 +604,55 @@ pub const AddressList = struct {
         department_id: i64,
         fetch_child: i64,
     ) !std.json.Parsed(UserSimpleListResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&department_id={d}&fetch_child={d}",
-            .{ userSimpleListURL, access_token, department_id, fetch_child },
+        return self.getDecode(
+            userSimpleListURL,
+            "&department_id={d}&fetch_child={d}",
+            .{ department_id, fetch_child },
+            UserSimpleListResponse,
         );
-        defer self.allocator.free(uri);
-
-        return self.getAndDecode(uri, UserSimpleListResponse);
     }
 
     /// 创建成员。
     ///
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `UserCreate`。
     pub fn createUser(self: *Self, req: UserCreateRequest) !std.json.Parsed(CommonResponse) {
-        const uri = try self.tokenURL(userCreateURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, req);
         defer self.allocator.free(body);
-        return self.postAndDecode(uri, body, CommonResponse);
+        return self.postDecode(userCreateURL, body, CommonResponse);
     }
 
     /// 更新成员。
     ///
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `UserUpdate`。
     pub fn updateUser(self: *Self, req: UserUpdateRequest) !void {
-        const uri = try self.tokenURL(userUpdateURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, req);
         defer self.allocator.free(body);
-        return self.postExpectOK(uri, body, "UserUpdate");
+        return self.postExpectOK(userUpdateURL, body);
     }
 
     /// 删除成员。
     ///
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `UserDelete`。
     pub fn deleteUser(self: *Self, user_id: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&userid={s}",
-            .{ userDeleteURL, access_token, user_id },
-        );
-        defer self.allocator.free(uri);
-
-        return self.getExpectOK(uri, "UserDelete");
+        return self.getExpectOK(userDeleteURL, "&userid={s}", .{user_id});
     }
 
     /// 批量删除成员。
     ///
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `UserBatchDelete`。
     pub fn batchDeleteUsers(self: *Self, req: UserBatchDeleteRequest) !void {
-        const uri = try self.tokenURL(userBatchDeleteURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, req);
         defer self.allocator.free(body);
-        return self.postExpectOK(uri, body, "UserBatchDelete");
+        return self.postExpectOK(userBatchDeleteURL, body);
     }
 
     /// 获取成员ID列表（游标分页）。
     ///
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `UserListID`。
     pub fn listUserIDs(self: *Self, req: UserListIDRequest) !std.json.Parsed(UserListIDResponse) {
-        const uri = try self.tokenURL(userListIDURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, req);
         defer self.allocator.free(body);
-        return self.postAndDecode(uri, body, UserListIDResponse);
+        return self.postDecode(userListIDURL, body, UserListIDResponse);
     }
 
     /// userid 转 openid。
@@ -692,12 +660,10 @@ pub const AddressList = struct {
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `ConvertToOpenID`。
     /// 返回的字符串由调用方负责 `free`。
     pub fn convertToOpenID(self: *Self, user_id: []const u8) ![]u8 {
-        const uri = try self.tokenURL(convertToOpenIDURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, UserIDRequest{ .userid = user_id });
         defer self.allocator.free(body);
 
-        var parsed = try self.postAndDecode(uri, body, ConvertToOpenIDResponse);
+        var parsed = try self.postDecode(convertToOpenIDURL, body, ConvertToOpenIDResponse);
         errdefer parsed.deinit();
         const openid = try self.allocator.dupe(u8, parsed.value.openid);
         parsed.deinit();
@@ -709,12 +675,10 @@ pub const AddressList = struct {
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `ConvertToUserID`。
     /// 返回的字符串由调用方负责 `free`。
     pub fn convertToUserID(self: *Self, open_id: []const u8) ![]u8 {
-        const uri = try self.tokenURL(convertToUserIDURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, OpenIDRequest{ .openid = open_id });
         defer self.allocator.free(body);
 
-        var parsed = try self.postAndDecode(uri, body, ConvertToUserIDResponse);
+        var parsed = try self.postDecode(convertToUserIDURL, body, ConvertToUserIDResponse);
         errdefer parsed.deinit();
         const userid = try self.allocator.dupe(u8, parsed.value.userid);
         parsed.deinit();
@@ -725,17 +689,7 @@ pub const AddressList = struct {
     ///
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `UserAuthSucc`。
     pub fn userAuthSucc(self: *Self, user_id: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&userid={s}",
-            .{ userAuthSuccURL, access_token, user_id },
-        );
-        defer self.allocator.free(uri);
-
-        return self.getExpectOK(uri, "UserAuthSucc");
+        return self.getExpectOK(userAuthSuccURL, "&userid={s}", .{user_id});
     }
 
     /// 获取加入企业二维码。
@@ -743,46 +697,28 @@ pub const AddressList = struct {
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `GetJoinQrcode`。
     /// `size_type` 为 0 时不传该参数（使用微信默认）。
     pub fn getJoinQrcode(self: *Self, size_type: i64) !std.json.Parsed(GetJoinQrcodeResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = if (size_type > 0)
-            try std.fmt.allocPrint(
-                self.allocator,
-                "{s}?access_token={s}&size_type={d}",
-                .{ getJoinQrcodeURL, access_token, size_type },
-            )
-        else
-            try std.fmt.allocPrint(
-                self.allocator,
-                "{s}?access_token={s}",
-                .{ getJoinQrcodeURL, access_token },
-            );
-        defer self.allocator.free(uri);
-
-        return self.getAndDecode(uri, GetJoinQrcodeResponse);
+        if (size_type > 0) {
+            return self.getDecode(getJoinQrcodeURL, "&size_type={d}", .{size_type}, GetJoinQrcodeResponse);
+        }
+        return self.getDecode(getJoinQrcodeURL, "", .{}, GetJoinQrcodeResponse);
     }
 
     /// 手机号获取 userid。
     ///
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `GetUserid`。
     pub fn getUseridByMobile(self: *Self, mobile: []const u8) !std.json.Parsed(GetUseridResponse) {
-        const uri = try self.tokenURL(getUseridURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, struct { mobile: []const u8 = "" }{ .mobile = mobile });
         defer self.allocator.free(body);
-        return self.postAndDecode(uri, body, GetUseridResponse);
+        return self.postDecode(getUseridURL, body, GetUseridResponse);
     }
 
     /// 邮箱获取 userid。
     ///
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `GetUseridByEmail`。
     pub fn getUseridByEmail(self: *Self, req: GetUseridByEmailRequest) !std.json.Parsed(GetUseridResponse) {
-        const uri = try self.tokenURL(getUseridByEmailURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, req);
         defer self.allocator.free(body);
-        return self.postAndDecode(uri, body, GetUseridResponse);
+        return self.postDecode(getUseridByEmailURL, body, GetUseridResponse);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -793,99 +729,53 @@ pub const AddressList = struct {
     ///
     /// 对应 `_ref/wechat/work/addresslist/department.go` 的 `DepartmentCreate`。
     pub fn createDepartment(self: *Self, req: DepartmentCreateRequest) !std.json.Parsed(DepartmentCreateResponse) {
-        const uri = try self.tokenURL(departmentCreateURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, req);
         defer self.allocator.free(body);
-        return self.postAndDecode(uri, body, DepartmentCreateResponse);
+        return self.postDecode(departmentCreateURL, body, DepartmentCreateResponse);
     }
 
     /// 更新部门。
     ///
     /// 对应 `_ref/wechat/work/addresslist/department.go` 的 `DepartmentUpdate`。
     pub fn updateDepartment(self: *Self, req: DepartmentUpdateRequest) !void {
-        const uri = try self.tokenURL(departmentUpdateURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, req);
         defer self.allocator.free(body);
-        return self.postExpectOK(uri, body, "DepartmentUpdate");
+        return self.postExpectOK(departmentUpdateURL, body);
     }
 
     /// 删除部门。
     ///
     /// 对应 `_ref/wechat/work/addresslist/department.go` 的 `DepartmentDelete`。
     pub fn deleteDepartment(self: *Self, department_id: i64) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&id={d}",
-            .{ departmentDeleteURL, access_token, department_id },
-        );
-        defer self.allocator.free(uri);
-
-        return self.getExpectOK(uri, "DepartmentDelete");
+        return self.getExpectOK(departmentDeleteURL, "&id={d}", .{department_id});
     }
 
     /// 获取子部门ID列表。
     ///
     /// 对应 `_ref/wechat/work/addresslist/department.go` 的 `DepartmentSimpleList`。
     pub fn getDepartmentSimpleList(self: *Self, department_id: i64) !std.json.Parsed(DepartmentSimpleListResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&id={d}",
-            .{ departmentSimpleListURL, access_token, department_id },
-        );
-        defer self.allocator.free(uri);
-
-        return self.getAndDecode(uri, DepartmentSimpleListResponse);
+        return self.getDecode(departmentSimpleListURL, "&id={d}", .{department_id}, DepartmentSimpleListResponse);
     }
 
     /// 获取部门列表（全量，等价 Go `DepartmentList()`）。
     ///
     /// 对应 `_ref/wechat/work/addresslist/department.go` 的 `DepartmentList`。
     pub fn getDepartmentList(self: *Self) !std.json.Parsed(DepartmentListResponse) {
-        const uri = try self.tokenURL(departmentListURL);
-        defer self.allocator.free(uri);
-        return self.getAndDecode(uri, DepartmentListResponse);
+        return self.getDecode(departmentListURL, "", .{}, DepartmentListResponse);
     }
 
     /// 获取指定部门及其子部门列表。
     ///
     /// 对应 `_ref/wechat/work/addresslist/department.go` 的 `DepartmentListByID`。
     pub fn getDepartmentListByID(self: *Self, department_id: i64) !std.json.Parsed(DepartmentListResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&id={d}",
-            .{ departmentListURL, access_token, department_id },
-        );
-        defer self.allocator.free(uri);
-
-        return self.getAndDecode(uri, DepartmentListResponse);
+        return self.getDecode(departmentListURL, "&id={d}", .{department_id}, DepartmentListResponse);
     }
 
     /// 获取单个部门详情。
     ///
     /// 对应 `_ref/wechat/work/addresslist/department.go` 的 `DepartmentGet`。
     pub fn getDepartment(self: *Self, department_id: i64) !std.json.Parsed(DepartmentGetResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&id={d}",
-            .{ departmentGetURL, access_token, department_id },
-        );
-        defer self.allocator.free(uri);
-
-        return self.getAndDecode(uri, DepartmentGetResponse);
+        return self.getDecode(departmentGetURL, "&id={d}", .{department_id}, DepartmentGetResponse);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -896,87 +786,57 @@ pub const AddressList = struct {
     ///
     /// 对应 `_ref/wechat/work/addresslist/tag.go` 的 `CreateTag`。
     pub fn createTag(self: *Self, req: CreateTagRequest) !std.json.Parsed(CreateTagResponse) {
-        const uri = try self.tokenURL(tagCreateURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, req);
         defer self.allocator.free(body);
-        return self.postAndDecode(uri, body, CreateTagResponse);
+        return self.postDecode(tagCreateURL, body, CreateTagResponse);
     }
 
     /// 更新标签名字。
     ///
     /// 对应 `_ref/wechat/work/addresslist/tag.go` 的 `UpdateTag`。
     pub fn updateTag(self: *Self, req: UpdateTagRequest) !void {
-        const uri = try self.tokenURL(tagUpdateURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, req);
         defer self.allocator.free(body);
-        return self.postExpectOK(uri, body, "UpdateTag");
+        return self.postExpectOK(tagUpdateURL, body);
     }
 
     /// 删除标签。
     ///
     /// 对应 `_ref/wechat/work/addresslist/tag.go` 的 `DeleteTag`。
     pub fn deleteTag(self: *Self, tag_id: i64) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&tagid={d}",
-            .{ tagDeleteURL, access_token, tag_id },
-        );
-        defer self.allocator.free(uri);
-
-        return self.getExpectOK(uri, "DeleteTag");
+        return self.getExpectOK(tagDeleteURL, "&tagid={d}", .{tag_id});
     }
 
     /// 获取标签成员。
     ///
     /// 对应 `_ref/wechat/work/addresslist/tag.go` 的 `GetTag`。
     pub fn getTag(self: *Self, tag_id: i64) !std.json.Parsed(GetTagResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&tagid={d}",
-            .{ tagGetURL, access_token, tag_id },
-        );
-        defer self.allocator.free(uri);
-
-        return self.getAndDecode(uri, GetTagResponse);
+        return self.getDecode(tagGetURL, "&tagid={d}", .{tag_id}, GetTagResponse);
     }
 
     /// 增加标签成员。
     ///
     /// 对应 `_ref/wechat/work/addresslist/tag.go` 的 `AddTagUsers`。
     pub fn addTagUsers(self: *Self, req: TagUsersRequest) !std.json.Parsed(TagUsersResponse) {
-        const uri = try self.tokenURL(tagAddUsersURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, req);
         defer self.allocator.free(body);
-        return self.postAndDecode(uri, body, TagUsersResponse);
+        return self.postDecode(tagAddUsersURL, body, TagUsersResponse);
     }
 
     /// 删除标签成员。
     ///
     /// 对应 `_ref/wechat/work/addresslist/tag.go` 的 `DelTagUsers`。
     pub fn deleteTagUsers(self: *Self, req: TagUsersRequest) !std.json.Parsed(TagUsersResponse) {
-        const uri = try self.tokenURL(tagDelUsersURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, req);
         defer self.allocator.free(body);
-        return self.postAndDecode(uri, body, TagUsersResponse);
+        return self.postDecode(tagDelUsersURL, body, TagUsersResponse);
     }
 
     /// 获取标签列表。
     ///
     /// 对应 `_ref/wechat/work/addresslist/tag.go` 的 `ListTag`。
     pub fn listTags(self: *Self) !std.json.Parsed(ListTagResponse) {
-        const uri = try self.tokenURL(tagListURL);
-        defer self.allocator.free(uri);
-        return self.getAndDecode(uri, ListTagResponse);
+        return self.getDecode(tagListURL, "", .{}, ListTagResponse);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -987,11 +847,9 @@ pub const AddressList = struct {
     ///
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `BatchInvite`。
     pub fn batchInvite(self: *Self, req: BatchInviteRequest) !std.json.Parsed(BatchInviteResponse) {
-        const uri = try self.tokenURL(batchInviteURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, req);
         defer self.allocator.free(body);
-        return self.postAndDecode(uri, body, BatchInviteResponse);
+        return self.postDecode(batchInviteURL, body, BatchInviteResponse);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1002,107 +860,183 @@ pub const AddressList = struct {
     ///
     /// 对应 `_ref/wechat/work/addresslist/linkedcorp.go` 的 `GetPermList`。
     pub fn getPermList(self: *Self) !std.json.Parsed(GetPermListResponse) {
-        const uri = try self.tokenURL(linkedcorpGetPermListURL);
-        defer self.allocator.free(uri);
-
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.post(uri, "", null);
-        defer self.allocator.free(resp);
-
-        return decodeChecked(self.allocator, resp, GetPermListResponse);
+        return self.postEmptyDecode(linkedcorpGetPermListURL, GetPermListResponse);
     }
 
     /// 获取互联企业成员详细信息。
     ///
     /// 对应 `_ref/wechat/work/addresslist/linkedcorp.go` 的 `GetLinkedCorpUser`。
     pub fn getLinkedCorpUser(self: *Self, user_id: []const u8) !std.json.Parsed(GetLinkedCorpUserResponse) {
-        const uri = try self.tokenURL(linkedcorpUserGetURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, UserIDRequest{ .userid = user_id });
         defer self.allocator.free(body);
-        return self.postAndDecode(uri, body, GetLinkedCorpUserResponse);
+        return self.postDecode(linkedcorpUserGetURL, body, GetLinkedCorpUserResponse);
     }
 
     /// 获取互联企业部门成员。
     ///
     /// 对应 `_ref/wechat/work/addresslist/linkedcorp.go` 的 `LinkedCorpSimpleList`。
     pub fn getLinkedCorpSimpleList(self: *Self, department_id: []const u8) !std.json.Parsed(LinkedCorpSimpleListResponse) {
-        const uri = try self.tokenURL(linkedcorpSimpleListURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, LinkedCorpDepartmentRequest{ .department_id = department_id });
         defer self.allocator.free(body);
-        return self.postAndDecode(uri, body, LinkedCorpSimpleListResponse);
+        return self.postDecode(linkedcorpSimpleListURL, body, LinkedCorpSimpleListResponse);
     }
 
     /// 获取互联企业部门成员详情。
     ///
     /// 对应 `_ref/wechat/work/addresslist/linkedcorp.go` 的 `LinkedCorpUserList`。
     pub fn getLinkedCorpUserList(self: *Self, department_id: []const u8) !std.json.Parsed(LinkedCorpUserListResponse) {
-        const uri = try self.tokenURL(linkedcorpUserListURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, LinkedCorpDepartmentRequest{ .department_id = department_id });
         defer self.allocator.free(body);
-        return self.postAndDecode(uri, body, LinkedCorpUserListResponse);
+        return self.postDecode(linkedcorpUserListURL, body, LinkedCorpUserListResponse);
     }
 
     /// 获取互联企业部门列表。
     ///
     /// 对应 `_ref/wechat/work/addresslist/linkedcorp.go` 的 `LinkedCorpDepartmentList`。
     pub fn getLinkedCorpDepartmentList(self: *Self, department_id: []const u8) !std.json.Parsed(LinkedCorpDepartmentListResponse) {
-        const uri = try self.tokenURL(linkedcorpDepartmentListURL);
-        defer self.allocator.free(uri);
         const body = try stringifyRequest(self.allocator, LinkedCorpDepartmentRequest{ .department_id = department_id });
         defer self.allocator.free(body);
-        return self.postAndDecode(uri, body, LinkedCorpDepartmentListResponse);
+        return self.postDecode(linkedcorpDepartmentListURL, body, LinkedCorpDepartmentListResponse);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // 内部辅助
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// 构造 `{url}?access_token={token}`。
-    fn tokenURL(self: *Self, url: []const u8) ![]u8 {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        return std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ url, access_token });
-    }
-
-    /// GET + 解析 + errcode 检查。
-    fn getAndDecode(self: *Self, uri: []const u8, comptime T: type) !std.json.Parsed(T) {
-        const client = util_http.getDefaultClient(self.allocator);
-        const body = try client.get(uri);
+    /// GET `url?access_token={token}` + 解析 + errcode 检查。
+    ///
+    /// 取 token / 拼 URI / 发请求 / errcode 检查（含 token 失效后作废缓存并重试一次）
+    /// 统一走 `util/retry.callApi`，`GetSender.send` 只负责「用给定 token 发一次请求」。
+    /// `fmt` / `args` 为该接口除 `access_token` 外的 query 参数（如
+    /// `"&userid={s}"` + `.{user_id}`）；无附加参数时传 `""` 与 `.{}`。
+    fn getDecode(
+        self: *Self,
+        url: []const u8,
+        comptime fmt: []const u8,
+        args: anytype,
+        comptime T: type,
+    ) !std.json.Parsed(T) {
+        const body = try util_retry.callApi(
+            self.ctx,
+            self.allocator,
+            apiNameFromURL(url),
+            GetSender(fmt, @TypeOf(args)){ .url = url, .args = args },
+        );
         defer self.allocator.free(body);
         return decodeChecked(self.allocator, body, T);
     }
 
+    /// GET + 仅检查 errcode（void 方法）。
+    ///
+    /// errcode 检查已由 `util/retry.callApi` 完成（非 0 一律 `ApiError`），
+    /// 这里只需把响应体释放掉。
+    fn getExpectOK(
+        self: *Self,
+        url: []const u8,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) !void {
+        const body = try util_retry.callApi(
+            self.ctx,
+            self.allocator,
+            apiNameFromURL(url),
+            GetSender(fmt, @TypeOf(args)){ .url = url, .args = args },
+        );
+        self.allocator.free(body);
+    }
+
     /// POST JSON + 解析 + errcode 检查。
-    fn postAndDecode(self: *Self, uri: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+    fn postDecode(self: *Self, url: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
+        const resp = try util_retry.callApi(
+            self.ctx,
+            self.allocator,
+            apiNameFromURL(url),
+            PostSender{ .url = url, .body = body },
+        );
         defer self.allocator.free(resp);
         return decodeChecked(self.allocator, resp, T);
     }
 
-    /// POST JSON + 仅检查 errcode（响应对应 Go `DecodeWithCommonError` 的 void 方法）。
-    fn postExpectOK(self: *Self, uri: []const u8, body: []const u8, api_name: []const u8) !void {
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
-        defer self.allocator.free(resp);
-        if (try util_error.decodeWithCommonError(self.allocator, resp, api_name)) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+    /// POST JSON + 仅检查 errcode（void 方法，对应 Go `DecodeWithCommonError`）。
+    ///
+    /// errcode 检查已由 `util/retry.callApi` 完成（非 0 一律 `ApiError`），
+    /// 这里只需把响应体释放掉。
+    fn postExpectOK(self: *Self, url: []const u8, body: []const u8) !void {
+        const resp = try util_retry.callApi(
+            self.ctx,
+            self.allocator,
+            apiNameFromURL(url),
+            PostSender{ .url = url, .body = body },
+        );
+        self.allocator.free(resp);
     }
 
-    /// GET + 仅检查 errcode。
-    fn getExpectOK(self: *Self, uri: []const u8, api_name: []const u8) !void {
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.get(uri);
+    /// POST（空 body，无 content-type——linkedcorp `get_perm_list` 要求这种方式）+ 解析。
+    fn postEmptyDecode(self: *Self, url: []const u8, comptime T: type) !std.json.Parsed(T) {
+        const resp = try util_retry.callApi(
+            self.ctx,
+            self.allocator,
+            apiNameFromURL(url),
+            PostEmptySender{ .url = url },
+        );
         defer self.allocator.free(resp);
-        if (try util_error.decodeWithCommonError(self.allocator, resp, api_name)) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
+        return decodeChecked(self.allocator, resp, T);
+    }
+};
+
+/// 取接口 URL 的末段作为 `api_name`（喂给 `util/retry.callApi`，进错误详情），
+/// 如 `.../cgi-bin/user/get` → `get`。
+fn apiNameFromURL(url: []const u8) []const u8 {
+    const trimmed = std.mem.trimEnd(u8, url, "/");
+    const idx = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return trimmed;
+    return trimmed[idx + 1 ..];
+}
+
+/// `util/retry.callApi` 的 GET sender：`{url}?access_token={token}` 后按 `fmt`
+/// 追加 query 参数（`fmt` 为空则不追加），如 `"&userid={s}"` + `.{user_id}`。
+fn GetSender(comptime fmt: []const u8, comptime Args: type) type {
+    return struct {
+        url: []const u8,
+        args: Args,
+
+        pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+            const uri = try std.fmt.allocPrint(
+                allocator,
+                "{s}?access_token={s}" ++ fmt,
+                .{ c.url, token } ++ c.args,
+            );
+            defer allocator.free(uri);
+
+            const client = util_http.getDefaultClient(allocator);
+            return client.get(uri);
         }
+    };
+}
+
+/// `util/retry.callApi` 的 POST JSON sender。
+const PostSender = struct {
+    url: []const u8,
+    body: []const u8,
+
+    pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+        const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}", .{ c.url, token });
+        defer allocator.free(uri);
+
+        const client = util_http.getDefaultClient(allocator);
+        return client.postJSON(uri, c.body);
+    }
+};
+
+/// `util/retry.callApi` 的 POST 空 body sender（不带 content-type）。
+const PostEmptySender = struct {
+    url: []const u8,
+
+    pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+        const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}", .{ c.url, token });
+        defer allocator.free(uri);
+
+        const client = util_http.getDefaultClient(allocator);
+        return client.post(uri, "", null);
     }
 };
 
@@ -1274,8 +1208,8 @@ fn useCapture(cap: *CaptureTransport) void {
 }
 
 fn dropCapture() void {
-    const client = util_http.getDefaultClient(std.testing.allocator);
-    client.setTransport(null, null);
+    // 不依赖「用别的 allocator 再取一次指针」的宽容语义：直接销毁线程局部实例，
+    // 注入的 transport 随实例一起消失（下次 getDefaultClient 会重新初始化）。
     util_http.deinitDefaultClient();
 }
 
@@ -2085,4 +2019,106 @@ test "getLinkedCorpDepartmentList 请求 body 与响应解析" {
     try std.testing.expectEqualStrings("互联子部门", parsed.value.department_list[0].department_name);
     try std.testing.expectEqualStrings("LINKEDID1", parsed.value.department_list[0].parentid);
     try std.testing.expectEqual(@as(i64, 10), parsed.value.department_list[0].order);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 测试：token 失效自愈（util/retry.callApi 链路）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 可按脚本换发 token 并统计作废次数的凭据 handle 状态。
+const RetryTokenState = struct {
+    /// 依次给出的 token；回源次数超出脚本后复用最后一项。
+    tokens: []const []const u8 = &.{ "tok-old", "tok-new" },
+    fetch_calls: usize = 0,
+    invalidate_calls: usize = 0,
+
+    fn getToken(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *RetryTokenState = @ptrCast(@alignCast(ctx));
+        const token = self.tokens[@min(self.fetch_calls, self.tokens.len - 1)];
+        self.fetch_calls += 1;
+        return allocator.dupe(u8, token);
+    }
+
+    fn invalidate(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const self: *RetryTokenState = @ptrCast(@alignCast(ctx));
+        self.invalidate_calls += 1;
+    }
+
+    const vtable = @import("../../credential/mod.zig").AccessTokenHandle.VTable{
+        .getAccessToken = getToken,
+        .invalidate = invalidate,
+    };
+};
+
+/// 构造借用 `state` 的 Context（handle 的 ptr 指向测试局部状态）。
+fn makeRetryCtx(state: *RetryTokenState) Context {
+    return .{
+        .config = .{ .corp_id = "ww-addr-retry" },
+        .access_token_handle = .{ .ptr = @ptrCast(state), .vtable = &RetryTokenState.vtable },
+    };
+}
+
+test "getUser token 失效：40001 → 作废缓存 → 用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/user/get?access_token=tok-old&userid=zhangsan", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+    });
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/user/get?access_token=tok-new&userid=zhangsan", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"userid\":\"zhangsan\",\"name\":\"张三\"}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = RetryTokenState{};
+    var ctx = makeRetryCtx(&state);
+    var al = AddressList.init(&ctx, allocator);
+    var parsed = try al.getUser("zhangsan");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("张三", parsed.value.name);
+    try std.testing.expectEqual(@as(usize, 1), state.invalidate_calls);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/user/get?access_token=tok-old&userid=zhangsan",
+        mt.history.items[0],
+    );
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/user/get?access_token=tok-new&userid=zhangsan",
+        mt.history.items[1],
+    );
+}
+
+test "deleteUser 非 token 类 errcode：直接 ApiError，不作废也不重试" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/user/delete?access_token=tok-old&userid=zhangsan", .{
+        .body = "{\"errcode\":60011,\"errmsg\":\"no privilege to access/modify contact/party/agent\"}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = RetryTokenState{};
+    var ctx = makeRetryCtx(&state);
+    var al = AddressList.init(&ctx, allocator);
+
+    const result = al.deleteUser("zhangsan");
+    try std.testing.expectError(util_error.WechatError.ApiError, result);
+
+    try std.testing.expectEqual(@as(usize, 0), state.invalidate_calls);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+    try std.testing.expectEqual(@as(usize, 1), state.fetch_calls);
 }

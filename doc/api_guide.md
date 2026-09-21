@@ -231,7 +231,7 @@ defer allocator.free(img_bytes);
 
 ## 3. 微信支付 v2/v3 (Pay v2 & v3)
 
-> **涉及模块**：`src/pay/`（v2：`order` / `refund` / `notify` / `transfer` / `redpacket`；v3：`v3/`）
+> **涉及模块**：`src/pay/`（v2：`order` / `refund` / `notify` / `transfer` / `redpacket`；v3：`v3/` 含 `config` / `signer` / `order` / `refund` / `transfer` / `notify`）
 > **API 索引**：`docs/api-reference.md` 第 6 节「pay」
 
 ### 微信支付 v3 签名 Header 生成
@@ -270,7 +270,84 @@ const plain_json = try zwechat.pay.v3.decryptNotifyResource(
 defer allocator.free(plain_json);
 ```
 
-> **常见坑**：v3 signer 在 `private_key_pem` 为空时返回 `error.MissingPrivateKey`（不会静默生成伪签名）；v3 通知解密是 AES-256-GCM，与 v2 的 AES-256-CBC + PKCS#7 完全不同，不要混用。
+### 微信支付 v3 推荐入口速查（下单 / 退款 / 商家转账 / 通知解密）
+
+```zig
+const zwechat = @import("zwechat");
+const v3 = zwechat.pay.v3;
+
+// 四个入口共用同一份 Config：api_v3_key 用于通知解密，私钥/序列号用于请求签名
+const v3_cfg = v3.Config{
+    .app_id = "wx12345",
+    .mch_id = "1900000109",
+    .api_v3_key = "12345678901234567890123456789012", // 32 字节 APIv3 密钥
+    .serial_no = "1DDE557876238...",
+    .private_key_pem = "-----BEGIN PRIVATE KEY-----\n...",
+    .notify_url = "https://merchant.example.com/wxpay/notify",
+};
+
+// ① 下单：拿到 prepay_id 后生成前端拉起支付参数（JSAPI / 小程序）
+var order = v3.OrderV3.init(v3_cfg);
+var pay_params = try order.getJsPayParams(allocator, "wx201411101639507cbf6ffd8b0779950800");
+defer pay_params.deinit(allocator); // time_stamp / nonce_str / package / pay_sign 均为堆内存
+
+// ② 退款（transaction_id 与 out_trade_no 二选一）
+var refund = v3.RefundV3.init(v3_cfg);
+var refund_res = try refund.refund(allocator, .{
+    .transaction_id = "4200000119202504081234567890",
+    .out_refund_no = "R20260722001",
+    .reason = "商品已售完",
+    .amount = .{ .refund = 100, .total = 100 },
+});
+defer refund_res.deinit();
+// var queried = try refund.queryRefund(allocator, "R20260722001");
+
+// ③ 商家转账（新版商家转账；不做已升级停用的「商家转账到零钱」）
+var transfer = v3.TransferV3.init(v3_cfg);
+var bill = try transfer.transfer(allocator, .{
+    .out_bill_no = "plfk2020042013",        // 仅数字/大小写字母，商户内唯一
+    .transfer_scene_id = "1000",            // 转账场景：1000 现金营销
+    .openid = "o-MYE42l80oelYMDE34nYD456Xoy",
+    .transfer_amount = 400000,              // 单位：分
+    .transfer_remark = "新会员开通有礼",
+    .transfer_scene_report_infos = &.{      // 官方必填，按转账场景报备
+        .{ .info_type = "活动名称", .info_content = "新会员有礼" },
+    },
+    // .user_name = "密文...",              // ≥2000 元必填，须为微信支付公钥加密后的密文
+});
+defer bill.deinit();
+if (std.mem.eql(u8, bill.value.state, "WAIT_USER_CONFIRM")) {
+    // HTTP 200 只代表受理成功：用 bill.value.package_info 拉起微信收款确认页
+}
+// var q = try transfer.queryTransfer(allocator, "plfk2020042013");
+// var c = try transfer.cancelTransfer(allocator, "plfk2020042013");
+
+// ④ 通知解密：支付 / 退款 / 商家转账回调共用同一套 AES-256-GCM 解密
+const plain = try v3.decryptNotifyResource(
+    allocator,
+    v3_cfg.api_v3_key,
+    notify_body.resource.ciphertext,
+    notify_body.resource.associated_data,
+    notify_body.resource.nonce,
+);
+defer allocator.free(plain);
+
+// 解密后的 JSON 按 event_type 选结构体：
+//   REFUND.SUCCESS            → v3.RefundNotifyResource
+//   MCHTRANSFER.BILL.FINISHED → v3.TransferNotifyResource
+const parsed = try std.json.parseFromSlice(v3.TransferNotifyResource, allocator, plain, .{
+    .ignore_unknown_fields = true,
+    .allocate = .alloc_always,
+});
+defer parsed.deinit();
+```
+
+> **常见坑**：
+> - v3 signer 在 `private_key_pem` 为空时返回 `error.MissingPrivateKey`（不会静默生成伪签名）；v3 通知解密是 AES-256-GCM，与 v2 的 AES-256-CBC + PKCS#7 完全不同，不要混用。
+> - 商家转账只做新版 `/v3/fund-app/mch-transfer/transfer-bills`（2025-01-15 起取代「商家转账到零钱」`/v3/transfer/batches`）；撤销路径是 `.../out-bill-no/{out_bill_no}/cancel`，**不是** `.../transfer-bills/{bill_id}/cancel`。
+> - 转账传入 `user_name` 时必须是**密文**（微信支付公钥 RSA-OAEP 加密，SDK 不做加密），并设置 `Config.wechatpay_serial`（微信支付公钥 ID 如 `PUB_KEY_ID_3000000001`，或平台证书序列号），SDK 会自动附带 `Wechatpay-Serial` 请求头。
+> - HTTP 200 不代表转账成功：以应答 `state` 判断单据状态（`WAIT_USER_CONFIRM` 可引导确认收款；`SUCCESS` / `FAIL` / `CANCELLED` 为终态）。发起转账报错时**不要换单号重试**，先查单确认原单结果，否则有重复转账的资金风险。
+> - 转账单的微信侧单号字段名是 `transfer_bill_no`（官方契约），不是 `bill_id`。
 
 ---
 

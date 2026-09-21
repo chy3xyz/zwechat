@@ -8,6 +8,8 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
+const util_json = @import("../../util/json.zig");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL 常量
@@ -95,22 +97,30 @@ pub const AppChat = struct {
     ///
     /// 对应 `_ref/wechat/work/appchat/appchat.go` 之外的「创建群」接口
     /// （`/cgi-bin/appchat/create`），是群推送流程的前置步骤。
+    ///
+    /// 取 token / 拼 URI / 发请求 / errcode 检查（含 token 失效后作废缓存并重试一次）
+    /// 统一走 `util/retry.callApi`。
     pub fn createChat(self: *Self, req: CreateChatRequest) !std.json.Parsed(CreateChatResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Req = struct {
+            req: CreateChatRequest,
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ appchatCreateURL, access_token },
-        );
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "{s}?access_token={s}",
+                    .{ appchatCreateURL, token },
+                );
+                defer allocator.free(uri);
 
-        const body = try encodeCreateChatRequest(self.allocator, req);
-        defer self.allocator.free(body);
+                const body = try encodeCreateChatRequest(allocator, c.req);
+                defer allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+                const client = util_http.getDefaultClient(allocator);
+                return client.postJSON(uri, body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "AppChatCreate", Req{ .req = req });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(CreateChatResponse, self.allocator, resp, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
@@ -126,18 +136,23 @@ pub const AppChat = struct {
     ///
     /// 对应 `/cgi-bin/appchat/get`。
     pub fn getChatInfo(self: *Self, chat_id: []const u8) !std.json.Parsed(ChatInfo) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Req = struct {
+            chat_id: []const u8,
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&chatid={s}",
-            .{ appchatGetURL, access_token, chat_id },
-        );
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "{s}?access_token={s}&chatid={s}",
+                    .{ appchatGetURL, token, c.chat_id },
+                );
+                defer allocator.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const body = try client.get(uri);
+                const client = util_http.getDefaultClient(allocator);
+                return client.get(uri);
+            }
+        };
+
+        const body = try util_retry.callApi(self.ctx, self.allocator, "AppChatGet", Req{ .chat_id = chat_id });
         defer self.allocator.free(body);
 
         var parsed = std.json.parseFromSlice(ChatInfo, self.allocator, body, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
@@ -153,21 +168,26 @@ pub const AppChat = struct {
     ///
     /// 对应 `/cgi-bin/appchat/update`。
     pub fn updateChat(self: *Self, req: UpdateChatRequest) !std.json.Parsed(CommonResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Req = struct {
+            req: UpdateChatRequest,
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ appchatUpdateURL, access_token },
-        );
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "{s}?access_token={s}",
+                    .{ appchatUpdateURL, token },
+                );
+                defer allocator.free(uri);
 
-        const body = try encodeUpdateChatRequest(self.allocator, req);
-        defer self.allocator.free(body);
+                const body = try encodeUpdateChatRequest(allocator, c.req);
+                defer allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+                const client = util_http.getDefaultClient(allocator);
+                return client.postJSON(uri, body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "AppChatUpdate", Req{ .req = req });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(CommonResponse, self.allocator, resp, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
@@ -234,18 +254,9 @@ fn encodeUpdateChatRequest(allocator: std.mem.Allocator, req: UpdateChatRequest)
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendJsonString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => try buf.append(allocator, c),
-        }
-    }
-}
+/// JSON 字符串转义（实现收敛到 `util.json.appendEscapedString`；此前漏转义
+/// `c < 0x20` 控制字符，群名 / 成员 id 含控制字符时会产出非法 JSON）。
+const appendJsonString = util_json.appendEscapedString;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 测试
@@ -359,4 +370,105 @@ test "createChat 解析 chatid 字段" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("g-new", parsed.value.chatid);
+}
+
+// ── token 失效自愈测试 ───────────────────────────────────────────────────────
+
+/// 可按脚本换发 token 并统计作废次数的凭据 handle 状态。
+const RetryTokenState = struct {
+    /// 依次给出的 token；回源次数超出脚本后复用最后一项。
+    tokens: []const []const u8 = &.{ "tok-old", "tok-new" },
+    fetch_calls: usize = 0,
+    invalidate_calls: usize = 0,
+
+    fn getToken(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *RetryTokenState = @ptrCast(@alignCast(ctx));
+        const token = self.tokens[@min(self.fetch_calls, self.tokens.len - 1)];
+        self.fetch_calls += 1;
+        return allocator.dupe(u8, token);
+    }
+
+    fn invalidate(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const self: *RetryTokenState = @ptrCast(@alignCast(ctx));
+        self.invalidate_calls += 1;
+    }
+
+    const vtable = @import("../../credential/mod.zig").AccessTokenHandle.VTable{
+        .getAccessToken = getToken,
+        .invalidate = invalidate,
+    };
+};
+
+fn makeRetryCtx(state: *RetryTokenState) Context {
+    return .{
+        .config = .{ .corp_id = "ww-appchat-retry" },
+        .access_token_handle = .{ .ptr = @ptrCast(state), .vtable = &RetryTokenState.vtable },
+    };
+}
+
+fn useMock(allocator: std.mem.Allocator, mt: *util_http.MockTransport) void {
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(mt));
+}
+
+fn dropMock(allocator: std.mem.Allocator) void {
+    util_http.getDefaultClient(allocator).setTransport(null, null);
+    util_http.deinitDefaultClient();
+}
+
+test "getChatInfo token 失效：40001 → 作废缓存 → 用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/appchat/get?access_token=tok-old&chatid=g-1", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+    });
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/appchat/get?access_token=tok-new&chatid=g-1", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"chat_info\":{\"chatid\":\"g-1\",\"name\":\"研发群\"}}",
+    });
+
+    useMock(allocator, &mt);
+    defer dropMock(allocator);
+
+    var state = RetryTokenState{};
+    var ctx = makeRetryCtx(&state);
+    var ac = AppChat.init(&ctx, allocator);
+    var parsed = try ac.getChatInfo("g-1");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("研发群", parsed.value.chat_info.name);
+    try std.testing.expectEqual(@as(usize, 1), state.invalidate_calls);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/appchat/get?access_token=tok-old&chatid=g-1",
+        mt.history.items[0],
+    );
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/appchat/get?access_token=tok-new&chatid=g-1",
+        mt.history.items[1],
+    );
+}
+
+test "updateChat 非 token 类 errcode：直接 ApiError，不作废也不重试" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/appchat/update?access_token=tok-old", .{
+        .body = "{\"errcode\":60011,\"errmsg\":\"no privilege to access/modify contact/party/agent\"}",
+    });
+
+    useMock(allocator, &mt);
+    defer dropMock(allocator);
+
+    var state = RetryTokenState{};
+    var ctx = makeRetryCtx(&state);
+    var ac = AppChat.init(&ctx, allocator);
+
+    const result = ac.updateChat(.{ .chat_id = "g-1", .name = "新群名" });
+    try std.testing.expectError(util_error.WechatError.ApiError, result);
+
+    try std.testing.expectEqual(@as(usize, 0), state.invalidate_calls);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+    try std.testing.expectEqual(@as(usize, 1), state.fetch_calls);
 }

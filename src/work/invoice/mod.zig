@@ -8,6 +8,9 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
+const util_json = @import("../../util/json.zig");
+const credential = @import("../../credential/mod.zig");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL 常量
@@ -129,17 +132,8 @@ pub const Invoice = struct {
     /// 查询电子发票。
     ///
     /// 对应 `_ref/wechat/work/invoice/invoice.go` 的 `GetInvoiceInfo`。
+    /// 走 `util/retry.callApi`：token 失效（40001 等）时自动作废缓存并重试一次。
     pub fn getInvoiceInfo(self: *Self, req: GetInvoiceInfoRequest) !std.json.Parsed(GetInvoiceInfoResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ getInvoiceInfoURL, access_token },
-        );
-        defer self.allocator.free(uri);
-
         const body = try std.fmt.allocPrint(
             self.allocator,
             "{{\"card_id\":\"{s}\",\"encrypt_code\":\"{s}\"}}",
@@ -147,8 +141,27 @@ pub const Invoice = struct {
         );
         defer self.allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const Sender = struct {
+            self: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "{s}?access_token={s}",
+                    .{ getInvoiceInfoURL, token },
+                );
+                defer allocator.free(uri);
+                return util_http.getDefaultClient(c.self.allocator).postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(
+            self.ctx,
+            self.allocator,
+            "GetInvoiceInfo",
+            Sender{ .self = self, .body = body },
+        );
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(GetInvoiceInfoResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -156,29 +169,38 @@ pub const Invoice = struct {
         };
         errdefer parsed.deinit();
 
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
         return parsed;
     }
 
     /// 批量查询电子发票。
     ///
     /// 对应 `_ref/wechat/work/invoice/invoice.go` 的 `GetInvoiceInfoBatch`。
+    /// 与 `getInvoiceInfo` 一样走 `util/retry.callApi` 的失效自愈链路。
     pub fn getInvoiceBatch(self: *Self, req: GetInvoiceBatchRequest) !std.json.Parsed(GetInvoiceBatchResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ getInvoiceInfoBatchURL, access_token },
-        );
-        defer self.allocator.free(uri);
-
         const body = try encodeInvoiceBatchJson(self.allocator, req.item_list);
         defer self.allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const Sender = struct {
+            self: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "{s}?access_token={s}",
+                    .{ getInvoiceInfoBatchURL, token },
+                );
+                defer allocator.free(uri);
+                return util_http.getDefaultClient(c.self.allocator).postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(
+            self.ctx,
+            self.allocator,
+            "GetInvoiceInfoBatch",
+            Sender{ .self = self, .body = body },
+        );
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(GetInvoiceBatchResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -186,7 +208,6 @@ pub const Invoice = struct {
         };
         errdefer parsed.deinit();
 
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
         return parsed;
     }
 };
@@ -213,18 +234,9 @@ fn encodeInvoiceBatchJson(allocator: std.mem.Allocator, item_list: []const Invoi
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendJsonString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => try buf.append(allocator, c),
-        }
-    }
-}
+/// JSON 字符串转义（实现收敛到 `util.json.appendEscapedString`；此前漏转义
+/// `c < 0x20` 控制字符，`card_id` / `encrypt_code` 含控制字符时会产出非法 JSON）。
+const appendJsonString = util_json.appendEscapedString;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 测试
@@ -278,4 +290,103 @@ test "encodeInvoiceBatchJson 空列表" {
     const body = try encodeInvoiceBatchJson(alloc, &.{});
     defer alloc.free(body);
     try std.testing.expectEqualStrings("{\"item_list\":[]}", body);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// token 失效自愈（mock transport）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 可自愈的假 token handle：`invalidate` 后把 `idx` 推进到下一个 token。
+const HealState = struct {
+    invalidates: usize = 0,
+    idx: usize = 0,
+    tokens: []const []const u8 = &.{ "old-token", "new-token" },
+
+    fn getToken(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const st: *HealState = @ptrCast(@alignCast(ctx));
+        return allocator.dupe(u8, st.tokens[st.idx]);
+    }
+
+    fn invalidate(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const st: *HealState = @ptrCast(@alignCast(ctx));
+        st.invalidates += 1;
+        if (st.idx + 1 < st.tokens.len) st.idx += 1;
+    }
+
+    const vtable = credential.AccessTokenHandle.VTable{
+        .getAccessToken = getToken,
+        .invalidate = invalidate,
+    };
+};
+
+fn makeHealCtx(state: *HealState) Context {
+    return .{
+        .config = .{ .corp_id = "ww-inv-heal" },
+        .access_token_handle = .{ .ptr = @ptrCast(state), .vtable = &HealState.vtable },
+    };
+}
+
+test "getInvoiceInfo token 失效自愈：40001 → 作废缓存 → 新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/card/invoice/reimburse/getinvoiceinfo?access_token=old-token", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+    });
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/card/invoice/reimburse/getinvoiceinfo?access_token=new-token", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"card_id\":\"card_1\",\"openid\":\"o1\",\"type\":\"增值税电子普通发票\",\"user_info\":{\"fee\":100,\"title\":\"某某公司\"}}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = HealState{};
+    var ctx = makeHealCtx(&state);
+    var inv = Invoice.init(&ctx, allocator);
+    var parsed = try inv.getInvoiceInfo(.{ .card_id = "card_1", .encrypt_code = "enc1" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("card_1", parsed.value.card_id);
+    try std.testing.expectEqual(@as(i64, 100), parsed.value.user_info.fee);
+    try std.testing.expectEqual(@as(usize, 1), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-token") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-token") != null);
+}
+
+test "getInvoiceBatch token 失效自愈：41001 → 作废缓存 → 新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/card/invoice/reimburse/getinvoiceinfobatch?access_token=old-token", .{
+        .body = "{\"errcode\":41001,\"errmsg\":\"access_token missing\"}",
+    });
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/card/invoice/reimburse/getinvoiceinfobatch?access_token=new-token", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"item_list\":[{\"card_id\":\"card_1\",\"openid\":\"o1\"}]}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = HealState{};
+    var ctx = makeHealCtx(&state);
+    var inv = Invoice.init(&ctx, allocator);
+    var items = [_]InvoiceRef{.{ .card_id = "card_1", .encrypt_code = "enc1" }};
+    var parsed = try inv.getInvoiceBatch(.{ .item_list = &items });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.item_list.len);
+    try std.testing.expectEqualStrings("card_1", parsed.value.item_list[0].card_id);
+    try std.testing.expectEqual(@as(usize, 1), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-token") != null);
 }

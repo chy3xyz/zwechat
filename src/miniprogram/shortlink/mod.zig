@@ -8,6 +8,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// 小程序 Short Link 模块。
 pub const ShortLink = struct {
@@ -31,16 +32,6 @@ pub const ShortLink = struct {
     }
 
     fn generate(self: *Self, page_url: []const u8, page_title: []const u8, is_permanent: ?bool) ![]u8 {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/genwxashortlink?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
         // 用 std.json.Stringify 序列化请求体，正确处理 page_url/page_title 中的特殊字符；
         // `is_permanent` 为 null 时（临时链接）不序列化该字段。
         var out: std.Io.Writer.Allocating = .init(self.allocator);
@@ -59,8 +50,26 @@ pub const ShortLink = struct {
         const body = try out.toOwnedSlice();
         defer self.allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const Sender = struct {
+            sl: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/genwxashortlink?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                const client = util_http.getDefaultClient(c.sl.allocator);
+                return client.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "GenerateShortLink", Sender{
+            .sl = self,
+            .body = body,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(struct {
@@ -102,4 +111,44 @@ test "shortlink 请求体省略 is_permanent（临时链接语义）" {
     // 临时链接不携带 is_permanent 字段，且特殊字符被正确转义。
     try std.testing.expect(std.mem.indexOf(u8, body, "is_permanent") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\\\"1\\\"") != null);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "generateShortLinkPermanent token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/wxa/genwxashortlink?access_token=";
+    try mt.addRoute(base ++ "token-abc", .{
+        .body = "{\"errcode\":40014,\"errmsg\":\"invalid access_token\"}",
+    });
+    try mt.addRoute(base ++ "token-new", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"link\":\"https://wxa.run/abc\"}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-sl" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var sl = ShortLink.init(&ctx, allocator);
+
+    const link = try sl.generateShortLinkPermanent("pages/index", "首页");
+    defer allocator.free(link);
+    try std.testing.expectEqualStrings("https://wxa.run/abc", link);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
 }

@@ -8,6 +8,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// 隐私版本。
 pub const PrivacyV1: i64 = 1;
@@ -83,22 +84,32 @@ pub const Privacy = struct {
     }
 
     /// 获取小程序权限配置（返回 `std.json.Parsed(GetPrivacySettingResponse)`）。
+    ///
+    /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次。
     pub fn getPrivacySetting(self: *Self, privacy_ver: i64) !std.json.Parsed(GetPrivacySettingResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/component/getprivacysetting?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
         const body = try std.fmt.allocPrint(self.allocator, "{{\"privacy_ver\":{d}}}", .{privacy_ver});
         defer self.allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const Sender = struct {
+            privacy: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/cgi-bin/component/getprivacysetting?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                const client = util_http.getDefaultClient(c.privacy.allocator);
+                return client.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "GetPrivacySetting", Sender{
+            .privacy = self,
+            .body = body,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(GetPrivacySettingResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -110,46 +121,43 @@ pub const Privacy = struct {
     }
 
     /// 更新小程序权限配置。
+    ///
+    /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次。
     pub fn setPrivacySetting(self: *Self, req: SetPrivacySettingRequest) !void {
         if (req.privacy_ver == PrivacyV1 and req.setting_list.len > 0) {
             return error.InvalidArgument;
         }
 
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/component/setprivacysetting?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
         const body = try jsonStringifySetPrivacy(self.allocator, req);
         defer self.allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
-        defer self.allocator.free(resp);
+        const Sender = struct {
+            privacy: *Self,
+            body: []const u8,
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "setprivacysetting")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/cgi-bin/component/setprivacysetting?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                const client = util_http.getDefaultClient(c.privacy.allocator);
+                return client.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "setprivacysetting", Sender{
+            .privacy = self,
+            .body = body,
+        });
+        self.allocator.free(resp);
     }
 
     /// 上传权限定义模板（`file_data` 为文件字节；返回 `Parsed(UploadPrivacyExtFileResponse)`）。
+    ///
+    /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次。
     pub fn uploadPrivacyExtFile(self: *Self, file_data: []const u8) !std.json.Parsed(UploadPrivacyExtFileResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/component/uploadprivacyextfile?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
         var out: std.Io.Writer.Allocating = .init(self.allocator);
         defer out.deinit();
         var s: std.json.Stringify = .{ .writer = &out.writer };
@@ -160,8 +168,26 @@ pub const Privacy = struct {
         const body = try out.toOwnedSlice();
         defer self.allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const Sender = struct {
+            privacy: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/cgi-bin/component/uploadprivacyextfile?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                const client = util_http.getDefaultClient(c.privacy.allocator);
+                return client.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "UploadPrivacyExtFile", Sender{
+            .privacy = self,
+            .body = body,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(UploadPrivacyExtFileResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -232,4 +258,44 @@ test "SetPrivacySetting V1 带 setting_list 返回 InvalidArgument" {
         .setting_list = &[_]SettingItem{.{ .privacy_key = "k", .privacy_text = "t" }},
     });
     try std.testing.expectError(error.InvalidArgument, result);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "getPrivacySetting token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/cgi-bin/component/getprivacysetting?access_token=";
+    try mt.addRoute(base ++ "token-abc", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+    });
+    try mt.addRoute(base ++ "token-new", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"code_exist\":1,\"privacy_list\":[\"UserInfo\"]}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-pv" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var p = Privacy.init(&ctx, allocator);
+
+    var parsed = try p.getPrivacySetting(PrivacyV2);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.code_exist);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
 }

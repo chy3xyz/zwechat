@@ -9,6 +9,7 @@ const Context = @import("../context/mod.zig").Context;
 const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 pub const RetainItem = struct {
     key: i64 = 0,
@@ -208,20 +209,31 @@ pub const Analysis = struct {
     }
 
     /// 获取小程序性能数据。
+    ///
+    /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次。
     pub fn getPerformanceData(self: *Self, req: GetPerformanceDataRequest) !std.json.Parsed(GetPerformanceDataResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/business/performance/boot?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
         const body = try jsonStringifyPerformance(self.allocator, req);
         defer self.allocator.free(body);
 
-        const resp = try self.postJSON(uri, body);
+        const Sender = struct {
+            analysis: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/business/performance/boot?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                return c.analysis.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "GetPerformanceData", Sender{
+            .analysis = self,
+            .body = body,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(GetPerformanceDataResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -232,16 +244,8 @@ pub const Analysis = struct {
         return parsed;
     }
 
+    /// datacube 日期区间查询公共路径；`comptime T` 为响应类型。
     fn fetchDateRange(self: *Self, endpoint: []const u8, begin_date: []const u8, end_date: []const u8, comptime T: type) !std.json.Parsed(T) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/datacube/{s}?access_token={s}",
-            .{ endpoint, access_token },
-        );
-        defer self.allocator.free(uri);
-
         const body = try std.fmt.allocPrint(
             self.allocator,
             "{{\"begin_date\":\"{s}\",\"end_date\":\"{s}\"}}",
@@ -249,7 +253,27 @@ pub const Analysis = struct {
         );
         defer self.allocator.free(body);
 
-        const resp = try self.postJSON(uri, body);
+        const Sender = struct {
+            analysis: *Self,
+            endpoint: []const u8,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/datacube/{s}?access_token={s}",
+                    .{ c.endpoint, token },
+                );
+                defer allocator.free(uri);
+                return c.analysis.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, endpoint, Sender{
+            .analysis = self,
+            .endpoint = endpoint,
+            .body = body,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(T, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -391,4 +415,39 @@ test "getAnalysisVisitPage POST datacube 并解析页面访问" {
     try std.testing.expectEqual(@as(usize, 1), parsed.value.list.len);
     try std.testing.expectEqualStrings("pages/index", parsed.value.list[0].page_path);
     try std.testing.expectEqual(@as(i64, 100), parsed.value.list[0].page_visit_pv);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "getAnalysisDailyRetain token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/datacube/getweanalysisappiddailyretaininfo?access_token=";
+    try mt.addRoute(base ++ "token-abc", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+    });
+    try mt.addRoute(base ++ "token-new", .{
+        .body = "{\"ref_date\":\"20240901\",\"visit_uv\":[{\"key\":1,\"value\":7}]}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-test" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var a = Analysis.init(&ctx, allocator);
+    a.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try a.getAnalysisDailyRetain("20240901", "20240907");
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("20240901", parsed.value.ref_date);
+    try std.testing.expectEqual(@as(i64, 7), parsed.value.visit_uv[0].value);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
 }

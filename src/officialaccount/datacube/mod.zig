@@ -2,11 +2,15 @@
 //! officialaccount/datacube — 数据统计
 //!
 //! 提供公众号用户、消息、接口、图文、分享传播及流量主广告等维度的统计接口。
+//!
+//! token 注入 / errcode 检查 / token 失效自愈（40001 等 → 作废缓存 → 只重试一次）
+//! 交给 `util/retry.callApi` 统一处理。
 
 const std = @import("std");
 const Context = @import("../context.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// 广告位类型（对照 publisher.go `AdSlot`），用于 `getPublisherAdPosGeneral` 的 `ad_slot` 参数。
 pub const AdSlot = struct {
@@ -173,7 +177,7 @@ pub const DataCube = struct {
     ///
     /// 查询参数顺序对齐 Go `url.Values.Encode()` 的字母序：
     /// `access_token` / `action` / `ad_slot` / `end_date` / `page` / `page_size` / `start_date`。
-    /// 先按 errcode 检查错误响应，再按 `base_resp.ret` 检查业务错误。
+    /// errcode 由 `callApi` 检查；`base_resp.ret` 在此处检查。
     fn fetchPublisher(
         self: *Self,
         action: []const u8,
@@ -183,39 +187,50 @@ pub const DataCube = struct {
         page_size: i64,
         ad_slot: []const u8,
     ) ![]u8 {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Req = struct {
+            action: []const u8,
+            start_date: []const u8,
+            end_date: []const u8,
+            page: i64,
+            page_size: i64,
+            ad_slot: []const u8,
 
-        var uri_buf: std.ArrayListUnmanaged(u8) = .empty;
-        errdefer uri_buf.deinit(self.allocator);
-        try uri_buf.appendSlice(self.allocator, "https://api.weixin.qq.com/publisher/stat?access_token=");
-        try uri_buf.appendSlice(self.allocator, access_token);
-        try uri_buf.appendSlice(self.allocator, "&action=");
-        try uri_buf.appendSlice(self.allocator, action);
-        if (ad_slot.len > 0) {
-            try uri_buf.appendSlice(self.allocator, "&ad_slot=");
-            try uri_buf.appendSlice(self.allocator, ad_slot);
-        }
-        try uri_buf.appendSlice(self.allocator, "&end_date=");
-        try uri_buf.appendSlice(self.allocator, end_date);
-        var num_buf: [24]u8 = undefined;
-        try uri_buf.appendSlice(self.allocator, "&page=");
-        try uri_buf.appendSlice(self.allocator, std.fmt.bufPrint(&num_buf, "{d}", .{page}) catch unreachable);
-        try uri_buf.appendSlice(self.allocator, "&page_size=");
-        try uri_buf.appendSlice(self.allocator, std.fmt.bufPrint(&num_buf, "{d}", .{page_size}) catch unreachable);
-        try uri_buf.appendSlice(self.allocator, "&start_date=");
-        try uri_buf.appendSlice(self.allocator, start_date);
-        const uri = try uri_buf.toOwnedSlice(self.allocator);
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                var uri_buf: std.ArrayListUnmanaged(u8) = .empty;
+                defer uri_buf.deinit(a);
+                try uri_buf.appendSlice(a, "https://api.weixin.qq.com/publisher/stat?access_token=");
+                try uri_buf.appendSlice(a, token);
+                try uri_buf.appendSlice(a, "&action=");
+                try uri_buf.appendSlice(a, c.action);
+                if (c.ad_slot.len > 0) {
+                    try uri_buf.appendSlice(a, "&ad_slot=");
+                    try uri_buf.appendSlice(a, c.ad_slot);
+                }
+                try uri_buf.appendSlice(a, "&end_date=");
+                try uri_buf.appendSlice(a, c.end_date);
+                var num_buf: [24]u8 = undefined;
+                try uri_buf.appendSlice(a, "&page=");
+                try uri_buf.appendSlice(a, std.fmt.bufPrint(&num_buf, "{d}", .{c.page}) catch unreachable);
+                try uri_buf.appendSlice(a, "&page_size=");
+                try uri_buf.appendSlice(a, std.fmt.bufPrint(&num_buf, "{d}", .{c.page_size}) catch unreachable);
+                try uri_buf.appendSlice(a, "&start_date=");
+                try uri_buf.appendSlice(a, c.start_date);
+                const uri = try uri_buf.toOwnedSlice(a);
+                defer a.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.get(uri);
+                const client = util_http.getDefaultClient(a);
+                return client.get(uri);
+            }
+        };
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, action)) |ce| {
-            defer ce.deinit();
-            self.allocator.free(resp);
-            return util_error.WechatError.ApiError;
-        }
+        const resp = try util_retry.callApi(self.ctx, self.allocator, action, Req{
+            .action = action,
+            .start_date = start_date,
+            .end_date = end_date,
+            .page = page,
+            .page_size = page_size,
+            .ad_slot = ad_slot,
+        });
 
         var parsed = std.json.parseFromSlice(struct {
             base_resp: struct {
@@ -236,32 +251,37 @@ pub const DataCube = struct {
     }
 
     fn fetchJson(self: *Self, endpoint: []const u8, begin_date: []const u8, end_date: []const u8) ![]u8 {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Req = struct {
+            endpoint: []const u8,
+            begin_date: []const u8,
+            end_date: []const u8,
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/datacube/{s}?access_token={s}",
-            .{ endpoint, access_token },
-        );
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    a,
+                    "https://api.weixin.qq.com/datacube/{s}?access_token={s}",
+                    .{ c.endpoint, token },
+                );
+                defer a.free(uri);
 
-        const body = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"begin_date\":\"{s}\",\"end_date\":\"{s}\"}}",
-            .{ begin_date, end_date },
-        );
-        defer self.allocator.free(body);
+                const body = try std.fmt.allocPrint(
+                    a,
+                    "{{\"begin_date\":\"{s}\",\"end_date\":\"{s}\"}}",
+                    .{ c.begin_date, c.end_date },
+                );
+                defer a.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+                const client = util_http.getDefaultClient(a);
+                return client.postJSON(uri, body);
+            }
+        };
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, endpoint)) |ce| {
-            defer ce.deinit();
-            self.allocator.free(resp);
-            return util_error.WechatError.ApiError;
-        }
-        return resp;
+        // errcode 由 callApi 检查；成功（含 `errcode == 0`）时返回原始响应体。
+        return util_retry.callApi(self.ctx, self.allocator, endpoint, Req{
+            .endpoint = endpoint,
+            .begin_date = begin_date,
+            .end_date = end_date,
+        });
     }
 };
 
@@ -281,22 +301,38 @@ test "DataCube.init 持有 ctx" {
 const credential = @import("../../credential/mod.zig");
 
 const TestTokenState = struct {
+    /// 当前（缓存中的）token；`invalidate` 后换成 `refreshed`。
     token: []const u8,
-};
+    /// 作废后换发的新 token（模拟微信换发）；`null` 表示作废后仍返回同一 token。
+    refreshed: ?[]const u8 = null,
+    /// `invalidate` 被调用的次数。
+    invalidates: usize = 0,
 
-fn testGetAccessToken(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
-    const state: *const TestTokenState = @ptrCast(@alignCast(ctx));
-    return allocator.dupe(u8, state.token);
-}
+    fn getAccessToken(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const state: *const TestTokenState = @ptrCast(@alignCast(ptr));
+        return allocator.dupe(u8, state.token);
+    }
 
-const test_token_vtable = credential.AccessTokenHandle.VTable{
-    .getAccessToken = testGetAccessToken,
+    fn invalidate(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const state: *TestTokenState = @ptrCast(@alignCast(ptr));
+        state.invalidates += 1;
+        if (state.refreshed) |t| {
+            state.token = t;
+            state.refreshed = null;
+        }
+    }
+
+    const vtable = credential.AccessTokenHandle.VTable{
+        .getAccessToken = getAccessToken,
+        .invalidate = invalidate,
+    };
 };
 
 fn makeFakeTokenHandle(state: *TestTokenState) credential.AccessTokenHandle {
     return .{
         .ptr = @ptrCast(state),
-        .vtable = &test_token_vtable,
+        .vtable = &TestTokenState.vtable,
     };
 }
 
@@ -329,9 +365,15 @@ fn setupTestClient(alloc: std.mem.Allocator, cap: *TestCapture) void {
 }
 
 fn releaseTestClient() void {
-    const client = util_http.getDefaultClient(std.heap.page_allocator);
-    client.setTransport(null, null);
+    // 不依赖「用别的 allocator 再取一次指针」的宽容语义：直接销毁线程局部实例，
+    // 注入的 transport 随实例一起消失（下次 getDefaultClient 会重新初始化）。
     util_http.deinitDefaultClient();
+}
+
+/// 用 `MockTransport` 路由表替代 capture（按 URI 命中不同响应，见失效重试测试）。
+fn setupMockClient(alloc: std.mem.Allocator, mt: *util_http.MockTransport) void {
+    const client = util_http.getDefaultClient(alloc);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(mt));
 }
 
 fn makeDc(alloc: std.mem.Allocator, state: *TestTokenState, ctx: *Context) DataCube {
@@ -566,4 +608,84 @@ test "DataCube.getPublisherSettlement 结算数据" {
         cap.uri,
     );
     try std.testing.expect(std.mem.indexOf(u8, resp, "\"sett_no\":\"NO1\"") != null);
+}
+
+test "DataCube token 失效自愈：40001 → 作废缓存 → 新 token 重试成功" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/datacube/getusersummary?access_token=old-ak", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential, access_token is invalid or not latest\"}",
+    });
+    try mt.addRoute("https://api.weixin.qq.com/datacube/getusersummary?access_token=new-ak", .{
+        .body = "{\"list\":[{\"ref_date\":\"2024-01-01\"}]}",
+    });
+    setupMockClient(allocator, &mt);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "old-ak", .refreshed = "new-ak" };
+    var ctx: Context = undefined;
+    var dc = makeDc(allocator, &state, &ctx);
+
+    const resp = try dc.getUserSummary("2024-01-01", "2024-01-07");
+    defer allocator.free(resp);
+
+    try std.testing.expectEqualStrings("{\"list\":[{\"ref_date\":\"2024-01-01\"}]}", resp);
+    try std.testing.expectEqual(@as(usize, 1), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-ak") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-ak") != null);
+}
+
+test "DataCube 非 token 类 errcode（45009）直接 ApiError：不作废、只请求一次" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/datacube/getusercumulate?access_token=old-ak", .{
+        .body = "{\"errcode\":45009,\"errmsg\":\"reach max api daily quota limit\"}",
+    });
+    setupMockClient(allocator, &mt);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "old-ak", .refreshed = "new-ak" };
+    var ctx: Context = undefined;
+    var dc = makeDc(allocator, &state, &ctx);
+
+    try std.testing.expectError(
+        util_error.WechatError.ApiError,
+        dc.getUserCumulate("2024-01-01", "2024-01-07"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+}
+
+test "DataCube.getPublisherAdPosGeneral 走 token 失效自愈（GET 查询串带新 token）" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute(
+        "https://api.weixin.qq.com/publisher/stat?access_token=old-ak&action=publisher_adpos_general&ad_slot=SLOT_ID_BIZ_BOTTOM&end_date=2024-01-31&page=1&page_size=10&start_date=2024-01-01",
+        .{ .body = "{\"errcode\":42001,\"errmsg\":\"access_token expired\"}" },
+    );
+    try mt.addRoute(
+        "https://api.weixin.qq.com/publisher/stat?access_token=new-ak&action=publisher_adpos_general&ad_slot=SLOT_ID_BIZ_BOTTOM&end_date=2024-01-31&page=1&page_size=10&start_date=2024-01-01",
+        .{ .body = "{\"base_resp\":{\"ret\":0,\"err_msg\":\"ok\"},\"total_num\":1}" },
+    );
+    setupMockClient(allocator, &mt);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "old-ak", .refreshed = "new-ak" };
+    var ctx: Context = undefined;
+    var dc = makeDc(allocator, &state, &ctx);
+
+    const resp = try dc.getPublisherAdPosGeneral("2024-01-01", "2024-01-31", 1, 10, AdSlot.biz_bottom);
+    defer allocator.free(resp);
+
+    try std.testing.expectEqualStrings("{\"base_resp\":{\"ret\":0,\"err_msg\":\"ok\"},\"total_num\":1}", resp);
+    try std.testing.expectEqual(@as(usize, 1), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-ak") != null);
 }

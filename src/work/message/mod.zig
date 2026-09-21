@@ -14,6 +14,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL 常量
@@ -163,22 +164,31 @@ pub const Message = struct {
     ///
     /// `T` 必须是 `SendTextRequest` / `SendImageRequest` / `SendMarkdownRequest`
     /// 之一；调用方应通过 `sendText` / `sendImage` / `sendMarkdown` 等包装方法间接调用。
+    ///
+    /// 取 token / 拼 URI / 发请求 / errcode 检查（含 token 失效后作废缓存并重试一次）
+    /// 统一走 `util/retry.callApi`，`Req.send` 只负责「用给定 token 发一次请求」。
     fn send(self: *Self, comptime T: type, req: T) !std.json.Parsed(SendResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Req = struct {
+            req: T,
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ sendURL, access_token },
-        );
-        defer self.allocator.free(uri);
+            /// 用 `token` 拼出完整 URI 并 POST 请求体，返回响应体（所有权交给调用方）。
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "{s}?access_token={s}",
+                    .{ sendURL, token },
+                );
+                defer allocator.free(uri);
 
-        const body = try serializeRequest(self.allocator, req);
-        defer self.allocator.free(body);
+                const body = try serializeRequest(allocator, c.req);
+                defer allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+                const client = util_http.getDefaultClient(allocator);
+                return client.postJSON(uri, body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "MessageSend", Req{ .req = req });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(SendResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -261,18 +271,9 @@ fn serializeRequest(allocator: std.mem.Allocator, req: anytype) ![]u8 {
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendJsonString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => try buf.append(allocator, c),
-        }
-    }
-}
+/// JSON 字符串转义（实现收敛到 `util.json.appendEscapedString`；此前漏转义
+/// `c < 0x20` 控制字符，消息正文含控制字符时会产出非法 JSON）。
+const appendJsonString = util_json.appendEscapedString;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 测试
@@ -370,4 +371,108 @@ test "serializeRequest 群推送 chat_id 序列化为 chatid 且与 touser 互�
     try std.testing.expect(std.mem.indexOf(u8, body, "\"touser\":") == null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"msgtype\":\"markdown\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"markdown\":{\"content\":\"群周报\"}") != null);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 测试：token 失效自愈（util/retry.callApi 链路）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 可按脚本换发 token 并统计作废次数的凭据 handle 状态。
+const RetryTokenState = struct {
+    /// 依次给出的 token；回源次数超出脚本后复用最后一项。
+    tokens: []const []const u8 = &.{ "tok-old", "tok-new" },
+    fetch_calls: usize = 0,
+    invalidate_calls: usize = 0,
+
+    fn getToken(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *RetryTokenState = @ptrCast(@alignCast(ctx));
+        const token = self.tokens[@min(self.fetch_calls, self.tokens.len - 1)];
+        self.fetch_calls += 1;
+        return allocator.dupe(u8, token);
+    }
+
+    fn invalidate(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const self: *RetryTokenState = @ptrCast(@alignCast(ctx));
+        self.invalidate_calls += 1;
+    }
+
+    const vtable = @import("../../credential/mod.zig").AccessTokenHandle.VTable{
+        .getAccessToken = getToken,
+        .invalidate = invalidate,
+    };
+};
+
+/// 构造借用 `state` 的 Context（handle 的 ptr 指向测试局部状态）。
+fn makeRetryCtx(state: *RetryTokenState) Context {
+    return .{
+        .config = .{ .corp_id = "ww-msg-retry" },
+        .access_token_handle = .{ .ptr = @ptrCast(state), .vtable = &RetryTokenState.vtable },
+    };
+}
+
+/// 安装 mock transport 并返回之（调用方负责复位默认 client）。
+fn useMockTransport(allocator: std.mem.Allocator, mt: *util_http.MockTransport) void {
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(mt));
+}
+
+test "sendText token 失效：40001 → 作废缓存 → 用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=tok-old", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential, access_token is invalid or not latest\"}",
+    });
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=tok-new", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"msgid\":\"MSGID1\"}",
+    });
+
+    useMockTransport(allocator, &mt);
+    defer {
+        util_http.getDefaultClient(allocator).setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = RetryTokenState{};
+    var ctx = makeRetryCtx(&state);
+    var msg = Message.init(&ctx, allocator);
+    var parsed = try msg.sendText(.{
+        .common = .{ .to_user = "UserA", .agent_id = "1000002" },
+        .content = "hi",
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("MSGID1", parsed.value.msgid);
+    // 作废恰好一次，且第二次请求带的是换发后的新 token。
+    try std.testing.expectEqual(@as(usize, 1), state.invalidate_calls);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=tok-old"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=tok-new"));
+}
+
+test "sendImage 非 token 类 errcode：直接 ApiError，不作废也不重试" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=tok-old", .{
+        .body = "{\"errcode\":45009,\"errmsg\":\"reach max api daily quota limit\"}",
+    });
+
+    useMockTransport(allocator, &mt);
+    defer {
+        util_http.getDefaultClient(allocator).setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = RetryTokenState{};
+    var ctx = makeRetryCtx(&state);
+    var msg = Message.init(&ctx, allocator);
+
+    const result = msg.sendImage(.{ .common = .{ .to_user = "UserA" }, .media_id = "MID" });
+    try std.testing.expectError(util_error.WechatError.ApiError, result);
+
+    try std.testing.expectEqual(@as(usize, 0), state.invalidate_calls);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+    try std.testing.expectEqual(@as(usize, 1), state.fetch_calls);
 }

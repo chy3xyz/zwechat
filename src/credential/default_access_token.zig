@@ -183,6 +183,23 @@ pub const DefaultAccessToken = struct {
         return allocator.dupe(u8, resp.access_token);
     }
 
+    /// 作废缓存的 access_token：删除缓存条目，使下一次 `getAccessToken` 必须回源。
+    ///
+    /// 本实现不额外持有 token 副本（唯一副本就在 cache 里），删除缓存即作废完成；
+    /// 锁范围与 `getAccessToken` 的缓存临界区一致，与并发 `set` / `delete` 互斥。
+    /// 键不存在不视为错误（`cache.delete` 契约）。
+    ///
+    /// 用途：识别到微信 token 失效码（40001/40014/41001/42001）后的恢复第一步，
+    /// 见 `util/retry.zig` 的 `callApi`；`forceRefresh` 等价于「作废 + 立即回源」。
+    pub fn invalidate(self: *DefaultAccessToken, allocator: std.mem.Allocator) CredentialError!void {
+        const key = try self.cacheKey(allocator);
+        defer allocator.free(key);
+
+        self.lock.lock();
+        defer self.lock.unlock();
+        try self.cache.delete(key);
+    }
+
     /// 强制清空缓存并重新从服务端获取 Token（用于 Token 失效时的自动恢复机制）。
     ///
     /// 锁范围同 `getAccessToken`：清缓存与回写缓存在锁内，HTTP 回源在锁外。
@@ -229,11 +246,17 @@ pub const DefaultAccessToken = struct {
     /// vtable 单例：所有 `DefaultAccessToken` 实例共用，函数通过 `ctx` 查回实例。
     const vtable_instance = AccessTokenHandle.VTable{
         .getAccessToken = handleGetAccessToken,
+        .invalidate = handleInvalidate,
     };
 
     fn handleGetAccessToken(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
         const self: *DefaultAccessToken = @ptrCast(@alignCast(ctx));
         return self.getAccessToken(allocator);
+    }
+
+    fn handleInvalidate(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        const self: *DefaultAccessToken = @ptrCast(@alignCast(ctx));
+        return self.invalidate(allocator);
     }
 };
 
@@ -252,10 +275,14 @@ const StubFetcherCtx = struct {
 };
 
 /// 返回固定 JSON 响应的 fetcher（深拷贝 response 与 url）。
+/// 多次回源时先释放上一份 url 副本，避免桩自身泄漏；新副本先分配再替换，
+/// 分配失败时 `last_url` 仍指向有效旧值（不会留下悬垂指针）。
 fn stubFetcher(ctx: *anyopaque, allocator: std.mem.Allocator, url: []const u8) CredentialError![]u8 {
     const self: *StubFetcherCtx = @ptrCast(@alignCast(ctx));
+    const url_dup = try allocator.dupe(u8, url);
+    if (self.last_url.len > 0) allocator.free(@constCast(self.last_url));
     self.called_count += 1;
-    self.last_url = try allocator.dupe(u8, url);
+    self.last_url = url_dup;
     return allocator.dupe(u8, self.response);
 }
 
@@ -479,6 +506,71 @@ test "DefaultAccessToken: cacheKey 拼接正确" {
     try std.testing.expectEqualStrings("pfx_access_token_wxid", key);
 }
 
+test "DefaultAccessToken: invalidate 后缓存条目消失，下一次 getAccessToken 重新回源" {
+    const allocator = std.testing.allocator;
+    const ctx = makeMemoryCache(allocator);
+    defer {
+        ctx.mem.deinit();
+        allocator.destroy(ctx.mem);
+    }
+
+    var stub_ctx = StubFetcherCtx{
+        .response = "{\"access_token\":\"tok_v1\",\"expires_in\":7200,\"errcode\":0,\"errmsg\":\"ok\"}",
+    };
+    defer if (stub_ctx.last_url.len > 0) allocator.free(@constCast(stub_ctx.last_url));
+
+    var dat = DefaultAccessToken.initWithFetcher(
+        "wx_invalidate",
+        "secret",
+        "gowechat_test_",
+        ctx.cache,
+        stubFetcher,
+        @ptrCast(&stub_ctx),
+    );
+
+    const key = try std.fmt.allocPrint(allocator, "gowechat_test__access_token_{s}", .{"wx_invalidate"});
+    defer allocator.free(key);
+
+    // 1) 首次回源并写入缓存
+    const first = try dat.getAccessToken(allocator);
+    defer allocator.free(first);
+    try std.testing.expectEqual(@as(usize, 1), stub_ctx.called_count);
+    try std.testing.expect((try ctx.cache.get(key)) != null);
+
+    // 2) 缓存命中：不再回源
+    const cached = try dat.getAccessToken(allocator);
+    defer allocator.free(cached);
+    try std.testing.expectEqual(@as(usize, 1), stub_ctx.called_count);
+
+    // 3) 作废：缓存条目被删除
+    try dat.invalidate(allocator);
+    try std.testing.expect((try ctx.cache.get(key)) == null);
+
+    // 4) 再取必须重新回源
+    const refreshed = try dat.getAccessToken(allocator);
+    defer allocator.free(refreshed);
+    try std.testing.expectEqualStrings("tok_v1", refreshed);
+    try std.testing.expectEqual(@as(usize, 2), stub_ctx.called_count);
+
+    // 5) 抽象 handle 转发到同一实现（不是 InvalidateNotSupported）
+    const handle = dat.asHandle();
+    try handle.invalidateAccessToken(allocator);
+    try std.testing.expect((try ctx.cache.get(key)) == null);
+}
+
+test "DefaultAccessToken: invalidate 对不存在的键不报错（可重复调用）" {
+    const allocator = std.testing.allocator;
+    const ctx = makeMemoryCache(allocator);
+    defer {
+        ctx.mem.deinit();
+        allocator.destroy(ctx.mem);
+    }
+
+    var dat = DefaultAccessToken.init("wx_no_cache_entry", "secret", "gowechat_test_", ctx.cache);
+    try dat.invalidate(allocator);
+    try dat.invalidate(allocator);
+}
+
 test "DefaultAccessToken: expires_in 取 i64 极值不溢出 panic 且缓存 TTL 不退化为永不过期" {
     // 回归：旧实现 `resp.expires_in - 1500` 在 expires_in = i64 min 时 Debug 下
     // 整数溢出 panic；即便不 panic，ttl <= 0 也会被 cache.Memory 当作永不过期。
@@ -515,7 +607,6 @@ test "DefaultAccessToken: expires_in 取 i64 极值不溢出 panic 且缓存 TTL
     const now_ns = std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds;
     try std.testing.expect(entry.value_ptr.expire_at_ns -| now_ns <= 2 * std.time.ns_per_s);
 }
-
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 并发 / 错误路径行为测试（singleflight 锁范围回归）

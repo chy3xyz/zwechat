@@ -5,11 +5,16 @@
 //! （文本 / 图文 / 语音 / 视频 / 图片 / 卡券），
 //! 以及删除群发、群发状态查询与群发速度设置。
 //! 对应 `_ref/wechat/officialaccount/broadcast/broadcast.go`。
+//!
+//! token 注入 / errcode 检查 / token 失效自愈（40001 等 → 作废缓存 → 只重试一次）
+//! 交给 `util/retry.callApi` 统一处理。
 
 const std = @import("std");
 const Context = @import("../context.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
+const util_json = @import("../../util/json.zig");
 
 pub const sendURLByTag = "https://api.weixin.qq.com/cgi-bin/message/mass/sendall";
 pub const sendURLByOpenID = "https://api.weixin.qq.com/cgi-bin/message/mass/send";
@@ -207,27 +212,31 @@ pub const Broadcast = struct {
 
     /// 删除群发消息（`mass/delete`）。`article_idx` 为要删除的文章位置，全部删除填 0。
     pub fn delete(self: *Self, msg_id: i64, article_idx: i64) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Req = struct {
+            msg_id: i64,
+            article_idx: i64,
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ deleteSendURL, access_token });
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(a, "{s}?access_token={s}", .{ deleteSendURL, token });
+                defer a.free(uri);
 
-        const json_body = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"msg_id\":{d},\"article_idx\":{d}}}",
-            .{ msg_id, article_idx },
-        );
-        defer self.allocator.free(json_body);
+                const json_body = try std.fmt.allocPrint(
+                    a,
+                    "{{\"msg_id\":{d},\"article_idx\":{d}}}",
+                    .{ c.msg_id, c.article_idx },
+                );
+                defer a.free(json_body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, json_body);
-        defer self.allocator.free(resp);
+                const client = util_http.getDefaultClient(a);
+                return client.postJSON(uri, json_body);
+            }
+        };
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "Delete")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "Delete", Req{
+            .msg_id = msg_id,
+            .article_idx = article_idx,
+        });
+        self.allocator.free(resp);
     }
 
     /// 查询群发消息状态（`mass/get`）。
@@ -235,30 +244,32 @@ pub const Broadcast = struct {
     /// 返回 `msg_status` 字符串（如 `SEND_SUCCESS`），由本结构体的 allocator
     /// 分配，**调用方负责 `free`**。
     pub fn getMassStatus(self: *Self, msg_id: []const u8) ![]u8 {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Req = struct {
+            msg_id: []const u8,
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ massStatusSendURL, access_token });
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(a, "{s}?access_token={s}", .{ massStatusSendURL, token });
+                defer a.free(uri);
 
-        const json_body = try std.fmt.allocPrint(self.allocator, "{{\"msg_id\":\"{s}\"}}", .{msg_id});
-        defer self.allocator.free(json_body);
+                const json_body = try std.fmt.allocPrint(a, "{{\"msg_id\":\"{s}\"}}", .{c.msg_id});
+                defer a.free(json_body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, json_body);
+                const client = util_http.getDefaultClient(a);
+                return client.postJSON(uri, json_body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "MassStatus", Req{ .msg_id = msg_id });
         defer self.allocator.free(resp);
 
+        // errcode 已由 callApi 检查（非 0 直接 ApiError）。
         var parsed = std.json.parseFromSlice(struct {
-            errcode: i64 = 0,
-            errmsg: []const u8 = "",
-            msg_id: i64 = 0,
             msg_status: []const u8 = "",
         }, self.allocator, resp, .{ .ignore_unknown_fields = true }) catch {
             return util_error.WechatError.DecodeError;
         };
         defer parsed.deinit();
 
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
         return self.allocator.dupe(u8, parsed.value.msg_status);
     }
 
@@ -275,19 +286,27 @@ pub const Broadcast = struct {
     }
 
     fn postSpeed(self: *Self, url: []const u8, json_body: []const u8) !SpeedResult {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Req = struct {
+            url: []const u8,
+            json_body: []const u8,
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ url, access_token });
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(a, "{s}?access_token={s}", .{ c.url, token });
+                defer a.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, json_body);
+                const client = util_http.getDefaultClient(a);
+                return client.postJSON(uri, c.json_body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "MassSpeed", Req{
+            .url = url,
+            .json_body = json_body,
+        });
         defer self.allocator.free(resp);
 
+        // errcode 已由 callApi 检查（非 0 直接 ApiError）。
         var parsed = std.json.parseFromSlice(struct {
-            errcode: i64 = 0,
-            errmsg: []const u8 = "",
             speed: i64 = 0,
             realspeed: i64 = 0,
         }, self.allocator, resp, .{ .ignore_unknown_fields = true }) catch {
@@ -295,7 +314,6 @@ pub const Broadcast = struct {
         };
         defer parsed.deinit();
 
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
         return .{ .speed = parsed.value.speed, .realspeed = parsed.value.realspeed };
     }
 
@@ -349,19 +367,27 @@ pub const Broadcast = struct {
     }
 
     fn postMass(self: *Self, url: []const u8, json_body: []const u8) !i64 {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Req = struct {
+            url: []const u8,
+            json_body: []const u8,
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ url, access_token });
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(a, "{s}?access_token={s}", .{ c.url, token });
+                defer a.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, json_body);
+                const client = util_http.getDefaultClient(a);
+                return client.postJSON(uri, c.json_body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "MassSend", Req{
+            .url = url,
+            .json_body = json_body,
+        });
         defer self.allocator.free(resp);
 
+        // errcode 已由 callApi 检查（非 0 直接 ApiError）。
         var parsed = std.json.parseFromSlice(struct {
-            errcode: i64 = 0,
-            errmsg: []const u8 = "",
             msg_id: i64 = 0,
             msg_data_id: i64 = 0,
         }, self.allocator, resp, .{ .ignore_unknown_fields = true }) catch {
@@ -369,7 +395,6 @@ pub const Broadcast = struct {
         };
         defer parsed.deinit();
 
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
         return parsed.value.msg_id;
     }
 };
@@ -448,19 +473,9 @@ fn buildOpenidArrayJson(allocator: std.mem.Allocator, openids: []const []const u
     return buf.toOwnedSlice(allocator);
 }
 
-/// 追加 JSON 字符串转义内容（不包裹引号）。
-fn appendJsonEscaped(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => try buf.append(allocator, c),
-        }
-    }
-}
+/// 追加 JSON 字符串转义内容（不包裹引号；实现收敛到 `util.json.appendEscapedString`）。
+/// 群发正文 / 图文标题 / 描述直接来自调用方，此前漏转义 `c < 0x20` 控制字符。
+const appendJsonEscaped = util_json.appendEscapedString;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 测试辅助：假 AccessTokenHandle + capture transport。
@@ -469,22 +484,38 @@ fn appendJsonEscaped(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(
 const credential = @import("../../credential/mod.zig");
 
 const TestTokenState = struct {
+    /// 当前（缓存中的）token；`invalidate` 后换成 `refreshed`。
     token: []const u8,
-};
+    /// 作废后换发的新 token（模拟微信换发）；`null` 表示作废后仍返回同一 token。
+    refreshed: ?[]const u8 = null,
+    /// `invalidate` 被调用的次数。
+    invalidates: usize = 0,
 
-fn testGetAccessToken(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
-    const state: *const TestTokenState = @ptrCast(@alignCast(ctx));
-    return allocator.dupe(u8, state.token);
-}
+    fn getAccessToken(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const state: *const TestTokenState = @ptrCast(@alignCast(ptr));
+        return allocator.dupe(u8, state.token);
+    }
 
-const test_token_vtable = credential.AccessTokenHandle.VTable{
-    .getAccessToken = testGetAccessToken,
+    fn invalidate(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const state: *TestTokenState = @ptrCast(@alignCast(ptr));
+        state.invalidates += 1;
+        if (state.refreshed) |t| {
+            state.token = t;
+            state.refreshed = null;
+        }
+    }
+
+    const vtable = credential.AccessTokenHandle.VTable{
+        .getAccessToken = getAccessToken,
+        .invalidate = invalidate,
+    };
 };
 
 fn makeFakeTokenHandle(state: *TestTokenState) credential.AccessTokenHandle {
     return .{
         .ptr = @ptrCast(state),
-        .vtable = &test_token_vtable,
+        .vtable = &TestTokenState.vtable,
     };
 }
 
@@ -519,9 +550,15 @@ fn setupTestClient(alloc: std.mem.Allocator, cap: *TestCapture) void {
 }
 
 fn releaseTestClient() void {
-    const client = util_http.getDefaultClient(std.heap.page_allocator);
-    client.setTransport(null, null);
+    // 不依赖「用别的 allocator 再取一次指针」的宽容语义：直接销毁线程局部实例，
+    // 注入的 transport 随实例一起消失（下次 getDefaultClient 会重新初始化）。
     util_http.deinitDefaultClient();
+}
+
+/// 用 `MockTransport` 路由表替代 capture（按 URI 命中不同响应，见失效重试测试）。
+fn setupMockClient(alloc: std.mem.Allocator, mt: *util_http.MockTransport) void {
+    const client = util_http.getDefaultClient(alloc);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(mt));
 }
 
 test "Broadcast.init 持有 ctx" {
@@ -1145,4 +1182,127 @@ test "Broadcast 全员群发 errcode 非 0 → ApiError（6 个方法全覆盖�
         try std.testing.expectError(util_error.WechatError.ApiError, call(&b));
         try expectAllMassBody(cap.payload);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// token 失效自愈 / 非 token 错误不重试（`util/retry.callApi` 契约）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Broadcast token 失效自愈：40001 → 作废缓存 → 新 token 重试成功" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/message/mass/sendall?access_token=old-ak", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential, access_token is invalid or not latest\"}",
+    });
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/message/mass/sendall?access_token=new-ak", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"msg_id\":10001}",
+    });
+    setupMockClient(allocator, &mt);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "old-ak", .refreshed = "new-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var b = Broadcast.init(&ctx, allocator);
+
+    try std.testing.expectEqual(@as(i64, 10001), try b.sendTextToTag(2, "x"));
+    try std.testing.expectEqual(@as(usize, 1), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-ak") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-ak") != null);
+}
+
+test "Broadcast.getMassStatus 走 token 失效自愈后仍解析 msg_status" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/message/mass/get?access_token=old-ak", .{
+        .body = "{\"errcode\":40014,\"errmsg\":\"invalid access_token\"}",
+    });
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/message/mass/get?access_token=new-ak", .{
+        .body = "{\"msg_id\":100,\"msg_status\":\"SEND_SUCCESS\"}",
+    });
+    setupMockClient(allocator, &mt);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "old-ak", .refreshed = "new-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var b = Broadcast.init(&ctx, allocator);
+
+    const status = try b.getMassStatus("100");
+    defer allocator.free(status);
+
+    try std.testing.expectEqualStrings("SEND_SUCCESS", status);
+    try std.testing.expectEqual(@as(usize, 1), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+}
+
+test "Broadcast.delete 走 token 失效自愈（void 返回不泄漏）" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/message/mass/delete?access_token=old-ak", .{
+        .body = "{\"errcode\":42001,\"errmsg\":\"access_token expired\"}",
+    });
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/message/mass/delete?access_token=new-ak", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    });
+    setupMockClient(allocator, &mt);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "old-ak", .refreshed = "new-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var b = Broadcast.init(&ctx, allocator);
+
+    try b.delete(100, 1);
+    try std.testing.expectEqual(@as(usize, 1), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+}
+
+test "Broadcast.getSpeed 走 token 失效自愈后仍解析 speed" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/message/mass/speed/get?access_token=old-ak", .{
+        .body = "{\"errcode\":41001,\"errmsg\":\"access_token missing\"}",
+    });
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/message/mass/speed/get?access_token=new-ak", .{
+        .body = "{\"speed\":4,\"realspeed\":3}",
+    });
+    setupMockClient(allocator, &mt);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "old-ak", .refreshed = "new-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var b = Broadcast.init(&ctx, allocator);
+
+    const got = try b.getSpeed();
+    try std.testing.expectEqual(@as(i64, 4), got.speed);
+    try std.testing.expectEqual(@as(i64, 3), got.realspeed);
+    try std.testing.expectEqual(@as(usize, 1), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+}
+
+test "Broadcast 非 token 类 errcode（45009）直接 ApiError：不作废、只请求一次" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/message/mass/sendall?access_token=old-ak", .{
+        .body = "{\"errcode\":45009,\"errmsg\":\"reach max api daily quota limit\"}",
+    });
+    setupMockClient(allocator, &mt);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "old-ak", .refreshed = "new-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var b = Broadcast.init(&ctx, allocator);
+
+    try std.testing.expectError(util_error.WechatError.ApiError, b.sendTextToAll("x"));
+    try std.testing.expectEqual(@as(usize, 0), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
 }

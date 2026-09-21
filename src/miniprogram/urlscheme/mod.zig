@@ -8,6 +8,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// `wxa/generatescheme` 响应。
 pub const GenerateResponse = struct {
@@ -81,17 +82,8 @@ pub const URLScheme = struct {
     /// `jump_wxa_json` 为 `jump_wxa` 对象的 JSON 字符串，例如：
     /// `{"path":"pages/index","query":"a=1"}`。
     /// 返回的 `std.json.Parsed(GenerateResponse)` 由调用方持有并负责 `deinit`。
+    /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次。
     pub fn generate(self: *Self, jump_wxa_json: []const u8) !std.json.Parsed(GenerateResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/generatescheme?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
         const body_json = try std.fmt.allocPrint(
             self.allocator,
             "{{\"jump_wxa\":{s}}}",
@@ -99,7 +91,25 @@ pub const URLScheme = struct {
         );
         defer self.allocator.free(body_json);
 
-        const resp = try self.postJSON(uri, body_json);
+        const Sender = struct {
+            scheme: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/generatescheme?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                return c.scheme.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "GenerateScheme", Sender{
+            .scheme = self,
+            .body = body_json,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(GenerateResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -114,21 +124,30 @@ pub const URLScheme = struct {
     /// 查询小程序 scheme 码（`wxa/queryscheme`，对照 Go `QuerySchemeWithRes`）。
     ///
     /// 返回的 `std.json.Parsed(QuerySchemeResponse)` 由调用方持有并负责 `deinit`。
+    /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次。
     pub fn queryScheme(self: *Self, req: QuerySchemeRequest) !std.json.Parsed(QuerySchemeResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/queryscheme?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
         const body = try encodeQuerySchemeBody(self.allocator, req);
         defer self.allocator.free(body);
 
-        const resp = try self.postJSON(uri, body);
+        const Sender = struct {
+            scheme: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/queryscheme?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                return c.scheme.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "QueryScheme", Sender{
+            .scheme = self,
+            .body = body,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(QuerySchemeResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -273,4 +292,39 @@ test "generate POST 请求并解析 openlink" {
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/generatescheme?access_token=token-abc", tt.uri);
     try std.testing.expectEqualStrings("{\"jump_wxa\":{\"path\":\"pages/index\"}}", tt.payload);
     try std.testing.expectEqualStrings("weixin://dl/business/?t=abc", parsed.value.openlink);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "queryScheme token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/wxa/queryscheme?access_token=";
+    try mt.addRoute(base ++ "token-abc", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+    });
+    try mt.addRoute(base ++ "token-new", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"scheme_info\":{\"appid\":\"wx-link\"},\"quota_info\":{\"remain_visit_quota\":4999}}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-link" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var u = URLScheme.init(&ctx, allocator);
+    u.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try u.queryScheme(.{ .scheme = "weixin://dl/business/?t=T_1" });
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("wx-link", parsed.value.scheme_info.appid);
+    try std.testing.expectEqual(@as(i64, 4999), parsed.value.quota_info.remain_visit_quota);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
 }

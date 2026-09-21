@@ -145,6 +145,20 @@ pub const WorkAccessToken = struct {
         return allocator.dupe(u8, parsed.value.access_token);
     }
 
+    /// 作废缓存的 access_token：删除缓存条目，使下一次 `getAccessToken` 必须回源。
+    ///
+    /// 与 `DefaultAccessToken.invalidate` 语义一致：本实现不额外持有 token 副本，
+    /// 删除 cache 里的条目即作废完成；键不存在不视为错误。
+    /// 用于 token 失效码（40001/40014/41001/42001）后的恢复链路，见 `util/retry.zig`。
+    pub fn invalidate(self: *Self, allocator: std.mem.Allocator) credential.CredentialError!void {
+        const key = try self.cacheKey(allocator);
+        defer allocator.free(key);
+
+        self.lock.lock();
+        defer self.lock.unlock();
+        try self.cache.delete(key);
+    }
+
     /// 包成抽象接口（用于 Context）。
     pub fn asHandle(self: *WorkAccessToken) credential.AccessTokenHandle {
         return .{
@@ -159,6 +173,12 @@ const access_token_vtable = credential.AccessTokenHandle.VTable{
         fn f(ctx: *anyopaque, alloc: std.mem.Allocator) anyerror![]u8 {
             const self: *WorkAccessToken = @ptrCast(@alignCast(ctx));
             return self.getAccessToken(alloc);
+        }
+    }.f,
+    .invalidate = struct {
+        fn f(ctx: *anyopaque, alloc: std.mem.Allocator) anyerror!void {
+            const self: *WorkAccessToken = @ptrCast(@alignCast(ctx));
+            return self.invalidate(alloc);
         }
     }.f,
 };
@@ -183,4 +203,87 @@ test "ResAccessToken 默认值" {
     const r = ResAccessToken{};
     try std.testing.expectEqualStrings("", r.access_token);
     try std.testing.expectEqual(@as(i64, 0), r.errcode);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// invalidate：缓存写入 → 作废 → 下次 getAccessToken 重新回源
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Stub fetcher 计数桩（同 `default_access_token.zig` 的做法：深拷贝 url 避免悬垂；
+/// 多次回源时会先释放上一份副本，避免桩自身泄漏）。
+const StubFetcherCtx = struct {
+    response: []const u8,
+    called_count: usize = 0,
+    last_url: []const u8 = "",
+};
+
+fn stubFetcher(ctx: *anyopaque, allocator: std.mem.Allocator, url: []const u8) credential.CredentialError![]u8 {
+    const self: *StubFetcherCtx = @ptrCast(@alignCast(ctx));
+    const url_dup = try allocator.dupe(u8, url);
+    if (self.last_url.len > 0) allocator.free(@constCast(self.last_url));
+    self.called_count += 1;
+    self.last_url = url_dup;
+    return allocator.dupe(u8, self.response);
+}
+
+fn makeMemoryCache(allocator: std.mem.Allocator) struct {
+    mem: *@import("../cache/mod.zig").Memory,
+    cache: Cache,
+} {
+    const Memory = @import("../cache/mod.zig").Memory;
+    const mem = Memory.create(allocator) catch @panic("Memory.create failed");
+    return .{ .mem = mem, .cache = mem.asCache() };
+}
+
+test "WorkAccessToken: invalidate 后缓存条目消失，下一次 getAccessToken 重新回源" {
+    const allocator = std.testing.allocator;
+    const ctx = makeMemoryCache(allocator);
+    defer {
+        ctx.mem.deinit();
+        allocator.destroy(ctx.mem);
+    }
+
+    var stub_ctx = StubFetcherCtx{
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"access_token\":\"work_tok_v1\",\"expires_in\":7200}",
+    };
+    defer if (stub_ctx.last_url.len > 0) allocator.free(@constCast(stub_ctx.last_url));
+
+    var token_handle = WorkAccessToken.initWithFetcher(
+        "ww-invalidate",
+        "sec",
+        "gowechat_work_",
+        ctx.cache,
+        stubFetcher,
+        @ptrCast(&stub_ctx),
+    );
+
+    const key = try token_handle.cacheKey(allocator);
+    defer allocator.free(key);
+
+    // 1) 首次回源并写缓存
+    const first = try token_handle.getAccessToken(allocator);
+    defer allocator.free(first);
+    try std.testing.expectEqual(@as(usize, 1), stub_ctx.called_count);
+    try std.testing.expect((try ctx.cache.get(key)) != null);
+
+    // 2) 缓存命中：不再回源
+    const cached = try token_handle.getAccessToken(allocator);
+    defer allocator.free(cached);
+    try std.testing.expectEqual(@as(usize, 1), stub_ctx.called_count);
+
+    // 3) 作废：缓存条目被删除，且可重复调用不报错
+    try token_handle.invalidate(allocator);
+    try std.testing.expect((try ctx.cache.get(key)) == null);
+    try token_handle.invalidate(allocator);
+
+    // 4) 再取必须重新回源
+    const refreshed = try token_handle.getAccessToken(allocator);
+    defer allocator.free(refreshed);
+    try std.testing.expectEqualStrings("work_tok_v1", refreshed);
+    try std.testing.expectEqual(@as(usize, 2), stub_ctx.called_count);
+
+    // 5) 抽象 handle 转发到同一实现（不是 InvalidateNotSupported）
+    const handle = token_handle.asHandle();
+    try handle.invalidateAccessToken(allocator);
+    try std.testing.expect((try ctx.cache.get(key)) == null);
 }

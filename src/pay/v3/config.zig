@@ -18,4 +18,8 @@ pub const Config = struct {
     private_key_pem: []const u8 = "",
     /// 支付通知回调地址
     notify_url: []const u8 = "",
+    /// 【微信支付公钥ID】或【微信支付平台证书序列号】，非空时随请求发送
+    /// `Wechatpay-Serial` 头。仅商家转账在 body 中传入加密的 `user_name` 时需要
+    /// （如 `PUB_KEY_ID_3000000001`）。
+    wechatpay_serial: []const u8 = "",
 };

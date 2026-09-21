@@ -9,6 +9,7 @@ const Context = @import("../context/mod.zig").Context;
 const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 pub const GetDomainInfoRequest = struct {
     action: []const u8 = "",
@@ -271,34 +272,30 @@ pub const Operation = struct {
 
     /// 查询实时日志。
     pub fn realTimeLogSearch(self: *Self, req: RealTimeLogSearchRequest) !std.json.Parsed(RealTimeLogSearchResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        // 只拼 access_token 之后的查询串，token 由 `util_retry.callApi` 注入。
+        var query: std.ArrayListUnmanaged(u8) = .empty;
+        defer query.deinit(self.allocator);
+        try query.print(self.allocator, "&date={s}&begintime={d}&endtime={d}", .{ req.date, req.begin_time, req.end_time });
+        if (req.start > 0) try query.print(self.allocator, "&start={d}", .{req.start});
+        if (req.limit > 0) try query.print(self.allocator, "&limit={d}", .{req.limit});
+        if (req.trace_id.len > 0) try query.print(self.allocator, "&traceId={s}", .{req.trace_id});
+        if (req.url.len > 0) try query.print(self.allocator, "&url={s}", .{req.url});
+        if (req.id.len > 0) try query.print(self.allocator, "&id={s}", .{req.id});
+        if (req.filter_msg.len > 0) try query.print(self.allocator, "&filterMsg={s}", .{req.filter_msg});
+        if (req.level > 0) try query.print(self.allocator, "&level={d}", .{req.level});
 
-        var uri: std.ArrayListUnmanaged(u8) = .empty;
-        defer uri.deinit(self.allocator);
-        try uri.print(self.allocator, "https://api.weixin.qq.com/wxaapi/userlog/userlog_search?access_token={s}&date={s}&begintime={d}&endtime={d}", .{ access_token, req.date, req.begin_time, req.end_time });
-        if (req.start > 0) try uri.print(self.allocator, "&start={d}", .{req.start});
-        if (req.limit > 0) try uri.print(self.allocator, "&limit={d}", .{req.limit});
-        if (req.trace_id.len > 0) try uri.print(self.allocator, "&traceId={s}", .{req.trace_id});
-        if (req.url.len > 0) try uri.print(self.allocator, "&url={s}", .{req.url});
-        if (req.id.len > 0) try uri.print(self.allocator, "&id={s}", .{req.id});
-        if (req.filter_msg.len > 0) try uri.print(self.allocator, "&filterMsg={s}", .{req.filter_msg});
-        if (req.level > 0) try uri.print(self.allocator, "&level={d}", .{req.level});
-
-        return self.getParsedUri(uri.items, RealTimeLogSearchResponse);
+        return self.getParsedQuery("wxaapi/userlog/userlog_search", query.items, RealTimeLogSearchResponse);
     }
 
     /// 获取用户反馈列表。
     pub fn getFeedbackList(self: *Self, req: GetFeedbackListRequest) !std.json.Parsed(GetFeedbackListResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        // 只拼 access_token 之后的查询串，token 由 `util_retry.callApi` 注入。
+        var query: std.ArrayListUnmanaged(u8) = .empty;
+        defer query.deinit(self.allocator);
+        try query.print(self.allocator, "&page={d}&num={d}", .{ req.page, req.num });
+        if (req.type > 0) try query.print(self.allocator, "&type={d}", .{req.type});
 
-        var uri: std.ArrayListUnmanaged(u8) = .empty;
-        defer uri.deinit(self.allocator);
-        try uri.print(self.allocator, "https://api.weixin.qq.com/wxaapi/feedback/list?access_token={s}&page={d}&num={d}", .{ access_token, req.page, req.num });
-        if (req.type > 0) try uri.print(self.allocator, "&type={d}", .{req.type});
-
-        return self.getParsedUri(uri.items, GetFeedbackListResponse);
+        return self.getParsedQuery("wxaapi/feedback/list", query.items, GetFeedbackListResponse);
     }
 
     /// 查询 js 错误详情。
@@ -321,26 +318,60 @@ pub const Operation = struct {
     }
 
     fn postParsed(self: *Self, endpoint: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
-        defer self.allocator.free(uri);
+        const Sender = struct {
+            op: *Self,
+            endpoint: []const u8,
+            body: []const u8,
 
-        const resp = try self.postJSON(uri, body);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/{s}?access_token={s}",
+                    .{ c.endpoint, token },
+                );
+                defer allocator.free(uri);
+                return c.op.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, endpoint, Sender{
+            .op = self,
+            .endpoint = endpoint,
+            .body = body,
+        });
         defer self.allocator.free(resp);
         return parseCommon(self.allocator, resp, T);
     }
 
     fn getParsed(self: *Self, endpoint: []const u8, comptime T: type) !std.json.Parsed(T) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
-        defer self.allocator.free(uri);
-        return self.getParsedUri(uri, T);
+        return self.getParsedQuery(endpoint, "", T);
     }
 
-    fn getParsedUri(self: *Self, uri: []const u8, comptime T: type) !std.json.Parsed(T) {
-        const resp = try self.httpGet(uri);
+    /// GET + 解析：`query` 为 `access_token` 之后的查询串（含前导 `&`，可为空）。
+    ///
+    /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次。
+    fn getParsedQuery(self: *Self, endpoint: []const u8, query: []const u8, comptime T: type) !std.json.Parsed(T) {
+        const Sender = struct {
+            op: *Self,
+            endpoint: []const u8,
+            query: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/{s}?access_token={s}{s}",
+                    .{ c.endpoint, token, c.query },
+                );
+                defer allocator.free(uri);
+                return c.op.httpGet(uri);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, endpoint, Sender{
+            .op = self,
+            .endpoint = endpoint,
+            .query = query,
+        });
         defer self.allocator.free(resp);
         return parseCommon(self.allocator, resp, T);
     }
@@ -545,4 +576,74 @@ test "getSceneList GET 访问来源并解析（回归：getParsed 泛型 T 参�
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxaapi/log/get_scene?access_token=token-abc", tt.uri);
     try std.testing.expectEqual(@as(usize, 1), parsed.value.scene.len);
     try std.testing.expectEqualStrings("扫码", parsed.value.scene[0].name);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "getSceneList token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/wxaapi/log/get_scene?access_token=";
+    try mt.addRoute(base ++ "token-abc", .{
+        .body = "{\"errcode\":40014,\"errmsg\":\"invalid access_token\"}",
+    });
+    try mt.addRoute(base ++ "token-new", .{
+        .body = "{\"scene\":[{\"name\":\"扫码\",\"value\":\"1001\"}]}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-test" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var o = Operation.init(&ctx, allocator);
+    o.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try o.getSceneList();
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("扫码", parsed.value.scene[0].name);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
+}
+
+test "realTimeLogSearch token 失效自愈后 URI 逐字保持原拼装顺序" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/wxaapi/userlog/userlog_search?access_token=";
+    try mt.addRoute(base ++ "token-abc&date=20240901&begintime=1&endtime=2&level=2", .{
+        .body = "{\"errcode\":41001,\"errmsg\":\"access_token missing\"}",
+    });
+    try mt.addRoute(base ++ "token-new&date=20240901&begintime=1&endtime=2&level=2", .{
+        .body = "{\"data\":{\"list\":[],\"total\":0}}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-test" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var o = Operation.init(&ctx, allocator);
+    o.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try o.realTimeLogSearch(.{
+        .date = "20240901",
+        .begin_time = 1,
+        .end_time = 2,
+        .level = 2,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/wxaapi/userlog/userlog_search?access_token=token-new&date=20240901&begintime=1&endtime=2&level=2",
+        mt.history.items[1],
+    );
 }

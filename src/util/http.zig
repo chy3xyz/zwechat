@@ -8,6 +8,31 @@
 //! `std.Io.Writer.Allocating` 收集到调用方提供的 allocator 上。
 //! `io` 实例固定使用 `std.Io.Threaded.global_single_threaded`，适合同步阻塞
 //! 场景；如果以后需要并发，可以把 `inner.io` 换成调用方注入的 `Io`。
+//!
+//! ## 下载体积上限
+//!
+//! 微信素材（尤其视频）动辄几十 MB，把整个 body 读进内存会让服务端被单个素材
+//! 拖爆。需要下载文件时请使用带 `max_bytes` 的入口：
+//! `getFollowRedirectLimited`（限额收内存）与 `getFollowRedirectToFile`
+//! （流式落盘，超限删除不完整文件）；`getFollowRedirect` 保持不限额的旧语义，
+//! 仅供既有调用点与测试使用。
+//!
+//! ## 默认客户端（线程局部单例）的 allocator 契约
+//!
+//! `getDefaultClient` 返回**当前线程**的默认 `HttpClient`，实例在使用该线程的
+//! 生命周期内一直持有连接池：
+//!
+//! - **生产代码应在启动期调用 `initDefaultClient(allocator)` 显式初始化**
+//!   （严格模式）。此后同线程任何用**不同** allocator 调用 `getDefaultClient`
+//!   都会 `@panic`，把"传错/传入已释放的 allocator"从静默的悬垂分配变成立刻
+//!   可见的崩溃。
+//! - 未显式初始化时按旧行为懒初始化，并**沿用首个调用传入的 allocator**
+//!   （后续传入的 allocator 被忽略）——这种宽容语义只为兼容历史调用点，
+//!   新代码请一律 `initDefaultClient`；需要显式校验时用
+//!   `defaultClientAllocatorMatches`。
+//! - `deinitDefaultClient()` 必须在**线程退出前**调用，释放连接池等资源；
+//!   实例不会随线程退出自动回收，之后再次 `getDefaultClient` 会以新 allocator
+//!   重新初始化。
 
 const std = @import("std");
 const httpz = @import("httpz");
@@ -41,33 +66,98 @@ pub fn setUriModifier(m: ?UriModifier) void {
     uri_modifier = m;
 }
 
-/// 线程局部的默认 `HttpClient`。第一次调用 `getDefaultClient` 时初始化。
-threadlocal var default_client: ?HttpClient = null;
+/// 线程局部默认客户端的初始化记录。
+const DefaultClientState = struct {
+    client: HttpClient,
+    /// 初始化时记录的 allocator，`getDefaultClient` 用它做一致性校验。
+    allocator: std.mem.Allocator,
+    /// 是否由 `initDefaultClient` 在启动期显式初始化。严格模式下，任何
+    /// allocator 不一致的 `getDefaultClient` 都会 `@panic`（fail-closed）。
+    strict: bool,
+};
+
+/// 线程局部的默认 `HttpClient`。第一次调用 `initDefaultClient` / `getDefaultClient`
+/// 时初始化。
+threadlocal var default_client: ?DefaultClientState = null;
+
+/// 判断两个 `Allocator` 是否为同一个（`std.mem.Allocator` 无 `==` 运算符）。
+fn sameAllocator(a: std.mem.Allocator, b: std.mem.Allocator) bool {
+    return a.ptr == b.ptr and a.vtable == b.vtable;
+}
+
+/// 启动期显式初始化**当前线程**的默认 `HttpClient`，并记录其 allocator。
+///
+/// - 首次调用：用 `allocator` 创建实例，并进入**严格模式**；
+/// - 重复调用且 allocator 一致：幂等（不改动既有实例，仅确保严格模式）；
+/// - 重复调用但 allocator 不一致：返回 `error.AllocatorMismatch`，不改动既有实例。
+///
+/// 严格模式下，任何用不同 allocator 调用 `getDefaultClient` 的行为都会 `@panic`，
+/// 因为实例的分配器在初始化时即固定：拿已释放的 arena 之类的 allocator 调用，
+/// 后果是静默的悬垂分配，因此这里选择 fail-closed（崩溃立即可见），而不是返回
+/// 一个错误（`getDefaultClient` 的返回类型是 `*HttpClient`，全仓 189 处调用点
+/// 依赖这一签名，改成错误联合会破坏兼容）。
+///
+/// 注意：本函数只影响**当前线程**。多线程程序需要每个线程各自初始化，
+/// 或在使用该线程前调用一次。
+pub fn initDefaultClient(allocator: std.mem.Allocator) !void {
+    if (default_client) |*state| {
+        if (!sameAllocator(state.allocator, allocator)) return error.AllocatorMismatch;
+        state.strict = true;
+        return;
+    }
+    default_client = .{
+        .client = HttpClient.init(allocator),
+        .allocator = allocator,
+        .strict = true,
+    };
+}
 
 /// 返回线程局部的默认 `HttpClient`。同一线程上重复调用得到的是同一份实例；
 /// 不同线程各自一份，互不影响。
 ///
-/// **allocator 语义**：实例使用的 allocator 由**首次**调用本函数时传入的参数决定；
-/// 同线程后续调用传入的其他 allocator 会被忽略（分配仍走首次的 allocator）。
-/// 请保证同一线程内使用一致的 allocator，或在线程退出前调用 `deinitDefaultClient()`
-/// 释放实例，以便下次以新 allocator 重新初始化。
+/// **allocator 语义**：实例使用的 allocator 由**首次**初始化时传入的参数决定，
+/// 之后不可更换：
+/// - 若已通过 `initDefaultClient` 显式初始化（严格模式），后续传入不一致的
+///   allocator 会 `@panic`——"传错分配器"从静默变成立刻可见；
+/// - 若只是懒初始化（历史写法），后续传入的其他 allocator 仍被忽略以保持兼容，
+///   但可用 `defaultClientAllocatorMatches` 显式校验，或先调用
+///   `deinitDefaultClient()` 再以新 allocator 重新初始化。
 ///
 /// 注意：返回的指针在线程退出后失效；线程结束前应调用 `deinitDefaultClient`
 /// 释放内部连接池等资源。
 pub fn getDefaultClient(allocator: std.mem.Allocator) *HttpClient {
-    if (default_client == null) {
-        default_client = HttpClient.init(allocator);
+    if (default_client) |*state| {
+        if (!sameAllocator(state.allocator, allocator) and state.strict) {
+            @panic("util.http.getDefaultClient: allocator 与 initDefaultClient 记录的不一致。" ++
+                "默认客户端是线程局部单例，allocator 在首次初始化时固定，之后不可更换；" ++
+                "请始终用同一个 allocator 调用，或先 deinitDefaultClient() 再重新初始化。");
+        }
+        return &state.client;
     }
-    return &default_client.?;
+    default_client = .{
+        .client = HttpClient.init(allocator),
+        .allocator = allocator,
+        .strict = false,
+    };
+    return &default_client.?.client;
+}
+
+/// 判断 `allocator` 是否与当前线程默认客户端初始化时记录的 allocator 一致。
+///
+/// 未初始化时返回 `true`（任何 allocator 都可用于首次初始化）。用于懒初始化
+/// 场景下显式校验，避免在被释放的 allocator 上分配。
+pub fn defaultClientAllocatorMatches(allocator: std.mem.Allocator) bool {
+    const state = default_client orelse return true;
+    return sameAllocator(state.allocator, allocator);
 }
 
 /// 释放线程局部的默认 `HttpClient`（若已初始化），并将该线程的实例置空。
 ///
 /// 应在线程退出前调用，避免 `std.http.Client` 的连接池等资源滞留到进程结束；
-/// 之后若再次调用 `getDefaultClient` 会重新初始化一份新实例。
+/// 之后若再次调用 `getDefaultClient` 会重新初始化一份新实例（可换 allocator）。
 pub fn deinitDefaultClient() void {
-    if (default_client) |*client| {
-        client.deinit();
+    if (default_client) |*state| {
+        state.client.deinit();
         default_client = null;
     }
 }
@@ -148,35 +238,78 @@ pub const HttpClient = struct {
     /// - 注入了 transport（mock）时不做 redirect 处理，直接返回 transport
     ///   的响应（mock 语义与 `get` 保持一致）。
     ///
+    /// **不限体积**：素材动辄几十 MB，生产代码应改用带 `max_bytes` 的
+    /// `getFollowRedirectLimited`（限额收内存）或 `getFollowRedirectToFile`
+    /// （流式落盘）。本方法保留不限额的旧语义，仅为兼容既有调用点与测试。
+    ///
     /// 返回的 body 由调用方负责 `free`。
     pub fn getFollowRedirect(self: *HttpClient, uri: []const u8) ![]u8 {
         if (self.transport != null) return self.get(uri);
 
-        var current: []u8 = try self.allocator.dupe(u8, uri);
-        defer self.allocator.free(current);
+        var sink: MemorySink = .{ .allocator = self.allocator };
+        defer sink.deinit();
+        _ = try self.followRedirectInto(uri, &sink);
+        return sink.take();
+    }
 
-        var hops: u8 = 0;
-        while (true) {
-            const result = try self.fetchGetManual(current);
-            defer self.allocator.free(result.body);
-            defer if (result.location) |loc| {
-                self.allocator.free(loc);
-            };
-
-            if (!isRedirectStatus(result.status)) {
-                if (result.status != .ok) return error.HttpStatusNotOk;
-                return self.allocator.dupe(u8, result.body);
+    /// 同 `getFollowRedirect`，但响应体超过 `max_bytes` 立即失败。
+    ///
+    /// 实现取舍：
+    /// - 未注入 transport 时是**真流式**：先用 `Content-Length` 预判（服务端声明
+    ///   的体积就超限时连 body 都不读），随后逐块读入并累加，一旦超限立即中止并
+    ///   返回 `error.ResponseTooLarge`——永远不会把超限素材整个读进内存；
+    /// - 注入 transport（mock）时底层没有流式能力，只能读完后判定（超限同样返回
+    ///   `error.ResponseTooLarge`，但内存已被占用），仅用于测试注入。
+    ///
+    /// 返回的 body 由调用方负责 `free`。
+    pub fn getFollowRedirectLimited(self: *HttpClient, uri: []const u8, max_bytes: usize) ![]u8 {
+        if (self.transport != null) {
+            const body = try self.get(uri);
+            if (body.len > max_bytes) {
+                self.allocator.free(body);
+                return error.ResponseTooLarge;
             }
-            // redirect 状态码：必须有 Location 头。
-            const location = result.location orelse return error.HttpStatusNotOk;
-            hops += 1;
-            if (hops > max_redirect_hops) return error.TooManyRedirects;
-
-            const next = try resolveRedirectUri(self.allocator, current, location);
-            defer self.allocator.free(next);
-            self.allocator.free(current);
-            current = try self.allocator.dupe(u8, next);
+            return body;
         }
+
+        var sink: MemorySink = .{ .allocator = self.allocator, .max_bytes = max_bytes };
+        defer sink.deinit();
+        _ = try self.followRedirectInto(uri, &sink);
+        return sink.take();
+    }
+
+    /// 同 `getFollowRedirect`，但把响应体**流式写入** `file_path`，返回写入字节数。
+    ///
+    /// - 边收边写，响应体不驻留内存（大素材安全）；
+    /// - 超过 `max_bytes` 时中止并**删除不完整文件**，返回 `error.ResponseTooLarge`；
+    ///   跳数超限、非 200 等其它错误同样不会留下半截文件；
+    /// - `file_path` 已存在时会被截断覆盖；
+    /// - 注入 transport（mock）时先在内存收完再落盘（mock 无流式能力），超限时
+    ///   返回 `error.ResponseTooLarge` 且不创建文件。
+    pub fn getFollowRedirectToFile(
+        self: *HttpClient,
+        uri: []const u8,
+        file_path: []const u8,
+        max_bytes: usize,
+    ) !u64 {
+        const io = std.Io.Threaded.global_single_threaded.io();
+
+        if (self.transport != null) {
+            const body = try self.get(uri);
+            defer self.allocator.free(body);
+            if (body.len > max_bytes) return error.ResponseTooLarge;
+            return writeFileAll(io, file_path, body);
+        }
+
+        const file = try std.Io.Dir.cwd().createFile(io, file_path, .{});
+        var sink: FileSink = .{ .io = io, .file = file, .max_bytes = max_bytes };
+        const outcome = self.followRedirectInto(uri, &sink);
+        // 先关闭句柄再删除：Windows 不允许删除仍处于打开状态的文件。
+        file.close(io);
+        return outcome catch |err| {
+            std.Io.Dir.cwd().deleteFile(io, file_path) catch {};
+            return err;
+        };
     }
 
     /// POST 请求（对照 `HTTPPost`）。`content_type` 为 `null` 时不设置
@@ -351,16 +484,55 @@ pub const HttpClient = struct {
         return list.toOwnedSlice(self.allocator);
     }
 
-    /// 单次 GET 的原始结果：状态码 + body + `Location` 头（redirect 手动跟随用）。
+    /// 手动跟随 redirect：最后一次 GET 的结果 + 交给 sink 的字节数。
+    ///
+    /// 注意：redirect 中间响应的 body 不入 sink（读完即丢），因此 `written` 始终
+    /// 只统计最终 200 响应的 body。
     const ManualGetResult = struct {
         status: std.http.Status,
-        body: []u8,
         location: ?[]u8,
+        written: u64,
     };
 
-    /// 手动模式 GET：`redirect_behavior = .unhandled`，把 301/302/303/307/308
-    /// 原样返回给调用方解析（`fetch` 默认会自动跟随且无法校验 Location）。
-    fn fetchGetManual(self: *HttpClient, uri: []const u8) !ManualGetResult {
+    /// 手动跟随 redirect 并把最终响应体**流式**交给 `sink`（见文件末尾的 sink 契约）。
+    ///
+    /// 返回写入 sink 的字节数。跳转语义与 `getFollowRedirect` 完全一致：仅跟随
+    /// 301/302/303/307/308 且最多 `max_redirect_hops` 跳，非 200 返回
+    /// `error.HttpStatusNotOk`，redirect 响应缺 `Location` 头同样返回该错误。
+    fn followRedirectInto(self: *HttpClient, uri: []const u8, sink: anytype) !u64 {
+        var current: []u8 = try self.allocator.dupe(u8, uri);
+        defer self.allocator.free(current);
+
+        var hops: u8 = 0;
+        while (true) {
+            const result = try self.fetchGetManualInto(current, sink);
+            defer if (result.location) |loc| {
+                self.allocator.free(loc);
+            };
+
+            if (!isRedirectStatus(result.status)) {
+                if (result.status != .ok) return error.HttpStatusNotOk;
+                return result.written;
+            }
+            // redirect 状态码：必须有 Location 头。
+            const location = result.location orelse return error.HttpStatusNotOk;
+            hops += 1;
+            if (hops > max_redirect_hops) return error.TooManyRedirects;
+
+            const next = try resolveRedirectUri(self.allocator, current, location);
+            defer self.allocator.free(next);
+            self.allocator.free(current);
+            current = try self.allocator.dupe(u8, next);
+        }
+    }
+
+    /// 单次 GET：`redirect_behavior = .unhandled`，把 301/302/303/307/308 原样返回
+    /// 给调用方解析（`fetch` 默认会自动跟随且无法校验 Location）。
+    ///
+    /// body **逐块**流给 `sink`：`sink.accepts(status)` 为 false 时读完丢弃；
+    /// 为 true 时先做 `Content-Length` 预判，再用 16 KiB 缓冲块边读边交，
+    /// sink 可在任意时刻以 `error.ResponseTooLarge` 中止（不会读完整个 body）。
+    fn fetchGetManualInto(self: *HttpClient, uri: []const u8, sink: anytype) !ManualGetResult {
         const effective_uri = applyUriModifier(uri);
         const parsed = std.Uri.parse(effective_uri) catch return error.InvalidUri;
 
@@ -380,24 +552,30 @@ pub const HttpClient = struct {
             null;
         errdefer if (location) |loc| self.allocator.free(loc);
 
-        var body_writer: std.Io.Writer.Allocating = .init(self.allocator);
-        defer body_writer.deinit();
+        const status = response.head.status;
+        const want_body = sink.accepts(status);
+        if (want_body) try sink.hintLength(response.head.content_length);
 
         var transfer_buffer: [64]u8 = undefined;
         var decompress: std.http.Decompress = undefined;
         const reader = response.readerDecompressing(&transfer_buffer, &decompress, &.{});
-        _ = reader.streamRemaining(&body_writer.writer) catch |err| switch (err) {
-            error.ReadFailed => return response.bodyErr().?,
-            else => |e| return e,
-        };
 
-        var list = body_writer.toArrayList();
-        defer list.deinit(self.allocator);
-        const body = try list.toOwnedSlice(self.allocator);
+        var written: u64 = 0;
+        var chunk_buf: [16 * 1024]u8 = undefined;
+        while (true) {
+            const n = reader.readSliceShort(&chunk_buf) catch |err| switch (err) {
+                error.ReadFailed => return response.bodyErr().?,
+            };
+            if (n == 0) break;
+            if (!want_body) continue;
+            try sink.write(chunk_buf[0..n]);
+            written += n;
+        }
+
         return .{
-            .status = response.head.status,
-            .body = body,
+            .status = status,
             .location = location,
+            .written = written,
         };
     }
 };
@@ -481,6 +659,91 @@ fn isRedirectStatus(status: std.http.Status) bool {
         => true,
         else => false,
     };
+}
+
+/// 响应体落点契约（`followRedirectInto` 的 `sink` 参数，编译期鸭子类型）：
+/// - `accepts(status) bool`：该状态码的 body 是否需要；false 时 body 仍被读完但丢弃；
+/// - `hintLength(?u64) !void`：拿到 `Content-Length` 时的预判机会，可提前失败；
+/// - `write(chunk) !void`：接收一段 body 字节，超限时返回 `error.ResponseTooLarge`。
+/// 内存落点：把 body 收进 `ArrayList(u8)`；`max_bytes` 非空时边读边累加检查。
+const MemorySink = struct {
+    allocator: std.mem.Allocator,
+    list: std.ArrayList(u8) = .empty,
+    /// `null` 表示不限量（`getFollowRedirect` 的既有语义）。
+    max_bytes: ?usize = null,
+
+    /// 只关心 200 的 body：非 200 响应的 body 读完即丢（与旧实现一致）。
+    fn accepts(self: *MemorySink, status: std.http.Status) bool {
+        _ = self;
+        return status == .ok;
+    }
+
+    fn hintLength(self: *MemorySink, content_length: ?u64) !void {
+        const max = self.max_bytes orelse return;
+        if (content_length) |len| {
+            if (len > @as(u64, max)) return error.ResponseTooLarge;
+        }
+    }
+
+    fn write(self: *MemorySink, chunk: []const u8) !void {
+        if (self.max_bytes) |max| {
+            if (self.list.items.len + chunk.len > max) return error.ResponseTooLarge;
+        }
+        try self.list.appendSlice(self.allocator, chunk);
+    }
+
+    fn deinit(self: *MemorySink) void {
+        self.list.deinit(self.allocator);
+    }
+
+    /// 交出所有权；调用方负责 `free`。
+    fn take(self: *MemorySink) ![]u8 {
+        return self.list.toOwnedSlice(self.allocator);
+    }
+};
+
+/// 文件落点：把 body 逐块流式写入已打开的 `file`，返回写入字节数。
+///
+/// 定位写（`writePositionalAll`）而非追加，便于调用方在 `deinitDefaultClient`
+/// 之类的极端场景下复用同一句柄语义；文件由调用方创建 / 关闭 / 清理。
+const FileSink = struct {
+    io: std.Io,
+    file: std.Io.File,
+    max_bytes: usize,
+    written: u64 = 0,
+
+    fn accepts(self: *FileSink, status: std.http.Status) bool {
+        _ = self;
+        return status == .ok;
+    }
+
+    fn hintLength(self: *FileSink, content_length: ?u64) !void {
+        if (content_length) |len| {
+            if (len > @as(u64, self.max_bytes)) return error.ResponseTooLarge;
+        }
+    }
+
+    fn write(self: *FileSink, chunk: []const u8) !void {
+        const total = self.written + chunk.len;
+        if (total > @as(u64, self.max_bytes)) return error.ResponseTooLarge;
+        try self.file.writePositionalAll(self.io, chunk, self.written);
+        self.written = total;
+    }
+};
+
+/// 一次性把 `bytes` 写入（创建或截断）`file_path`；写失败时删除不完整文件，
+/// 返回写入字节数。
+fn writeFileAll(io: std.Io, file_path: []const u8, bytes: []const u8) !u64 {
+    const file = try std.Io.Dir.cwd().createFile(io, file_path, .{});
+    var ok = false;
+    defer if (!ok) std.Io.Dir.cwd().deleteFile(io, file_path) catch {};
+    file.writePositionalAll(io, bytes, 0) catch |err| {
+        file.close(io);
+        return err;
+    };
+    file.close(io);
+    ok = true;
+    return bytes.len;
 }
 
 /// 解析 redirect 的 `Location` 头为下一步要请求的绝对 URL。
@@ -934,6 +1197,304 @@ test "getFollowRedirect 跳数超限返回 TooManyRedirects" {
     // 客户端提前失败后，服务器线程仍阻塞在 accept：补一个空连接让其退出再 join。
     unblockAccept(sio, bound.port);
     try std.testing.expectEqual(@as(u32, 3), hits.load(.seq_cst));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 默认客户端的 allocator 契约
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "initDefaultClient 幂等，allocator 不一致返回 AllocatorMismatch" {
+    const a = std.heap.page_allocator;
+    const b = std.testing.allocator;
+    defer deinitDefaultClient();
+    // 测试共享同一线程的 threadlocal：先清空，保证从"未初始化"开始。
+    deinitDefaultClient();
+
+    try initDefaultClient(a);
+    const first = getDefaultClient(a);
+    try std.testing.expect(first == getDefaultClient(a));
+    try std.testing.expect(defaultClientAllocatorMatches(a));
+    try std.testing.expect(!defaultClientAllocatorMatches(b));
+
+    // 重复 init 同一 allocator：幂等。
+    try initDefaultClient(a);
+
+    // 已初始化后换 allocator：显式失败，既有实例不受影响。
+    try std.testing.expectError(error.AllocatorMismatch, initDefaultClient(b));
+    try std.testing.expect(first == getDefaultClient(a));
+    try std.testing.expect(!defaultClientAllocatorMatches(b));
+
+    // 释放后可换 allocator 重新初始化（线程退出前的正常更替路径）。
+    deinitDefaultClient();
+    try initDefaultClient(b);
+    try std.testing.expect(defaultClientAllocatorMatches(b));
+}
+
+test "getDefaultClient 懒初始化沿用首个 allocator，可用校验函数发现不一致" {
+    const a = std.heap.page_allocator;
+    const b = std.testing.allocator;
+    defer deinitDefaultClient();
+    deinitDefaultClient();
+
+    const first = getDefaultClient(a);
+    // 历史宽容语义：懒初始化（未经 initDefaultClient）后传别的 allocator 不 panic，
+    // 仍返回同一实例（分配继续走首个 allocator）。
+    const second = getDefaultClient(b);
+    try std.testing.expect(first == second);
+    // 但通过校验函数可以立刻发现"传错 allocator"。
+    try std.testing.expect(defaultClientAllocatorMatches(a));
+    try std.testing.expect(!defaultClientAllocatorMatches(b));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 限额下载
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 32 字节 payload：chunked 响应（无 Content-Length）用，强制走"边读边累加"路径。
+const chunked_payload_32 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+comptime {
+    if (chunked_payload_32.len != 32) @compileError("chunked 响应的分片长度声明必须与 payload 一致");
+}
+
+test "getFollowRedirectLimited 限额内跟随 302 正常返回" {
+    const allocator = std.testing.allocator;
+    var server_threaded: std.Io.Threaded = .init_single_threaded;
+    const sio = server_threaded.io();
+    const bound = try listenLocal(sio);
+    var server = bound.server;
+    defer server.deinit(sio);
+
+    var hits = std.atomic.Value(u32).init(0);
+    var capture: [512]u8 = undefined;
+    var capture_len: usize = 0;
+
+    var resp_first_buf: [256]u8 = undefined;
+    const resp_first = try std.fmt.bufPrint(
+        &resp_first_buf,
+        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{d}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        .{bound.port},
+    );
+    const responses = [_][]const u8{
+        resp_first,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 16\r\nConnection: close\r\n\r\nfake-media-bytes",
+    };
+    const state = FakeServerState{
+        .io = sio,
+        .server = &server,
+        .responses = &responses,
+        .hits = &hits,
+        .capture = &capture,
+        .capture_len = &capture_len,
+    };
+    const t = try std.Thread.spawn(.{}, FakeServerState.run, .{&state});
+    defer t.join();
+
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+
+    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/media", .{bound.port});
+    defer allocator.free(uri);
+
+    const body = try client.getFollowRedirectLimited(uri, 1024);
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("fake-media-bytes", body);
+    try std.testing.expectEqual(@as(u32, 2), hits.load(.seq_cst));
+}
+
+test "getFollowRedirectLimited 流式累加超限返回 ResponseTooLarge" {
+    const allocator = std.testing.allocator;
+    var server_threaded: std.Io.Threaded = .init_single_threaded;
+    const sio = server_threaded.io();
+    const bound = try listenLocal(sio);
+    var server = bound.server;
+    defer server.deinit(sio);
+
+    var hits = std.atomic.Value(u32).init(0);
+    var capture: [512]u8 = undefined;
+    var capture_len: usize = 0;
+
+    var resp_first_buf: [256]u8 = undefined;
+    const resp_first = try std.fmt.bufPrint(
+        &resp_first_buf,
+        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{d}/big\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        .{bound.port},
+    );
+    // chunked（无 Content-Length）→ 只能靠边读边累加发现超限。
+    const responses = [_][]const u8{
+        resp_first,
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" ++
+            "20\r\n" ++ chunked_payload_32 ++ "\r\n0\r\n\r\n",
+    };
+    const state = FakeServerState{
+        .io = sio,
+        .server = &server,
+        .responses = &responses,
+        .hits = &hits,
+        .capture = &capture,
+        .capture_len = &capture_len,
+    };
+    const t = try std.Thread.spawn(.{}, FakeServerState.run, .{&state});
+    defer t.join();
+
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+
+    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/media", .{bound.port});
+    defer allocator.free(uri);
+
+    try std.testing.expectError(error.ResponseTooLarge, client.getFollowRedirectLimited(uri, 8));
+    unblockAccept(sio, bound.port);
+    try std.testing.expectEqual(@as(u32, 2), hits.load(.seq_cst));
+}
+
+test "getFollowRedirectLimited 用 Content-Length 预判提前失败（不读 body）" {
+    const allocator = std.testing.allocator;
+    var server_threaded: std.Io.Threaded = .init_single_threaded;
+    const sio = server_threaded.io();
+    const bound = try listenLocal(sio);
+    var server = bound.server;
+    defer server.deinit(sio);
+
+    var hits = std.atomic.Value(u32).init(0);
+    var capture: [512]u8 = undefined;
+    var capture_len: usize = 0;
+
+    var resp_first_buf: [256]u8 = undefined;
+    const resp_first = try std.fmt.bufPrint(
+        &resp_first_buf,
+        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{d}/huge\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        .{bound.port},
+    );
+    // 声明 999999 字节却只发 8 字节：若没做预判，会先撞上 body 读取错误
+    // （Content-Length 不符），这里必须直接得到 ResponseTooLarge。
+    const responses = [_][]const u8{
+        resp_first,
+        "HTTP/1.1 200 OK\r\nContent-Length: 999999\r\nConnection: close\r\n\r\n12345678",
+    };
+    const state = FakeServerState{
+        .io = sio,
+        .server = &server,
+        .responses = &responses,
+        .hits = &hits,
+        .capture = &capture,
+        .capture_len = &capture_len,
+    };
+    const t = try std.Thread.spawn(.{}, FakeServerState.run, .{&state});
+    defer t.join();
+
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+
+    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/media", .{bound.port});
+    defer allocator.free(uri);
+
+    try std.testing.expectError(error.ResponseTooLarge, client.getFollowRedirectLimited(uri, 1024));
+    unblockAccept(sio, bound.port);
+}
+
+test "getFollowRedirectToFile 流式落盘并返回写入字节数" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const file_path = "zwechat_http_followredirect_tofile_test.bin";
+    defer std.Io.Dir.cwd().deleteFile(io, file_path) catch {};
+
+    var server_threaded: std.Io.Threaded = .init_single_threaded;
+    const sio = server_threaded.io();
+    const bound = try listenLocal(sio);
+    var server = bound.server;
+    defer server.deinit(sio);
+
+    var hits = std.atomic.Value(u32).init(0);
+    var capture: [512]u8 = undefined;
+    var capture_len: usize = 0;
+
+    var resp_first_buf: [256]u8 = undefined;
+    const resp_first = try std.fmt.bufPrint(
+        &resp_first_buf,
+        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{d}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        .{bound.port},
+    );
+    const responses = [_][]const u8{
+        resp_first,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 16\r\nConnection: close\r\n\r\nfake-media-bytes",
+    };
+    const state = FakeServerState{
+        .io = sio,
+        .server = &server,
+        .responses = &responses,
+        .hits = &hits,
+        .capture = &capture,
+        .capture_len = &capture_len,
+    };
+    const t = try std.Thread.spawn(.{}, FakeServerState.run, .{&state});
+    defer t.join();
+
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+
+    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/media", .{bound.port});
+    defer allocator.free(uri);
+
+    const written = try client.getFollowRedirectToFile(uri, file_path, 1024);
+    try std.testing.expectEqual(@as(u64, 16), written);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, .limited(64));
+    defer allocator.free(got);
+    try std.testing.expectEqualStrings("fake-media-bytes", got);
+}
+
+test "getFollowRedirectToFile 超限删除不完整文件" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const file_path = "zwechat_http_followredirect_tofile_over_test.bin";
+    defer std.Io.Dir.cwd().deleteFile(io, file_path) catch {};
+
+    var server_threaded: std.Io.Threaded = .init_single_threaded;
+    const sio = server_threaded.io();
+    const bound = try listenLocal(sio);
+    var server = bound.server;
+    defer server.deinit(sio);
+
+    var hits = std.atomic.Value(u32).init(0);
+    var capture: [512]u8 = undefined;
+    var capture_len: usize = 0;
+
+    var resp_first_buf: [256]u8 = undefined;
+    const resp_first = try std.fmt.bufPrint(
+        &resp_first_buf,
+        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{d}/big\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        .{bound.port},
+    );
+    // chunked：让"边写边累加"的检查触发（而非 Content-Length 预判）。
+    const responses = [_][]const u8{
+        resp_first,
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" ++
+            "20\r\n" ++ chunked_payload_32 ++ "\r\n0\r\n\r\n",
+    };
+    const state = FakeServerState{
+        .io = sio,
+        .server = &server,
+        .responses = &responses,
+        .hits = &hits,
+        .capture = &capture,
+        .capture_len = &capture_len,
+    };
+    const t = try std.Thread.spawn(.{}, FakeServerState.run, .{&state});
+    defer t.join();
+
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+
+    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/media", .{bound.port});
+    defer allocator.free(uri);
+
+    try std.testing.expectError(
+        error.ResponseTooLarge,
+        client.getFollowRedirectToFile(uri, file_path, 8),
+    );
+    // 超限时文件已创建（本轮写了部分字节），必须被清理掉。
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, file_path, .{}));
+    unblockAccept(sio, bound.port);
 }
 
 test "resolveRedirectUri 绝对/相对/非法 Location 语义" {

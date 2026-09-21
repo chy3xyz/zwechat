@@ -10,6 +10,7 @@ const std = @import("std");
 const Context = @import("../context.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 const util_xml = @import("../../util/xml.zig");
 
 /// 消息类型（与 Go `MsgType` 一一对应）。
@@ -517,20 +518,14 @@ pub const Message = struct {
 
     /// 发送模板消息。
     pub fn sendTemplate(self: *Self, msg: TemplateMessage) !i64 {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try serializeTemplate(self.allocator, msg);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ templateSendURL, access_token },
-        );
-        defer self.allocator.free(uri);
-
-        const body = try serializeTemplate(self.allocator, msg);
-        defer self.allocator.free(body);
-
-        const resp = try self.post(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "SendTemplate", TokenReq{
+            .msg = self,
+            .url = templateSendURL,
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(struct {
@@ -542,7 +537,7 @@ pub const Message = struct {
         };
         defer parsed.deinit();
 
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
+        // errcode 检查已由 util_retry.callApi 完成（失败即抛 ApiError），此处不再重复。
         return parsed.value.msgid;
     }
 
@@ -558,51 +553,29 @@ pub const Message = struct {
     /// 发送客服消息（对应 Go `Manager.Send`，text/image/voice/video/music/news/mpnews/wxcard/msgmenu/miniprogrampage/mpnewsarticle 全类型通用）。
     /// 响应 errcode 非 0 时返回 `WechatError.ApiError`。
     pub fn sendCustomer(self: *Self, msg: CustomerMessage) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try serializeCustomer(self.allocator, msg);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ customSendURL, access_token },
-        );
-        defer self.allocator.free(uri);
-
-        const body = try serializeCustomer(self.allocator, msg);
-        defer self.allocator.free(body);
-
-        const resp = try self.post(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "SendCustomer", TokenReq{
+            .msg = self,
+            .url = customSendURL,
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "SendCustomer")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
     }
 
     /// 下发客服输入状态给用户（对应 Go `Manager.SendTypingStatus`）。
     /// `command` 为 `.typing`（正在输入）或 `.cancel_typing`（取消输入）。
     pub fn sendTypingStatus(self: *Self, openid: []const u8, command: TypingStatus) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try serializeTypingStatus(self.allocator, openid, command);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ customerTypingURL, access_token },
-        );
-        defer self.allocator.free(uri);
-
-        const body = try serializeTypingStatus(self.allocator, openid, command);
-        defer self.allocator.free(body);
-
-        const resp = try self.post(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "SendTypingStatus", TokenReq{
+            .msg = self,
+            .url = customerTypingURL,
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "SendTypingStatus")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
     }
 
     fn serializeTemplate(allocator: std.mem.Allocator, msg: TemplateMessage) ![]u8 {
@@ -782,6 +755,20 @@ fn serializeTypingStatus(allocator: std.mem.Allocator, openid: []const u8, comma
 pub const templateSendURL = "https://api.weixin.qq.com/cgi-bin/message/template/send";
 pub const customSendURL = "https://api.weixin.qq.com/cgi-bin/message/custom/send";
 pub const customerTypingURL = "https://api.weixin.qq.com/cgi-bin/message/custom/typing";
+
+/// 单次带 token 调用的请求构造器：交给 `util/retry.callApi` 复用模块自己的
+/// transport 注入逻辑（本站点全部为 POST JSON）。`send` 必须 `pub`（跨文件调用）。
+const TokenReq = struct {
+    msg: *Message,
+    url: []const u8,
+    payload: []const u8,
+
+    pub fn send(self: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+        const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}", .{ self.url, token });
+        defer allocator.free(uri);
+        return self.msg.post(uri, self.payload);
+    }
+};
 
 test "MsgType 枚举值" {
     try std.testing.expectEqualStrings("text", @tagName(MsgType.text));
@@ -1249,4 +1236,162 @@ test "Reply.format miniprogrampage produces nested XML" {
     try std.testing.expect(std.mem.indexOf(u8, xml, "<PagePath><![CDATA[pages/index]]></PagePath>") != null);
     try std.testing.expect(std.mem.indexOf(u8, xml, "<ThumbMediaId><![CDATA[thumb_123]]></ThumbMediaId>") != null);
     try std.testing.expect(std.mem.indexOf(u8, xml, "</MiniprogramPage>") != null);
+}
+
+// —— token 失效自愈 / 非 token 错误不重试 ——
+
+/// 可作废的假凭据：作废前发 `token-abc`，作废后发 `token-new`（模拟微信换发新 token）。
+const HealToken = struct {
+    cached: []const u8 = "token-abc",
+    invalidates: usize = 0,
+
+    fn getToken(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *HealToken = @ptrCast(@alignCast(ptr));
+        return allocator.dupe(u8, self.cached);
+    }
+
+    fn invalidate(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const self: *HealToken = @ptrCast(@alignCast(ptr));
+        self.invalidates += 1;
+        self.cached = "token-new";
+    }
+
+    const vtable = credential.AccessTokenHandle.VTable{
+        .getAccessToken = getToken,
+        .invalidate = invalidate,
+    };
+};
+
+/// 按调用次序返回响应、并记录每次请求 URI 的 transport。
+const SeqResp = struct {
+    responses: []const []const u8,
+    calls: usize = 0,
+    uris: [4][160]u8 = @splat(@splat(0)),
+    uri_lens: [4]usize = @splat(0),
+
+    fn dispatch(ctx: *anyopaque, allocator: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = method;
+        _ = payload;
+        _ = content_type;
+        const self: *SeqResp = @ptrCast(@alignCast(ctx));
+        if (self.calls < self.uris.len and uri.len <= self.uris[0].len) {
+            @memcpy(self.uris[self.calls][0..uri.len], uri);
+            self.uri_lens[self.calls] = uri.len;
+        }
+        const idx = @min(self.calls, self.responses.len - 1);
+        self.calls += 1;
+        return allocator.dupe(u8, self.responses[idx]);
+    }
+
+    fn uriAt(self: *const SeqResp, idx: usize) []const u8 {
+        return self.uris[idx][0..self.uri_lens[idx]];
+    }
+};
+
+fn newHealMessage(ctx: *Context, alloc: std.mem.Allocator, stub: *SeqResp) Message {
+    var m = Message.init(ctx, alloc);
+    m.setTransport(SeqResp.dispatch, stub);
+    return m;
+}
+
+test "sendCustomerText 40001 自愈：作废缓存 → 换新 token 重试一次并成功" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+        "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var m = newHealMessage(&ctx, allocator, &stub);
+
+    try m.sendCustomerText(.{ .touser = "oA", .content = "hi" });
+
+    try std.testing.expectEqual(@as(usize, 1), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=token-abc",
+        stub.uriAt(0),
+    );
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=token-new",
+        stub.uriAt(1),
+    );
+}
+
+test "sendTemplate 40001 自愈：重试后返回 msgid 且第二次请求带新 token" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"msgid\":9527}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var m = newHealMessage(&ctx, allocator, &stub);
+
+    const msgid = try m.sendTemplate(.{
+        .to_user = "oA",
+        .template_id = "tid",
+        .data = &.{.{ .key = "first", .value = "hi" }},
+    });
+
+    try std.testing.expectEqual(@as(i64, 9527), msgid);
+    try std.testing.expectEqual(@as(usize, 1), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/message/template/send?access_token=token-new",
+        stub.uriAt(1),
+    );
+}
+
+test "sendTypingStatus 40001 自愈：重试后成功且第二次请求带新 token" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":42001,\"errmsg\":\"access_token expired\"}",
+        "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var m = newHealMessage(&ctx, allocator, &stub);
+
+    try m.sendTypingStatus("oA", .typing);
+
+    try std.testing.expectEqual(@as(usize, 1), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/message/custom/typing?access_token=token-new",
+        stub.uriAt(1),
+    );
+}
+
+test "sendCustomer 非 token 错误（45009）不重试也不作废" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":45009,\"errmsg\":\"reach max api daily quota limit\"}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var m = newHealMessage(&ctx, allocator, &stub);
+
+    const result = m.sendCustomer(.{
+        .touser = "oA",
+        .msgtype = .text,
+        .text = .{ .content = "hi" },
+    });
+    try std.testing.expectError(util_error.WechatError.ApiError, result);
+
+    try std.testing.expectEqual(@as(usize, 0), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), stub.calls);
 }

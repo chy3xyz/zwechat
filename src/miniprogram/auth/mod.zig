@@ -7,6 +7,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// `jscode2session` 返回。
 pub const ResCode2Session = struct {
@@ -112,21 +113,31 @@ pub const Auth = struct {
 
     /// `getuserphonenumber` — 通过 code 获取用户手机号。
     /// 返回的 `std.json.Parsed(GetPhoneNumberResponse)` 由调用方持有并负责 `deinit`。
+    ///
+    /// 请求走 `util_retry.callApi`：errcode 为 token 失效码时作废缓存并重试一次。
     pub fn getPhoneNumber(self: *Self, code: []const u8) !std.json.Parsed(GetPhoneNumberResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
         const body = try std.fmt.allocPrint(self.allocator, "{{\"code\":\"{s}\"}}", .{code});
         defer self.allocator.free(body);
 
-        const resp = try self.postJSON(uri, body);
+        const Sender = struct {
+            auth: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                return c.auth.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "GetPhoneNumber", Sender{
+            .auth = self,
+            .body = body,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(GetPhoneNumberResponse, self.allocator, resp, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
@@ -140,21 +151,31 @@ pub const Auth = struct {
 
     /// `checkencryptedmsg` — 检查加密信息是否由微信生成。
     /// 返回的 `std.json.Parsed(RspCheckEncryptedData)` 由调用方持有并负责 `deinit`。
+    ///
+    /// 请求走 `util_retry.callApi`：errcode 为 token 失效码时作废缓存并重试一次。
     pub fn checkEncryptedData(self: *Self, encrypted_msg_hash: []const u8) !std.json.Parsed(RspCheckEncryptedData) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/business/checkencryptedmsg?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
         const body = try encodeCheckEncryptedDataBody(self.allocator, encrypted_msg_hash);
         defer self.allocator.free(body);
 
-        const resp = try self.postJSON(uri, body);
+        const Sender = struct {
+            auth: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/business/checkencryptedmsg?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                return c.auth.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "CheckEncryptedData", Sender{
+            .auth = self,
+            .body = body,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(RspCheckEncryptedData, self.allocator, resp, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
@@ -167,49 +188,65 @@ pub const Auth = struct {
     }
 
     /// `checksession` — 检验登录态。
+    ///
+    /// 请求走 `util_retry.callApi`：errcode 为 token 失效码时作废缓存并重试一次。
     pub fn checkSession(self: *Self, signature: []const u8, open_id: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Sender = struct {
+            auth: *Self,
+            signature: []const u8,
+            open_id: []const u8,
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxa/checksession?access_token={s}&signature={s}&openid={s}&sig_method=hmac_sha256",
-            .{ access_token, signature, open_id },
-        );
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxa/checksession?access_token={s}&signature={s}&openid={s}&sig_method=hmac_sha256",
+                    .{ token, c.signature, c.open_id },
+                );
+                defer allocator.free(uri);
+                return c.auth.httpGet(uri);
+            }
+        };
 
-        const resp = try self.httpGet(uri);
-        defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "CheckSession")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "CheckSession", Sender{
+            .auth = self,
+            .signature = signature,
+            .open_id = open_id,
+        });
+        self.allocator.free(resp);
     }
 
     /// `getpaidunionid` — 用户支付完成后获取该用户的 UnionID，无需用户授权
     /// （对照 Go `GetPaidUnionID`；注意微信参数名为 `openid`）。
     ///
-    /// 返回的 unionid 字符串由本结构体的 allocator 分配，调用方负责 `free`。
+    /// 返回的 unionid 字符串由本结构体的 allocator 分配，调用方负责 `free`；
+    /// 请求走 `util_retry.callApi`：errcode 为 token 失效码时作废缓存并重试一次。
     pub fn getPaidUnionID(self: *Self, req: GetPaidUnionIDRequest) ![]u8 {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const Sender = struct {
+            auth: *Self,
+            req: GetPaidUnionIDRequest,
 
-        const uri = if (req.transaction_id.len > 0)
-            try std.fmt.allocPrint(
-                self.allocator,
-                "https://api.weixin.qq.com/wxa/getpaidunionid?access_token={s}&openid={s}&transaction_id={s}",
-                .{ access_token, req.openid, req.transaction_id },
-            )
-        else
-            try std.fmt.allocPrint(
-                self.allocator,
-                "https://api.weixin.qq.com/wxa/getpaidunionid?access_token={s}&openid={s}&mch_id={s}&out_trade_no={s}",
-                .{ access_token, req.openid, req.mch_id, req.out_trade_no },
-            );
-        defer self.allocator.free(uri);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = if (c.req.transaction_id.len > 0)
+                    try std.fmt.allocPrint(
+                        allocator,
+                        "https://api.weixin.qq.com/wxa/getpaidunionid?access_token={s}&openid={s}&transaction_id={s}",
+                        .{ token, c.req.openid, c.req.transaction_id },
+                    )
+                else
+                    try std.fmt.allocPrint(
+                        allocator,
+                        "https://api.weixin.qq.com/wxa/getpaidunionid?access_token={s}&openid={s}&mch_id={s}&out_trade_no={s}",
+                        .{ token, c.req.openid, c.req.mch_id, c.req.out_trade_no },
+                    );
+                defer allocator.free(uri);
+                return c.auth.httpGet(uri);
+            }
+        };
 
-        const resp = try self.httpGet(uri);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "GetPaidUnionID", Sender{
+            .auth = self,
+            .req = req,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(GetPaidUnionIDResponse, self.allocator, resp, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
@@ -440,4 +477,59 @@ test "getPaidUnionID errcode 非 0 返回 ApiError" {
 
     const result = a.getPaidUnionID(.{ .openid = "oABC", .transaction_id = "TX_BAD" });
     try std.testing.expectError(util_error.WechatError.ApiError, result);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "getPhoneNumber token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token=token-abc", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential, access_token is invalid or not latest\"}",
+    });
+    try mt.addRoute("https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token=token-new", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"phone_info\":{\"phoneNumber\":\"13800001111\"}}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-mp", .app_secret = "sec" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var a = Auth.init(&ctx, allocator);
+    a.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try a.getPhoneNumber("code-xyz");
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("13800001111", parsed.value.phone_info.phoneNumber);
+
+    // 作废恰好一次，且第二次请求确实带了换发后的新 token。
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
+}
+
+test "checkSession 非 token 类 errcode 不重试也不作废" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/wxa/checksession?access_token=token-abc&signature=sig&openid=oABC&sig_method=hmac_sha256", .{
+        .body = "{\"errcode\":45009,\"errmsg\":\"reach max api daily quota limit\"}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-mp", .app_secret = "sec" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var a = Auth.init(&ctx, allocator);
+    a.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    try std.testing.expectError(util_error.WechatError.ApiError, a.checkSession("sig", "oABC"));
+    try std.testing.expectEqual(@as(usize, 0), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
 }

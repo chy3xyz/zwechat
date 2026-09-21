@@ -11,6 +11,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL 常量
@@ -1963,27 +1964,12 @@ pub const ExternalContact = struct {
         external_userid: []const u8,
         next_cursor: []const u8,
     ) !std.json.Parsed(ExternalUserDetailResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&external_userid={s}&cursor={s}",
-            .{ externalContactGetURL, access_token, external_userid, next_cursor },
+        return self.getParsed(
+            externalContactGetURL,
+            "&external_userid={s}&cursor={s}",
+            .{ external_userid, next_cursor },
+            ExternalUserDetailResponse,
         );
-        defer self.allocator.free(uri);
-
-        const client = util_http.getDefaultClient(self.allocator);
-        const body = try client.get(uri);
-        defer self.allocator.free(body);
-
-        var parsed = std.json.parseFromSlice(ExternalUserDetailResponse, self.allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
-            return util_error.WechatError.DecodeError;
-        };
-        errdefer parsed.deinit();
-
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed;
     }
 
     /// 按员工 `userid` 列出其所有客户的 `external_userid`。
@@ -1994,27 +1980,7 @@ pub const ExternalContact = struct {
         self: *Self,
         userid: []const u8,
     ) !std.json.Parsed(ExternalUserListResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&userid={s}",
-            .{ externalContactListURL, access_token, userid },
-        );
-        defer self.allocator.free(uri);
-
-        const client = util_http.getDefaultClient(self.allocator);
-        const body = try client.get(uri);
-        defer self.allocator.free(body);
-
-        var parsed = std.json.parseFromSlice(ExternalUserListResponse, self.allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
-            return util_error.WechatError.DecodeError;
-        };
-        errdefer parsed.deinit();
-
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
-        return parsed;
+        return self.getParsed(externalContactListURL, "&userid={s}", .{userid}, ExternalUserListResponse);
     }
 
     // ── external_user 补充：批量获取 / 备注 / 配置了客户联系的成员 ──
@@ -2047,21 +2013,7 @@ pub const ExternalContact = struct {
     /// 对应 `_ref/wechat/work/externalcontact/follow_user.go` 的
     /// `GetFollowUserList`。
     pub fn getFollowUserList(self: *Self) !std.json.Parsed(FollowUserListResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ followUserListURL, access_token },
-        );
-        defer self.allocator.free(uri);
-
-        const client = util_http.getDefaultClient(self.allocator);
-        const body = try client.get(uri);
-        defer self.allocator.free(body);
-
-        return parseParsed(self.allocator, body, FollowUserListResponse);
+        return self.getParsed(followUserListURL, "", .{}, FollowUserListResponse);
     }
 
     // ── contact_way —「联系我」配置 ──
@@ -2459,21 +2411,7 @@ pub const ExternalContact = struct {
     ///
     /// 对应 `_ref/wechat/work/externalcontact/moment.go` 的 `GetMomentTaskResult`。
     pub fn getMomentTaskResult(self: *Self, jobid: []const u8) !std.json.Parsed(GetMomentTaskResultResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&jobid={s}",
-            .{ getMomentTaskResultURL, access_token, jobid },
-        );
-        defer self.allocator.free(uri);
-
-        const client = util_http.getDefaultClient(self.allocator);
-        const body = try client.get(uri);
-        defer self.allocator.free(body);
-
-        return parseParsed(self.allocator, body, GetMomentTaskResultResponse);
+        return self.getParsed(getMomentTaskResultURL, "&jobid={s}", .{jobid}, GetMomentTaskResultResponse);
     }
 
     /// 停止发表企业朋友圈。
@@ -2733,21 +2671,7 @@ pub const ExternalContact = struct {
     /// 对应 `_ref/wechat/work/externalcontact/customer_acquisition.go` 的
     /// `CustomerAcquisitionQuota`。
     pub fn customerAcquisitionQuota(self: *Self) !std.json.Parsed(CustomerAcquisitionQuotaResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ customerAcquisitionQuotaURL, access_token },
-        );
-        defer self.allocator.free(uri);
-
-        const client = util_http.getDefaultClient(self.allocator);
-        const body = try client.get(uri);
-        defer self.allocator.free(body);
-
-        return parseParsed(self.allocator, body, CustomerAcquisitionQuotaResponse);
+        return self.getParsed(customerAcquisitionQuotaURL, "", .{}, CustomerAcquisitionQuotaResponse);
     }
 
     /// 查询获客链接使用详情。
@@ -2773,35 +2697,42 @@ pub const ExternalContact = struct {
     ///
     /// 对应 `_ref/wechat/work/externalcontact/customer_acquisition.go` 的 `GetPermit`。
     pub fn getPermit(self: *Self) !std.json.Parsed(GetPermitResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ customerAcquisitionURL ++ "_app/get_permit", access_token },
-        );
-        defer self.allocator.free(uri);
-
-        const client = util_http.getDefaultClient(self.allocator);
-        const body = try client.get(uri);
-        defer self.allocator.free(body);
-
-        return parseParsed(self.allocator, body, GetPermitResponse);
+        return self.getParsed(customerAcquisitionURL ++ "_app/get_permit", "", .{}, GetPermitResponse);
     }
 
     // ── 内部辅助 ──
 
+    /// GET `url?access_token={token}` + 解析响应（errcode 非 0 抛 `WechatError.ApiError`）。
+    ///
+    /// 取 token / 拼 URI / 发请求 / errcode 检查（含 token 失效后作废缓存并重试一次）
+    /// 统一走 `util/retry.callApi`；`fmt` / `args` 为该接口除 `access_token` 外的
+    /// query 参数（如 `"&jobid={s}"` + `.{jobid}`），无附加参数时传 `""` 与 `.{}`。
+    fn getParsed(
+        self: *Self,
+        url: []const u8,
+        comptime fmt: []const u8,
+        args: anytype,
+        comptime T: type,
+    ) !std.json.Parsed(T) {
+        const body = try util_retry.callApi(
+            self.ctx,
+            self.allocator,
+            apiNameFromURL(url),
+            GetSender(fmt, @TypeOf(args)){ .url = url, .args = args },
+        );
+        defer self.allocator.free(body);
+
+        return parseParsed(self.allocator, body, T);
+    }
+
     /// POST JSON 并解析响应（errcode 非 0 抛 `WechatError.ApiError`）。
     fn postParsed(self: *Self, url: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ url, access_token });
-        defer self.allocator.free(uri);
-
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const resp = try util_retry.callApi(
+            self.ctx,
+            self.allocator,
+            apiNameFromURL(url),
+            PostSender{ .url = url, .body = body },
+        );
         defer self.allocator.free(resp);
 
         return parseParsed(self.allocator, resp, T);
@@ -2809,14 +2740,12 @@ pub const ExternalContact = struct {
 
     /// POST JSON 并仅校验 errcode（写接口）。
     fn postCommon(self: *Self, url: []const u8, body: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ url, access_token });
-        defer self.allocator.free(uri);
-
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const resp = try util_retry.callApi(
+            self.ctx,
+            self.allocator,
+            apiNameFromURL(url),
+            PostSender{ .url = url, .body = body },
+        );
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(CommonErrorResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -2825,6 +2754,49 @@ pub const ExternalContact = struct {
         defer parsed.deinit();
 
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
+    }
+};
+
+/// 取接口 URL 的末段作为 `api_name`（喂给 `util/retry.callApi`，进错误详情），
+/// 如 `.../cgi-bin/externalcontact/get` → `get`。
+fn apiNameFromURL(url: []const u8) []const u8 {
+    const trimmed = std.mem.trimEnd(u8, url, "/");
+    const idx = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return trimmed;
+    return trimmed[idx + 1 ..];
+}
+
+/// `util/retry.callApi` 的 GET sender：`{url}?access_token={token}` 后按 `fmt`
+/// 追加 query 参数（`fmt` 为空则不追加），如 `"&jobid={s}"` + `.{jobid}`。
+fn GetSender(comptime fmt: []const u8, comptime Args: type) type {
+    return struct {
+        url: []const u8,
+        args: Args,
+
+        pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+            const uri = try std.fmt.allocPrint(
+                allocator,
+                "{s}?access_token={s}" ++ fmt,
+                .{ c.url, token } ++ c.args,
+            );
+            defer allocator.free(uri);
+
+            const client = util_http.getDefaultClient(allocator);
+            return client.get(uri);
+        }
+    };
+}
+
+/// `util/retry.callApi` 的 POST JSON sender。
+const PostSender = struct {
+    url: []const u8,
+    body: []const u8,
+
+    pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+        const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}", .{ c.url, token });
+        defer allocator.free(uri);
+
+        const client = util_http.getDefaultClient(allocator);
+        return client.postJSON(uri, c.body);
     }
 };
 
@@ -3017,8 +2989,8 @@ fn installRecording(allocator: std.mem.Allocator, rt: *RecordingTransport) void 
 }
 
 fn uninstallRecording() void {
-    const client = util_http.getDefaultClient(std.heap.page_allocator);
-    client.setTransport(null, null);
+    // 不依赖「用别的 allocator 再取一次指针」的宽容语义：直接销毁线程局部实例，
+    // 注入的 transport 随实例一起消失（下次 getDefaultClient 会重新初始化）。
     util_http.deinitDefaultClient();
 }
 
@@ -5009,4 +4981,106 @@ test "getPermit 获取客户可建联成员" {
     try std.testing.expectEqualStrings("zhangsan", parsed.value.user_list[0]);
     try std.testing.expectEqual(@as(i64, 2), parsed.value.department_list[0]);
     try std.testing.expectEqual(@as(i64, 3), parsed.value.tag_list[0]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 测试：token 失效自愈（util/retry.callApi 链路）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 可按脚本换发 token 并统计作废次数的凭据 handle 状态。
+const RetryTokenState = struct {
+    /// 依次给出的 token；回源次数超出脚本后复用最后一项。
+    tokens: []const []const u8 = &.{ "tok-old", "tok-new" },
+    fetch_calls: usize = 0,
+    invalidate_calls: usize = 0,
+
+    fn getToken(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *RetryTokenState = @ptrCast(@alignCast(ctx));
+        const token = self.tokens[@min(self.fetch_calls, self.tokens.len - 1)];
+        self.fetch_calls += 1;
+        return allocator.dupe(u8, token);
+    }
+
+    fn invalidate(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const self: *RetryTokenState = @ptrCast(@alignCast(ctx));
+        self.invalidate_calls += 1;
+    }
+
+    const vtable = @import("../../credential/mod.zig").AccessTokenHandle.VTable{
+        .getAccessToken = getToken,
+        .invalidate = invalidate,
+    };
+};
+
+/// 构造借用 `state` 的 Context（handle 的 ptr 指向测试局部状态）。
+fn makeRetryCtx(state: *RetryTokenState) Context {
+    return .{
+        .config = .{ .corp_id = "ww-ec-retry" },
+        .access_token_handle = .{ .ptr = @ptrCast(state), .vtable = &RetryTokenState.vtable },
+    };
+}
+
+test "getExternalContact token 失效：40001 → 作废缓存 → 用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/externalcontact/get?access_token=tok-old&external_userid=wmAAA&cursor=", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+    });
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/externalcontact/get?access_token=tok-new&external_userid=wmAAA&cursor=", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"external_contact\":{\"external_userid\":\"wmAAA\",\"name\":\"张三\"}}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = RetryTokenState{};
+    var ctx = makeRetryCtx(&state);
+    var ec = ExternalContact.init(&ctx, allocator);
+    var parsed = try ec.getExternalContact("wmAAA", "");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("张三", parsed.value.external_contact.name);
+    try std.testing.expectEqual(@as(usize, 1), state.invalidate_calls);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/externalcontact/get?access_token=tok-old&external_userid=wmAAA&cursor=",
+        mt.history.items[0],
+    );
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/externalcontact/get?access_token=tok-new&external_userid=wmAAA&cursor=",
+        mt.history.items[1],
+    );
+}
+
+test "updateUserRemark 非 token 类 errcode：直接 ApiError，不作废也不重试" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/externalcontact/remark?access_token=tok-old", .{
+        .body = "{\"errcode\":60011,\"errmsg\":\"no privilege to access/modify contact/party/agent\"}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = RetryTokenState{};
+    var ctx = makeRetryCtx(&state);
+    var ec = ExternalContact.init(&ctx, allocator);
+
+    const result = ec.updateUserRemark(.{ .userid = "zhangsan", .external_userid = "wmAAA", .remark = "客户A" });
+    try std.testing.expectError(util_error.WechatError.ApiError, result);
+
+    try std.testing.expectEqual(@as(usize, 0), state.invalidate_calls);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+    try std.testing.expectEqual(@as(usize, 1), state.fetch_calls);
 }

@@ -17,6 +17,9 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
+const util_json = @import("../../util/json.zig");
+const credential = @import("../../credential/mod.zig");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL 常量
@@ -170,23 +173,33 @@ pub const Checkin = struct {
     /// 拉取打卡记录数据。
     ///
     /// 对应 `_ref/wechat/work/checkin/record.go` 的 `GetCheckinData`。
+    /// 走 `util/retry.callApi`：token 失效（40001 等）时自动作废缓存、取新 token 重试一次。
     /// 返回的 `std.json.Parsed(CheckinDataResponse)` 由调用方持有并负责 `deinit`。
     pub fn getCheckinData(self: *Self, req: CheckinDataRequest) !std.json.Parsed(CheckinDataResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ getCheckinDataURL, access_token },
-        );
-        defer self.allocator.free(uri);
-
         const body = try encodeCheckinDataJson(self.allocator, req);
         defer self.allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const Sender = struct {
+            self: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "{s}?access_token={s}",
+                    .{ getCheckinDataURL, token },
+                );
+                defer allocator.free(uri);
+                return util_http.getDefaultClient(c.self.allocator).postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(
+            self.ctx,
+            self.allocator,
+            "GetCheckinData",
+            Sender{ .self = self, .body = body },
+        );
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(CheckinDataResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -194,30 +207,39 @@ pub const Checkin = struct {
         };
         errdefer parsed.deinit();
 
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
         return parsed;
     }
 
     /// 拉取员工打卡规则。
     ///
     /// 对应 `_ref/wechat/work/checkin/record.go` 的 `GetOption`。
+    /// 与 `getCheckinData` 一样走 `util/retry.callApi` 的失效自愈链路。
     /// 返回的 `std.json.Parsed(CheckinOptionResponse)` 由调用方持有并负责 `deinit`。
     pub fn getCheckinOption(self: *Self, req: CheckinOptionRequest) !std.json.Parsed(CheckinOptionResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}",
-            .{ getCheckinOptionURL, access_token },
-        );
-        defer self.allocator.free(uri);
-
         const body = try encodeCheckinOptionJson(self.allocator, req);
         defer self.allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const Sender = struct {
+            self: *Self,
+            body: []const u8,
+
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "{s}?access_token={s}",
+                    .{ getCheckinOptionURL, token },
+                );
+                defer allocator.free(uri);
+                return util_http.getDefaultClient(c.self.allocator).postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(
+            self.ctx,
+            self.allocator,
+            "GetCheckinOption",
+            Sender{ .self = self, .body = body },
+        );
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(CheckinOptionResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -225,7 +247,6 @@ pub const Checkin = struct {
         };
         errdefer parsed.deinit();
 
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
         return parsed;
     }
 };
@@ -270,18 +291,9 @@ fn encodeCheckinOptionJson(allocator: std.mem.Allocator, req: CheckinOptionReque
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendJsonString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => try buf.append(allocator, c),
-        }
-    }
-}
+/// JSON 字符串转义（实现收敛到 `util.json.appendEscapedString`；此前漏转义
+/// `c < 0x20` 控制字符）。
+const appendJsonString = util_json.appendEscapedString;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 测试
@@ -371,12 +383,44 @@ const StubToken = struct {
         return allocator.dupe(u8, "token-abc");
     }
 };
-const token_vtable = @import("../../credential/mod.zig").AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+const token_vtable = credential.AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+
+/// 可自愈的假 token handle：`invalidate` 后把 `idx` 推进到下一个 token。
+/// `tokens` 按调用次序给出，模拟微信换发新 token。
+const HealState = struct {
+    invalidates: usize = 0,
+    idx: usize = 0,
+    tokens: []const []const u8 = &.{ "old-token", "new-token" },
+
+    fn getToken(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const st: *HealState = @ptrCast(@alignCast(ctx));
+        return allocator.dupe(u8, st.tokens[st.idx]);
+    }
+
+    fn invalidate(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const st: *HealState = @ptrCast(@alignCast(ctx));
+        st.invalidates += 1;
+        if (st.idx + 1 < st.tokens.len) st.idx += 1;
+    }
+
+    const vtable = credential.AccessTokenHandle.VTable{
+        .getAccessToken = getToken,
+        .invalidate = invalidate,
+    };
+};
 
 fn makeCtx() Context {
     return .{
         .config = .{ .corp_id = "ww-test" },
         .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+}
+
+fn makeHealCtx(state: *HealState) Context {
+    return .{
+        .config = .{ .corp_id = "ww-heal" },
+        .access_token_handle = .{ .ptr = @ptrCast(state), .vtable = &HealState.vtable },
     };
 }
 
@@ -412,4 +456,61 @@ test "getCheckinOption 解析含 note_can_use_local_pic/schedulelist/open_sp_che
     try std.testing.expectEqual(@as(i64, 32400), g.checkindate[0].checkintime[0].work_sec);
     // note_can_use_local_pic / schedulelist / open_sp_checkin 是结构体未建模的字段，
     // 解析不报错即说明 ignore_unknown_fields 生效。
+}
+
+test "getCheckinData token 失效自愈：40001 → 作废缓存 → 新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/checkin/getcheckindata?access_token=old-token", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential, access_token is invalid or not latest\"}",
+    });
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/checkin/getcheckindata?access_token=new-token", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"checkindata\":[{\"userid\":\"zhangsan\",\"checkin_time\":1700000000}]}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = HealState{};
+    var ctx = makeHealCtx(&state);
+    var c = Checkin.init(&ctx, allocator);
+    var parsed = try c.getCheckinData(.{ .useridlist = &.{"zhangsan"} });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("zhangsan", parsed.value.checkindata[0].userid);
+    // 作废恰好一次，且第二次请求确实换上了新 token。
+    try std.testing.expectEqual(@as(usize, 1), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-token") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-token") != null);
+}
+
+test "getCheckinOption 非 token 类 errcode（60011）直接 ApiError，不重试也不作废" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/checkin/getcheckinoption?access_token=old-token", .{
+        .body = "{\"errcode\":60011,\"errmsg\":\"no privilege to access the data\"}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = HealState{};
+    var ctx = makeHealCtx(&state);
+    var c = Checkin.init(&ctx, allocator);
+
+    try std.testing.expectError(error.ApiError, c.getCheckinOption(.{ .datetime = 1700000000 }));
+
+    try std.testing.expectEqual(@as(usize, 0), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
 }

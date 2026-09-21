@@ -3,12 +3,17 @@
 //!
 //! 对应 `_ref/wechat/officialaccount/ocr/ocr.go`。与 Go 实现一致：`img_url` 以
 //! `url.QueryEscape` 语义百分号编码后放在 **query** 中（不是 JSON body），请求体为空。
+//!
+//! token 注入 / errcode 检查 / token 失效自愈（40001 等 → 作废缓存 → 只重试一次）
+//! 交给 `util/retry.callApi` 统一处理。
 
 const std = @import("std");
 const Context = @import("../context.zig").Context;
 const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
+const util_uri = @import("../../util/uri.zig");
 
 pub const Ocr = struct {
     ctx: *Context,
@@ -66,28 +71,34 @@ pub const Ocr = struct {
     }
 
     fn ocrPost(self: *Self, url: []const u8, img_url: []const u8) ![]u8 {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        // 发送逻辑（含 transport 注入）留在本模块，token 注入 / errcode 检查 /
+        // 失效重试交给 `util_retry.callApi`。
+        const Req = struct {
+            self: *Self,
+            url: []const u8,
+            img_url: []const u8,
 
-        // 与 Go 对齐：img_url 以 url.QueryEscape 编码后放在 query，body 为空串。
-        const escaped = try queryEscape(self.allocator, img_url);
-        defer self.allocator.free(escaped);
+            pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                // 与 Go 对齐：img_url 以 url.QueryEscape 编码后放在 query，body 为空串。
+                const escaped = try queryEscape(a, c.img_url);
+                defer a.free(escaped);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?img_url={s}&access_token={s}",
-            .{ url, escaped, access_token },
-        );
-        defer self.allocator.free(uri);
+                const uri = try std.fmt.allocPrint(
+                    a,
+                    "{s}?img_url={s}&access_token={s}",
+                    .{ c.url, escaped, token },
+                );
+                defer a.free(uri);
 
-        const resp = try self.post(uri, "");
-        errdefer self.allocator.free(resp);
+                return c.self.post(uri, "");
+            }
+        };
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "OCR")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
-        return resp;
+        return util_retry.callApi(self.ctx, self.allocator, "OCR", Req{
+            .self = self,
+            .url = url,
+            .img_url = img_url,
+        });
     }
 
     fn post(self: *Self, uri: []const u8, payload: []const u8) ![]u8 {
@@ -110,38 +121,46 @@ pub const ocrBizLicenseURL = "https://api.weixin.qq.com/cv/ocr/bizlicense";
 pub const ocrCommonURL = "https://api.weixin.qq.com/cv/ocr/comm";
 pub const ocrPlateNumberURL = "https://api.weixin.qq.com/cv/ocr/platenum";
 
-/// `url.QueryEscape` 语义：保留 `[A-Za-z0-9-_.~]`，空格 → `+`，其余字节 → `%XX`（大写 hex）。
-fn queryEscape(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    const hex_upper = "0123456789ABCDEF";
-    for (s) |c| {
-        switch (c) {
-            'A'...'Z', 'a'...'z', '0'...'9', '-', '_', '.', '~' => try buf.append(allocator, c),
-            ' ' => try buf.append(allocator, '+'),
-            else => {
-                try buf.append(allocator, '%');
-                try buf.append(allocator, hex_upper[c >> 4]);
-                try buf.append(allocator, hex_upper[c & 0x0F]);
-            },
-        }
-    }
-    return buf.toOwnedSlice(allocator);
-}
+/// `url.QueryEscape` 语义（实现收敛到 `util.uri.queryEscape`）：
+/// 保留 `[A-Za-z0-9-_.~]`，空格 → `+`，其余字节 → `%XX`（大写 hex）。
+const queryEscape = util_uri.queryEscape;
 
 // —— 测试 ——
 
 const StubToken = struct {
-    fn getToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
-        return allocator.dupe(u8, "token-abc");
-    }
-};
-const token_vtable = credential.AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+    /// 当前（缓存中的）token；`invalidate` 后换成 `refreshed`。
+    token: []const u8 = "token-abc",
+    /// 作废后换发的新 token（模拟微信换发）；`null` 表示作废后仍返回同一 token。
+    refreshed: ?[]const u8 = null,
+    /// `invalidate` 被调用的次数。
+    invalidates: usize = 0,
 
-fn makeCtx() Context {
+    fn getToken(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *StubToken = @ptrCast(@alignCast(ptr));
+        return allocator.dupe(u8, self.token);
+    }
+
+    fn invalidate(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const self: *StubToken = @ptrCast(@alignCast(ptr));
+        self.invalidates += 1;
+        if (self.refreshed) |t| {
+            self.token = t;
+            self.refreshed = null;
+        }
+    }
+
+    const vtable = credential.AccessTokenHandle.VTable{
+        .getAccessToken = getToken,
+        .invalidate = invalidate,
+    };
+};
+
+/// stub handle 必须指向活着的 `StubToken`（vtable 会解引用 `ptr`）。
+fn makeCtx(stub: *StubToken) Context {
     return .{
         .config = .{ .app_id = "wx-ocr" },
-        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+        .access_token_handle = .{ .ptr = @ptrCast(stub), .vtable = &StubToken.vtable },
     };
 }
 
@@ -181,7 +200,8 @@ test "idCard 走 query 参数且 img_url 被转义（回归：body 携带 JSON �
         .body = "{\"type\":\"Front\",\"name\":\"张三\",\"id\":\"110101199001011234\"}",
     });
 
-    var ctx = makeCtx();
+    var stub = StubToken{};
+    var ctx = makeCtx(&stub);
     var o = Ocr.init(&ctx, allocator);
     o.setTransport(util_http.MockTransport.dispatch, &mt);
 
@@ -201,7 +221,8 @@ test "driving / driverLicense 命中正确 URL" {
         .body = "{\"id_num\":\"310101199001011234\"}",
     });
 
-    var ctx = makeCtx();
+    var stub = StubToken{};
+    var ctx = makeCtx(&stub);
     var o = Ocr.init(&ctx, allocator);
     o.setTransport(util_http.MockTransport.dispatch, &mt);
 
@@ -214,7 +235,7 @@ test "driving / driverLicense 命中正确 URL" {
     try std.testing.expect(std.mem.indexOf(u8, r2, "310101199001011234") != null);
 }
 
-test "errcode != 0 返回 ApiError 且释放响应" {
+test "errcode 40001 且 handle 不支持作废：最多两次请求后仍返回 ApiError" {
     const allocator = std.testing.allocator;
     var mt = util_http.MockTransport.init(allocator);
     defer mt.deinit();
@@ -222,11 +243,64 @@ test "errcode != 0 返回 ApiError 且释放响应" {
         .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
     });
 
-    var ctx = makeCtx();
+    // 只实现 getAccessToken 的旧式 handle：作废请求报 InvalidateNotSupported，
+    // callApi 退化为「用同一 token 再试一次」，不会无限重试。
+    const legacy_vtable = credential.AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+    var stub = StubToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-ocr" },
+        .access_token_handle = .{ .ptr = @ptrCast(&stub), .vtable = &legacy_vtable },
+    };
     var o = Ocr.init(&ctx, allocator);
     o.setTransport(util_http.MockTransport.dispatch, &mt);
 
     try std.testing.expectError(util_error.WechatError.ApiError, o.bankCard("u"));
+    // token 失效码只重试一次，两次都用同一个 token（作废未被 handle 支持）。
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+}
+
+test "OCR token 失效自愈：40001 → 作废缓存 → 新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/idcard?img_url=u&access_token=old-token", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential, access_token is invalid or not latest\"}",
+    });
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/idcard?img_url=u&access_token=new-token", .{
+        .body = "{\"type\":\"Front\",\"name\":\"张三\"}",
+    });
+
+    var stub = StubToken{ .token = "old-token", .refreshed = "new-token" };
+    var ctx = makeCtx(&stub);
+    var o = Ocr.init(&ctx, allocator);
+    o.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    const resp = try o.idCard("u");
+    defer allocator.free(resp);
+
+    try std.testing.expectEqualStrings("{\"type\":\"Front\",\"name\":\"张三\"}", resp);
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-token") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-token") != null);
+}
+
+test "OCR 非 token 类 errcode（45009）直接 ApiError：不作废、只请求一次" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/comm?img_url=u&access_token=old-token", .{
+        .body = "{\"errcode\":45009,\"errmsg\":\"reach max api daily quota limit\"}",
+    });
+
+    var stub = StubToken{ .token = "old-token", .refreshed = "new-token" };
+    var ctx = makeCtx(&stub);
+    var o = Ocr.init(&ctx, allocator);
+    o.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    try std.testing.expectError(util_error.WechatError.ApiError, o.common("u"));
+    try std.testing.expectEqual(@as(usize, 0), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
 }
 
 test "新增 bizLicense / common / plateNumber endpoint 常量" {

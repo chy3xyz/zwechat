@@ -5,6 +5,7 @@ const std = @import("std");
 const Context = @import("../context.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// 单个用户基本信息。
 pub const UserInfo = struct {
@@ -128,25 +129,18 @@ pub const User = struct {
     /// 返回的 `std.json.Parsed(UserInfo)` 由调用方持有并负责 `deinit`。
     /// 响应 errcode 非 0 时返回 `WechatError.ApiError`。
     pub fn getUserInfo(self: *Self, open_id: []const u8) !std.json.Parsed(UserInfo) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const suffix = try std.fmt.allocPrint(self.allocator, "&openid={s}&lang=zh_CN", .{open_id});
+        defer self.allocator.free(suffix);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/user/info?access_token={s}&openid={s}&lang=zh_CN",
-            .{ access_token, open_id },
-        );
-        defer self.allocator.free(uri);
-
-        const body = try self.get(uri);
+        const body = try util_retry.callApi(self.ctx, self.allocator, "GetUserInfo", TokenReq{
+            .user = self,
+            .url = "https://api.weixin.qq.com/cgi-bin/user/info",
+            .query_suffix = suffix,
+        });
         defer self.allocator.free(body);
 
         // 失败响应形如 {"errcode":40013,"errmsg":"invalid openid"}，UserInfo 解析会
-        // 静默吞成全默认值，必须先按 CommonError 检查 errcode（对齐 Go user.go 内嵌 CommonError）。
-        if (try util_error.decodeWithCommonError(self.allocator, body, "GetUserInfo")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+        // 静默吞成全默认值——errcode 检查已由 util_retry.callApi 完成（对齐 Go user.go 内嵌 CommonError）。
 
         var parsed = std.json.parseFromSlice(UserInfo, self.allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
@@ -158,24 +152,17 @@ pub const User = struct {
     /// 返回的 `std.json.Parsed(OpenidList)` 由调用方持有并负责 `deinit`。
     /// 响应 errcode 非 0 时返回 `WechatError.ApiError`。
     pub fn getOpenidList(self: *Self, next_openid: []const u8) !std.json.Parsed(OpenidList) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const suffix = try std.fmt.allocPrint(self.allocator, "&next_openid={s}", .{next_openid});
+        defer self.allocator.free(suffix);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/user/get?access_token={s}&next_openid={s}",
-            .{ access_token, next_openid },
-        );
-        defer self.allocator.free(uri);
-
-        const body = try self.get(uri);
+        const body = try util_retry.callApi(self.ctx, self.allocator, "GetOpenidList", TokenReq{
+            .user = self,
+            .url = "https://api.weixin.qq.com/cgi-bin/user/get",
+            .query_suffix = suffix,
+        });
         defer self.allocator.free(body);
 
-        // 失败响应会被 OpenidList 静默吞成全默认值，SDK 先按 CommonError 检查 errcode。
-        if (try util_error.decodeWithCommonError(self.allocator, body, "GetOpenidList")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+        // 失败响应会被 OpenidList 静默吞成全默认值，errcode 检查已由 util_retry.callApi 完成。
 
         var parsed = std.json.parseFromSlice(OpenidList, self.allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
@@ -185,131 +172,80 @@ pub const User = struct {
     }
 
     pub fn updateRemark(self: *Self, open_id: []const u8, remark: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try serializeRemarkBody(self.allocator, open_id, remark);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/user/info/updateremark?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
-        const body = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"openid\":\"{s}\",\"remark\":\"{s}\"}}",
-            .{ open_id, remark },
-        );
-        defer self.allocator.free(body);
-
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "UpdateRemark", TokenReq{
+            .user = self,
+            .url = "https://api.weixin.qq.com/cgi-bin/user/info/updateremark",
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "UpdateRemark")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
     }
 
     /// 创建标签（对应 Go `CreateTag`）。
     /// 返回的 `std.json.Parsed(TagCreateResponse)` 由调用方持有并负责 `deinit`，
     /// 新建标签在 `.value.tag`。响应 errcode 非 0 时返回 `WechatError.ApiError`。
     pub fn createTag(self: *Self, tag_name: []const u8) !std.json.Parsed(TagCreateResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try serializeTagBody(self.allocator, null, tag_name);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/tags/create?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
-        const body = try serializeTagBody(self.allocator, null, tag_name);
-        defer self.allocator.free(body);
-
-        const resp = try self.post(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "CreateTag", TokenReq{
+            .user = self,
+            .url = "https://api.weixin.qq.com/cgi-bin/tags/create",
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(TagCreateResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
+        // errcode 检查已由 util_retry.callApi 完成（失败即抛 ApiError），此处不再重复。
         return parsed;
     }
 
     /// 编辑标签（对应 Go `UpdateTag`）。
     pub fn updateTag(self: *Self, tag_id: i64, tag_name: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try serializeTagBody(self.allocator, tag_id, tag_name);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/tags/update?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
-        const body = try serializeTagBody(self.allocator, tag_id, tag_name);
-        defer self.allocator.free(body);
-
-        const resp = try self.post(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "UpdateTag", TokenReq{
+            .user = self,
+            .url = "https://api.weixin.qq.com/cgi-bin/tags/update",
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "UpdateTag")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
     }
 
     /// 删除标签（对应 Go `DeleteTag`）。
     pub fn deleteTag(self: *Self, tag_id: i64) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try serializeTagBody(self.allocator, tag_id, null);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/tags/delete?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
-        const body = try serializeTagBody(self.allocator, tag_id, null);
-        defer self.allocator.free(body);
-
-        const resp = try self.post(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "DeleteTag", TokenReq{
+            .user = self,
+            .url = "https://api.weixin.qq.com/cgi-bin/tags/delete",
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "DeleteTag")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
     }
 
     /// 获取公众号已创建的标签（对应 Go `GetTag`）。
     /// 返回的 `std.json.Parsed(TagListResponse)` 由调用方持有并负责 `deinit`，
     /// 标签列表在 `.value.tags`。响应 errcode 非 0 时返回 `WechatError.ApiError`。
     pub fn getTag(self: *Self) !std.json.Parsed(TagListResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/tags/get?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
-        const body = try self.get(uri);
+        const body = try util_retry.callApi(self.ctx, self.allocator, "GetTag", TokenReq{
+            .user = self,
+            .url = "https://api.weixin.qq.com/cgi-bin/tags/get",
+        });
         defer self.allocator.free(body);
 
         var parsed = std.json.parseFromSlice(TagListResponse, self.allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
+        // errcode 检查已由 util_retry.callApi 完成（失败即抛 ApiError），此处不再重复。
         return parsed;
     }
 
@@ -317,27 +253,17 @@ pub const User = struct {
     /// `next_openid` 传空串表示从头拉取。
     /// 返回的 `std.json.Parsed(TagOpenIDList)` 由调用方持有并负责 `deinit`。
     pub fn openIDListByTag(self: *Self, tag_id: i64, next_openid: []const u8) !std.json.Parsed(TagOpenIDList) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try serializeOpenIDListByTag(self.allocator, tag_id, next_openid);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/user/tag/get?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
-        const body = try serializeOpenIDListByTag(self.allocator, tag_id, next_openid);
-        defer self.allocator.free(body);
-
-        const resp = try self.post(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "OpenIDListByTag", TokenReq{
+            .user = self,
+            .url = "https://api.weixin.qq.com/cgi-bin/user/tag/get",
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
 
-        // 失败响应会被 TagOpenIDList 静默吞成全默认值，先按 CommonError 检查 errcode。
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "OpenIDListByTag")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+        // 失败响应会被 TagOpenIDList 静默吞成全默认值，errcode 检查已由 util_retry.callApi 完成。
 
         var parsed = std.json.parseFromSlice(TagOpenIDList, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
@@ -349,70 +275,42 @@ pub const User = struct {
     /// 批量为用户打标签（对应 Go `BatchTag`）。
     pub fn batchTag(self: *Self, open_id_list: []const []const u8, tag_id: i64) !void {
         if (open_id_list.len == 0) return util_error.WechatError.InvalidArgument;
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try serializeOpenIDListWithTag(self.allocator, open_id_list, tag_id);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/tags/members/batchtagging?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
-        const body = try serializeOpenIDListWithTag(self.allocator, open_id_list, tag_id);
-        defer self.allocator.free(body);
-
-        const resp = try self.post(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "BatchTag", TokenReq{
+            .user = self,
+            .url = "https://api.weixin.qq.com/cgi-bin/tags/members/batchtagging",
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "BatchTag")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
     }
 
     /// 批量为用户取消标签（对应 Go `BatchUntag`）。
     pub fn batchUntag(self: *Self, open_id_list: []const []const u8, tag_id: i64) !void {
         if (open_id_list.len == 0) return util_error.WechatError.InvalidArgument;
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try serializeOpenIDListWithTag(self.allocator, open_id_list, tag_id);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/tags/members/batchuntagging?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
-        const body = try serializeOpenIDListWithTag(self.allocator, open_id_list, tag_id);
-        defer self.allocator.free(body);
-
-        const resp = try self.post(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "BatchUntag", TokenReq{
+            .user = self,
+            .url = "https://api.weixin.qq.com/cgi-bin/tags/members/batchuntagging",
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "BatchUntag")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
     }
 
     /// 获取用户身上的标签列表（对应 Go `UserTidList`）。
     /// 返回的切片由调用方持有并负责 `allocator.free`。
     pub fn userTidList(self: *Self, open_id: []const u8) ![]i64 {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try serializeUserTidList(self.allocator, open_id);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/tags/getidlist?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
-        const body = try serializeUserTidList(self.allocator, open_id);
-        defer self.allocator.free(body);
-
-        const resp = try self.post(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "UserTidList", TokenReq{
+            .user = self,
+            .url = "https://api.weixin.qq.com/cgi-bin/tags/getidlist",
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(struct {
@@ -423,7 +321,7 @@ pub const User = struct {
             return util_error.WechatError.DecodeError;
         };
         defer parsed.deinit();
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
+        // errcode 检查已由 util_retry.callApi 完成（失败即抛 ApiError），此处不再重复。
         return self.allocator.dupe(i64, parsed.value.tagid_list);
     }
 
@@ -431,27 +329,17 @@ pub const User = struct {
     /// `begin_openid` 传空串表示从开头拉取，每次最多 1000 个。
     /// 返回的 `std.json.Parsed(OpenidList)` 由调用方持有并负责 `deinit`。
     pub fn getBlackList(self: *Self, begin_openid: []const u8) !std.json.Parsed(OpenidList) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try serializeBeginOpenID(self.allocator, begin_openid);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/tags/members/getblacklist?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
-        const body = try serializeBeginOpenID(self.allocator, begin_openid);
-        defer self.allocator.free(body);
-
-        const resp = try self.post(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "GetBlackList", TokenReq{
+            .user = self,
+            .url = "https://api.weixin.qq.com/cgi-bin/tags/members/getblacklist",
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
 
-        // 失败响应会被 OpenidList 静默吞成全默认值，先按 CommonError 检查 errcode。
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "GetBlackList")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+        // 失败响应会被 OpenidList 静默吞成全默认值，errcode 检查已由 util_retry.callApi 完成。
 
         var parsed = std.json.parseFromSlice(OpenidList, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
@@ -556,22 +444,15 @@ pub const User = struct {
     /// batch 公共方法（对应 Go `batch`）。
     fn batchBlacklist(self: *Self, url_base: []const u8, api_name: []const u8, open_id_list: []const []const u8) !void {
         if (open_id_list.len == 0 or open_id_list.len > 20) return util_error.WechatError.InvalidArgument;
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try serializeOpenIDList(self.allocator, open_id_list);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ url_base, access_token });
-        defer self.allocator.free(uri);
-
-        const body = try serializeOpenIDList(self.allocator, open_id_list);
-        defer self.allocator.free(body);
-
-        const resp = try self.post(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, api_name, TokenReq{
+            .user = self,
+            .url = url_base,
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, api_name)) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
     }
 
     /// 批量获取用户基本信息（对应 Go `BatchGetUserInfo`）。
@@ -580,28 +461,40 @@ pub const User = struct {
     /// 用户列表在 `.value.user_info_list`。
     pub fn batchGetUserInfo(self: *Self, items: []const BatchGetUserListItem) !std.json.Parsed(InfoList) {
         if (items.len == 0 or items.len > 100) return util_error.WechatError.InvalidArgument;
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try serializeBatchGetUserInfo(self.allocator, items);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/user/info/batchget?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
-        const body = try serializeBatchGetUserInfo(self.allocator, items);
-        defer self.allocator.free(body);
-
-        const resp = try self.post(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "BatchGetUserInfo", TokenReq{
+            .user = self,
+            .url = "https://api.weixin.qq.com/cgi-bin/user/info/batchget",
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(InfoList, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
+        // errcode 检查已由 util_retry.callApi 完成（失败即抛 ApiError），此处不再重复。
         return parsed;
+    }
+};
+
+/// 单次带 token 调用的请求构造器：交给 `util/retry.callApi` 复用模块自己的
+/// transport 注入逻辑（`payload` 为 null 时走 GET）。`url` 为不含 access_token 的
+/// 接口地址，`query_suffix` 用于把固定参数拼在 access_token 之后（保持原有参数顺序）。
+/// `send` 必须 `pub`（跨文件调用）。
+const TokenReq = struct {
+    user: *User,
+    url: []const u8,
+    payload: ?[]const u8 = null,
+    query_suffix: []const u8 = "",
+
+    pub fn send(self: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+        const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}{s}", .{ self.url, token, self.query_suffix });
+        defer allocator.free(uri);
+        if (self.payload) |p| return self.user.post(uri, p);
+        return self.user.get(uri);
     }
 };
 
@@ -623,6 +516,26 @@ fn serializeTagBody(allocator: std.mem.Allocator, tag_id: ?i64, tag_name: ?[]con
         try s.write(name);
     }
     try s.endObject();
+    try s.endObject();
+
+    return out.toOwnedSlice();
+}
+
+/// `{"openid":"...","remark":"..."}` — updateRemark 请求体。
+///
+/// 字段名与顺序与改造前的手写插值版本逐字一致（`zig fmt` 之外的空白零差异），
+/// 但值经 `std.json.Stringify` 转义：`open_id` / `remark` 含 `"` 或 `\` 时
+/// 手写 `allocPrint` 会产出非法 JSON（微信侧直接返回解析错误）。
+fn serializeRemarkBody(allocator: std.mem.Allocator, open_id: []const u8, remark: []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+
+    try s.beginObject();
+    try s.objectField("openid");
+    try s.write(open_id);
+    try s.objectField("remark");
+    try s.write(remark);
     try s.endObject();
 
     return out.toOwnedSlice();
@@ -1315,4 +1228,282 @@ test "getAllBlackList 多页聚合去重并终止" {
     try std.testing.expectEqualStrings("oB", all[1]);
     try std.testing.expectEqualStrings("oC", all[2]);
     try std.testing.expect(std.mem.indexOf(u8, stub.uris.items[1], "access_token=token-abc") != null);
+}
+
+// —— token 失效自愈 / 非 token 错误不重试 ——
+
+/// 可作废的假凭据：作废前发 `token-abc`，作废后发 `token-new`（模拟微信换发新 token）。
+const HealToken = struct {
+    cached: []const u8 = "token-abc",
+    invalidates: usize = 0,
+
+    fn getToken(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *HealToken = @ptrCast(@alignCast(ptr));
+        return allocator.dupe(u8, self.cached);
+    }
+
+    fn invalidate(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const self: *HealToken = @ptrCast(@alignCast(ptr));
+        self.invalidates += 1;
+        self.cached = "token-new";
+    }
+
+    const vtable = credential.AccessTokenHandle.VTable{
+        .getAccessToken = getToken,
+        .invalidate = invalidate,
+    };
+};
+
+/// 按调用次序返回响应、并记录每次请求 URI 的 transport。
+const SeqResp = struct {
+    responses: []const []const u8,
+    calls: usize = 0,
+    uris: [4][200]u8 = @splat(@splat(0)),
+    uri_lens: [4]usize = @splat(0),
+    /// 每次请求体的副本（超出容量的请求体不记录，只影响事后断言）。
+    payloads: [4][200]u8 = @splat(@splat(0)),
+    payload_lens: [4]usize = @splat(0),
+
+    fn dispatch(ctx: *anyopaque, allocator: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = method;
+        _ = content_type;
+        const self: *SeqResp = @ptrCast(@alignCast(ctx));
+        if (self.calls < self.uris.len and uri.len <= self.uris[0].len) {
+            @memcpy(self.uris[self.calls][0..uri.len], uri);
+            self.uri_lens[self.calls] = uri.len;
+        }
+        if (self.calls < self.payloads.len and payload.len <= self.payloads[0].len) {
+            @memcpy(self.payloads[self.calls][0..payload.len], payload);
+            self.payload_lens[self.calls] = payload.len;
+        }
+        const idx = @min(self.calls, self.responses.len - 1);
+        self.calls += 1;
+        return allocator.dupe(u8, self.responses[idx]);
+    }
+
+    fn uriAt(self: *const SeqResp, idx: usize) []const u8 {
+        return self.uris[idx][0..self.uri_lens[idx]];
+    }
+
+    fn payloadAt(self: *const SeqResp, idx: usize) []const u8 {
+        return self.payloads[idx][0..self.payload_lens[idx]];
+    }
+};
+
+fn newHealUser(ctx: *Context, alloc: std.mem.Allocator, stub: *SeqResp) User {
+    var u = User.init(ctx, alloc);
+    u.setTransport(SeqResp.dispatch, stub);
+    return u;
+}
+
+test "getUserInfo 40001 自愈：作废缓存 → 换新 token 重试一次并成功" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+        "{\"subscribe\":1,\"openid\":\"oABC\",\"nickname\":\"测试\"}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-user" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var u = newHealUser(&ctx, allocator, &stub);
+
+    const parsed = try u.getUserInfo("oABC");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqualStrings("测试", parsed.value.nickname);
+    // 参数顺序与改造前一致：access_token 在最前，其余参数跟随其后。
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/user/info?access_token=token-abc&openid=oABC&lang=zh_CN",
+        stub.uriAt(0),
+    );
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/user/info?access_token=token-new&openid=oABC&lang=zh_CN",
+        stub.uriAt(1),
+    );
+}
+
+test "getOpenidList 40001 自愈：重试后成功且第二次请求带新 token" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+        "{\"total\":1,\"count\":1,\"next_openid\":\"\",\"data\":{\"openid\":[\"oA\"]}}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-user" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var u = newHealUser(&ctx, allocator, &stub);
+
+    const parsed = try u.getOpenidList("oA");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqualStrings("oA", parsed.value.data.openid[0]);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/user/get?access_token=token-new&next_openid=oA",
+        stub.uriAt(1),
+    );
+}
+
+test "createTag 40001 自愈：重试后解析出新标签" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+        "{\"tag\":{\"id\":100,\"name\":\"测试标签\",\"count\":0}}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-user" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var u = newHealUser(&ctx, allocator, &stub);
+
+    const parsed = try u.createTag("测试标签");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqual(@as(i64, 100), parsed.value.tag.id);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/tags/create?access_token=token-new",
+        stub.uriAt(1),
+    );
+}
+
+test "updateRemark 40001 自愈：重试后成功（且走注入的 transport）" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+        "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-user" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var u = newHealUser(&ctx, allocator, &stub);
+
+    try u.updateRemark("oA", "备注");
+
+    try std.testing.expectEqual(@as(usize, 1), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/user/info/updateremark?access_token=token-new",
+        stub.uriAt(1),
+    );
+}
+
+test "updateRemark 请求体经 JSON 转义：含引号与反斜杠仍合法且字节与手写版一致" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{"{\"errcode\":0,\"errmsg\":\"ok\"}"} };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-user" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var u = newHealUser(&ctx, allocator, &stub);
+
+    // 常规输入：字节必须与改造前的手写 allocPrint 完全一致
+    //（字段名 / 顺序 / 无多余空格 / UTF-8 原样输出）。
+    try u.updateRemark("oA", "备注");
+    try std.testing.expectEqualStrings(
+        "{\"openid\":\"oA\",\"remark\":\"备注\"}",
+        stub.payloadAt(0),
+    );
+
+    // 含 `"` 与 `\` 的输入：手写插值会产出 `"openid":"o"A"` 这类非法 JSON。
+    const weird_open_id = "o\"A";
+    const weird_remark = "a\"b\\c";
+    try u.updateRemark(weird_open_id, weird_remark);
+    const payload = stub.payloadAt(1);
+    try std.testing.expectEqualStrings(
+        "{\"openid\":\"o\\\"A\",\"remark\":\"a\\\"b\\\\c\"}",
+        payload,
+    );
+
+    // 合法 JSON 的最终证据：能被解析回原值。
+    const ParsedRemark = struct {
+        openid: []const u8 = "",
+        remark: []const u8 = "",
+    };
+    const parsed = try std.json.parseFromSlice(ParsedRemark, allocator, payload, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(weird_open_id, parsed.value.openid);
+    try std.testing.expectEqualStrings(weird_remark, parsed.value.remark);
+}
+
+test "getBlackList 40001 自愈：重试后解析出黑名单" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":42001,\"errmsg\":\"access_token expired\"}",
+        "{\"total\":1,\"count\":1,\"next_openid\":\"\",\"data\":{\"openid\":[\"oA\"]}}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-user" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var u = newHealUser(&ctx, allocator, &stub);
+
+    const parsed = try u.getBlackList("");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqualStrings("oA", parsed.value.data.openid[0]);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/tags/members/getblacklist?access_token=token-new",
+        stub.uriAt(1),
+    );
+}
+
+test "batchBlackList 40001 自愈：重试后成功且第二次请求带新 token" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":40014,\"errmsg\":\"invalid access_token\"}",
+        "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-user" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var u = newHealUser(&ctx, allocator, &stub);
+
+    const list = [_][]const u8{"oA"};
+    try u.batchBlackList(&list);
+
+    try std.testing.expectEqual(@as(usize, 1), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/tags/members/batchblacklist?access_token=token-new",
+        stub.uriAt(1),
+    );
+}
+
+test "getUserInfo 非 token 错误（45009）不重试也不作废" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":45009,\"errmsg\":\"reach max api daily quota limit\"}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-user" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var u = newHealUser(&ctx, allocator, &stub);
+
+    try std.testing.expectError(util_error.WechatError.ApiError, u.getUserInfo("oA"));
+
+    try std.testing.expectEqual(@as(usize, 0), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), stub.calls);
 }

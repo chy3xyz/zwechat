@@ -5,6 +5,7 @@ const std = @import("std");
 const Context = @import("../context.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// 客服基本信息（对齐 Go manager.go KeFuInfo）。
 pub const KeFuInfo = struct {
@@ -99,86 +100,54 @@ pub const CustomerService = struct {
 
     /// 添加客服账号。
     pub fn addAccount(self: *Self, account: []const u8, nickname: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try encodeKfAccountBody(self.allocator, account, nickname, null);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/customservice/kfaccount/add?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
-        const body = try encodeKfAccountBody(self.allocator, account, nickname, null);
-        defer self.allocator.free(body);
-
-        const resp = try self.postJson(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "AddAccount", TokenReq{
+            .cs = self,
+            .url = "https://api.weixin.qq.com/customservice/kfaccount/add",
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "AddAccount")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
     }
 
     /// 修改客服账号（`kfaccount/update`）。
     pub fn updateAccount(self: *Self, account: []const u8, nickname: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try encodeKfAccountBody(self.allocator, account, nickname, null);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ customerServiceUpdateURL, access_token });
-        defer self.allocator.free(uri);
-
-        const body = try encodeKfAccountBody(self.allocator, account, nickname, null);
-        defer self.allocator.free(body);
-
-        const resp = try self.postJson(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "UpdateAccount", TokenReq{
+            .cs = self,
+            .url = customerServiceUpdateURL,
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "UpdateAccount")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
     }
 
     /// 删除客服帐号（`kfaccount/del`）。
     pub fn deleteAccount(self: *Self, account: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try encodeKfAccountBody(self.allocator, account, "", null);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ customerServiceDeleteURL, access_token });
-        defer self.allocator.free(uri);
-
-        const body = try encodeKfAccountBody(self.allocator, account, "", null);
-        defer self.allocator.free(body);
-
-        const resp = try self.postJson(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "DeleteAccount", TokenReq{
+            .cs = self,
+            .url = customerServiceDeleteURL,
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "DeleteAccount")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
     }
 
     /// 邀请绑定客服帐号和微信号（`kfaccount/inviteworker`）。
     pub fn inviteBind(self: *Self, account: []const u8, invite_wx: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
+        const payload = try encodeKfAccountBody(self.allocator, account, "", invite_wx);
+        defer self.allocator.free(payload);
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ customerServiceInviteURL, access_token });
-        defer self.allocator.free(uri);
-
-        const body = try encodeKfAccountBody(self.allocator, account, "", invite_wx);
-        defer self.allocator.free(body);
-
-        const resp = try self.postJson(uri, body);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "InviteBind", TokenReq{
+            .cs = self,
+            .url = customerServiceInviteURL,
+            .payload = payload,
+        });
         defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "InviteBind")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
     }
 
     /// 获取在线客服列表（`getonlinekflist`）。
@@ -186,13 +155,10 @@ pub const CustomerService = struct {
     /// 返回的 `std.json.Parsed(KfOnlineListResponse)` 由调用方持有并负责 `deinit`，
     /// 在线客服列表在 `.value.kf_online_list`。响应 errcode 非 0 时返回 `WechatError.ApiError`。
     pub fn onlineList(self: *Self) !std.json.Parsed(KfOnlineListResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ customerServiceOnlineListURL, access_token });
-        defer self.allocator.free(uri);
-
-        const body = try self.get(uri);
+        const body = try util_retry.callApi(self.ctx, self.allocator, "OnlineList", TokenReq{
+            .cs = self,
+            .url = customerServiceOnlineListURL,
+        });
         defer self.allocator.free(body);
 
         var parsed = std.json.parseFromSlice(KfOnlineListResponse, self.allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -200,9 +166,7 @@ pub const CustomerService = struct {
         };
         errdefer parsed.deinit();
 
-        if (parsed.value.errcode != 0) {
-            return util_error.WechatError.ApiError;
-        }
+        // errcode 检查已由 util_retry.callApi 完成（失败即抛 ApiError），此处不再重复。
         return parsed;
     }
 
@@ -210,16 +174,6 @@ pub const CustomerService = struct {
     ///
     /// `file_path` 末段作为文件名；文件内容由 HTTP 层读取。
     pub fn uploadHeadImg(self: *Self, account: []const u8, file_path: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?access_token={s}&kf_account={s}",
-            .{ customerServiceUploadHeadImgURL, access_token, account },
-        );
-        defer self.allocator.free(uri);
-
         const fields = [_]util_http.MultipartField{
             .{
                 .is_file = true,
@@ -229,14 +183,16 @@ pub const CustomerService = struct {
                 .file_path = file_path,
             },
         };
+        const query_suffix = try std.fmt.allocPrint(self.allocator, "&kf_account={s}", .{account});
+        defer self.allocator.free(query_suffix);
 
-        const resp = try self.postMultipart(uri, &fields);
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "UploadHeadImg", TokenReq{
+            .cs = self,
+            .url = customerServiceUploadHeadImgURL,
+            .fields = &fields,
+            .query_suffix = query_suffix,
+        });
         defer self.allocator.free(resp);
-
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "UploadHeadImg")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
     }
 
     /// 获取所有客服账号列表。
@@ -244,17 +200,10 @@ pub const CustomerService = struct {
     /// 返回的 `std.json.Parsed(KfListResponse)` 由调用方持有并负责 `deinit`，
     /// 客服列表在 `.value.kf_list`。响应 errcode 非 0 时返回 `WechatError.ApiError`。
     pub fn listAccounts(self: *Self) !std.json.Parsed(KfListResponse) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/customservice/getkflist?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
-
-        const body = try self.get(uri);
+        const body = try util_retry.callApi(self.ctx, self.allocator, "ListAccounts", TokenReq{
+            .cs = self,
+            .url = "https://api.weixin.qq.com/cgi-bin/customservice/getkflist",
+        });
         defer self.allocator.free(body);
 
         var parsed = std.json.parseFromSlice(KfListResponse, self.allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -262,10 +211,28 @@ pub const CustomerService = struct {
         };
         errdefer parsed.deinit();
 
-        if (parsed.value.errcode != 0) {
-            return util_error.WechatError.ApiError;
-        }
+        // errcode 检查已由 util_retry.callApi 完成（失败即抛 ApiError），此处不再重复。
         return parsed;
+    }
+};
+
+/// 单次带 token 调用的请求构造器：交给 `util/retry.callApi` 复用模块自己的
+/// transport 注入逻辑。三者互斥优先级：`fields`（multipart）> `payload`（POST JSON）
+/// > 都没有（GET）。`query_suffix` 用于在 `access_token` 之后追加固定查询参数。
+/// `send` 必须 `pub`（跨文件调用）。
+const TokenReq = struct {
+    cs: *CustomerService,
+    url: []const u8,
+    payload: ?[]const u8 = null,
+    fields: ?[]const util_http.MultipartField = null,
+    query_suffix: []const u8 = "",
+
+    pub fn send(self: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+        const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}{s}", .{ self.url, token, self.query_suffix });
+        defer allocator.free(uri);
+        if (self.fields) |f| return self.cs.postMultipart(uri, f);
+        if (self.payload) |p| return self.cs.postJson(uri, p);
+        return self.cs.get(uri);
     }
 };
 
@@ -536,4 +503,189 @@ test "encodeKfAccountBody 字段省略与转义" {
     const body = try encodeKfAccountBody(allocator, "kf\"1", "", null);
     defer allocator.free(body);
     try std.testing.expectEqualStrings("{\"kf_account\":\"kf\\\"1\"}", body);
+}
+
+// —— token 失效自愈 / 非 token 错误不重试 ——
+
+/// 可作废的假凭据：作废前发 `token-abc`，作废后发 `token-new`（模拟微信换发新 token）。
+const HealToken = struct {
+    cached: []const u8 = "token-abc",
+    invalidates: usize = 0,
+
+    fn getToken(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        const self: *HealToken = @ptrCast(@alignCast(ptr));
+        return allocator.dupe(u8, self.cached);
+    }
+
+    fn invalidate(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+        _ = allocator;
+        const self: *HealToken = @ptrCast(@alignCast(ptr));
+        self.invalidates += 1;
+        self.cached = "token-new";
+    }
+
+    const vtable = credential.AccessTokenHandle.VTable{
+        .getAccessToken = getToken,
+        .invalidate = invalidate,
+    };
+};
+
+/// 按调用次序返回响应、并记录每次请求 URI 的 transport。
+const SeqResp = struct {
+    responses: []const []const u8,
+    calls: usize = 0,
+    uris: [4][160]u8 = @splat(@splat(0)),
+    uri_lens: [4]usize = @splat(0),
+
+    fn dispatch(ctx: *anyopaque, allocator: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = method;
+        _ = payload;
+        _ = content_type;
+        const self: *SeqResp = @ptrCast(@alignCast(ctx));
+        if (self.calls < self.uris.len and uri.len <= self.uris[0].len) {
+            @memcpy(self.uris[self.calls][0..uri.len], uri);
+            self.uri_lens[self.calls] = uri.len;
+        }
+        const idx = @min(self.calls, self.responses.len - 1);
+        self.calls += 1;
+        return allocator.dupe(u8, self.responses[idx]);
+    }
+
+    fn uriAt(self: *const SeqResp, idx: usize) []const u8 {
+        return self.uris[idx][0..self.uri_lens[idx]];
+    }
+};
+
+fn newHealCs(ctx: *Context, alloc: std.mem.Allocator, stub: *SeqResp) CustomerService {
+    var cs = CustomerService.init(ctx, alloc);
+    cs.setTransport(SeqResp.dispatch, stub);
+    return cs;
+}
+
+test "listAccounts 40001 自愈：作废缓存 → 换新 token 重试一次并成功" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+        "{\"kf_list\":[{\"kf_account\":\"kf1@test\",\"nickname\":\"客服一\"}]}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-cs" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var cs = newHealCs(&ctx, allocator, &stub);
+
+    const parsed = try cs.listAccounts();
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.kf_list.len);
+    try std.testing.expectEqualStrings("kf1@test", parsed.value.kf_list[0].kf_account);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/customservice/getkflist?access_token=token-abc",
+        stub.uriAt(0),
+    );
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/customservice/getkflist?access_token=token-new",
+        stub.uriAt(1),
+    );
+}
+
+test "uploadHeadImg 40001 自愈：重试后成功且第二次请求带新 token" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const tmp_path = "zwechat_oa_cs_heal_headimg_test.png";
+    const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{});
+    defer {
+        file.close(io);
+        std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+    }
+    try file.writePositionalAll(io, "fake-headimg-bytes", 0);
+
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+        "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-cs" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var cs = newHealCs(&ctx, allocator, &stub);
+
+    try cs.uploadHeadImg("kf1@test", tmp_path);
+
+    try std.testing.expectEqual(@as(usize, 1), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/customservice/kfaccount/uploadheadimg?access_token=token-new&kf_account=kf1@test",
+        stub.uriAt(1),
+    );
+}
+
+test "updateAccount 40001 自愈：重试后成功且第二次请求带新 token" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+        "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-cs" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var cs = newHealCs(&ctx, allocator, &stub);
+
+    try cs.updateAccount("kf1@test", "新昵称");
+
+    try std.testing.expectEqual(@as(usize, 1), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/customservice/kfaccount/update?access_token=token-new",
+        stub.uriAt(1),
+    );
+}
+
+test "onlineList 40001 自愈：重试后解析出新 token 请求的响应" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+        "{\"kf_online_list\":[{\"kf_account\":\"kf1@test\",\"status\":1}]}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-cs" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var cs = newHealCs(&ctx, allocator, &stub);
+
+    const parsed = try cs.onlineList();
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqualStrings("kf1@test", parsed.value.kf_online_list[0].kf_account);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/customservice/getonlinekflist?access_token=token-new",
+        stub.uriAt(1),
+    );
+}
+
+test "deleteAccount 非 token 错误（65400）不重试也不作废" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"errcode\":65400,\"errmsg\":\"please delete the kf account\"}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-cs" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var cs = newHealCs(&ctx, allocator, &stub);
+
+    try std.testing.expectError(util_error.WechatError.ApiError, cs.deleteAccount("kf1@test"));
+
+    try std.testing.expectEqual(@as(usize, 0), tk.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), stub.calls);
 }

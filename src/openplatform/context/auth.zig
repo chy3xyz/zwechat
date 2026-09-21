@@ -19,6 +19,7 @@ const cache_mod = @import("../../cache/mod.zig");
 const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_uri = @import("../../util/uri.zig");
 const access_token = @import("access_token.zig");
 
 pub const Error = access_token.Error || error{ AuthorizationCodeRequired, WriteFailed };
@@ -187,25 +188,12 @@ fn postJSON(
     return client.postJSON(uri, payload) catch return util_error.WechatError.NetworkError;
 }
 
-/// 按 Go `url.QueryEscape` 规则转义 query 参数：
+/// 按 Go `url.QueryEscape` 规则转义 query 参数（实现收敛到 `util.uri.queryEscape`）：
 /// 仅保留 `[A-Za-z0-9-_.~]`，空格转 `+`，其余 `%XX`。
 ///
 /// 注意不能用 `std.Uri.Component.formatQuery`——它的 `isQueryChar` 允许
 /// `&`/`=`/`?`/`/`/`:` 原样通过，与 Go 语义不符。
-fn escapeQuery(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    for (raw) |c| {
-        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
-            try out.writer.writeByte(c);
-        } else if (c == ' ') {
-            try out.writer.writeByte('+');
-        } else {
-            try out.writer.print("%{X:0>2}", .{c});
-        }
-    }
-    return out.toOwnedSlice();
-}
+const escapeQuery = util_uri.queryEscape;
 
 /// 读取缓存中的 component_access_token（不发起网络请求）。
 ///

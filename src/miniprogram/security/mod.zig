@@ -5,6 +5,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 pub const Security = struct {
     ctx: *Context,
@@ -26,7 +27,8 @@ pub const Security = struct {
     /// 检查一段文本是否含有违法违规内容 (`security.msgSecCheck` v2)。
     ///
     /// 返回微信原始响应体，调用方负责 `allocator.free`；
-    /// 响应 errcode 非 0 时返回 `WechatError.ApiError`。
+    /// 请求走 `util_retry.callApi`：errcode 为 token 失效码时作废缓存并重试一次，
+    /// 其他非 0 errcode 直接返回 `WechatError.ApiError`。
     pub fn msgSecCheck(
         self: Security,
         allocator: std.mem.Allocator,
@@ -34,34 +36,28 @@ pub const Security = struct {
         content: []const u8,
         scene: u8, // 1: 资料，2: 评论，3: 论坛，4: 社交日志
     ) ![]u8 {
-        const access_token = try self.ctx.getAccessToken(allocator);
-        defer allocator.free(access_token);
-
-        const url = try std.fmt.allocPrint(
-            allocator,
-            "https://api.weixin.qq.com/wxa/msg_sec_check?access_token={s}",
-            .{access_token},
-        );
-        defer allocator.free(url);
-
         const body = try encodeMsgSecCheckBody(allocator, openid, content, scene);
         defer allocator.free(body);
 
-        const resp = try self.postJSON(allocator, url, body);
-        errdefer allocator.free(resp);
+        const Sender = struct {
+            security: Security,
+            body: []const u8,
 
-        var parsed = std.json.parseFromSlice(struct {
-            errcode: i64 = 0,
-            errmsg: []const u8 = "",
-        }, allocator, resp, .{ .ignore_unknown_fields = true }) catch {
-            return util_error.WechatError.DecodeError;
+            pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const url = try std.fmt.allocPrint(
+                    a,
+                    "https://api.weixin.qq.com/wxa/msg_sec_check?access_token={s}",
+                    .{token},
+                );
+                defer a.free(url);
+                return c.security.postJSON(a, url, c.body);
+            }
         };
-        defer parsed.deinit();
 
-        if (parsed.value.errcode != 0) {
-            return util_error.WechatError.ApiError;
-        }
-        return resp;
+        return util_retry.callApi(self.ctx, allocator, "MsgSecCheck", Sender{
+            .security = self,
+            .body = body,
+        });
     }
 
     /// 异步校验图片 / 音频是否含有违法违规内容（`media_check_async` v2，
@@ -72,7 +68,7 @@ pub const Security = struct {
     /// `scene` 场景枚举值（1 资料；2 评论；3 论坛；4 社交日志）。
     ///
     /// 返回微信分配的 trace_id，调用方负责 `allocator.free`；
-    /// 响应 errcode 非 0 时返回 `WechatError.ApiError`。
+    /// 请求走 `util_retry.callApi`：errcode 为 token 失效码时作废缓存并重试一次。
     pub fn mediaCheckAsync(
         self: Security,
         allocator: std.mem.Allocator,
@@ -81,20 +77,28 @@ pub const Security = struct {
         openid: []const u8,
         scene: u8,
     ) ![]u8 {
-        const access_token = try self.ctx.getAccessToken(allocator);
-        defer allocator.free(access_token);
-
-        const url = try std.fmt.allocPrint(
-            allocator,
-            "https://api.weixin.qq.com/wxa/media_check_async?access_token={s}",
-            .{access_token},
-        );
-        defer allocator.free(url);
-
         const body = try encodeMediaCheckAsyncBody(allocator, media_url, media_type, openid, scene);
         defer allocator.free(body);
 
-        const resp = try self.postJSON(allocator, url, body);
+        const Sender = struct {
+            security: Security,
+            body: []const u8,
+
+            pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const url = try std.fmt.allocPrint(
+                    a,
+                    "https://api.weixin.qq.com/wxa/media_check_async?access_token={s}",
+                    .{token},
+                );
+                defer a.free(url);
+                return c.security.postJSON(a, url, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, allocator, "MediaCheckAsync", Sender{
+            .security = self,
+            .body = body,
+        });
         defer allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(struct {
@@ -314,4 +318,37 @@ test "mediaCheckAsync errcode 非 0 返回 ApiError" {
 
     const result = sec.mediaCheckAsync(allocator, "https://img.example/x.png", 2, "oABC", 2);
     try std.testing.expectError(util_error.WechatError.ApiError, result);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "msgSecCheck token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/wxa/msg_sec_check?access_token=token-abc", .{
+        .body = "{\"errcode\":42001,\"errmsg\":\"access_token expired\"}",
+    });
+    try mt.addRoute("https://api.weixin.qq.com/wxa/msg_sec_check?access_token=token-new", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{},
+        .access_token_handle = stub.asHandle(),
+    };
+    var sec = Security.init(&ctx);
+    sec.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    const resp = try sec.msgSecCheck(allocator, "oABC", "hello", 2);
+    defer allocator.free(resp);
+    try std.testing.expectEqualStrings("{\"errcode\":0,\"errmsg\":\"ok\"}", resp);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
 }

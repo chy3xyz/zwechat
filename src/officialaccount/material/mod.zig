@@ -8,6 +8,7 @@ const std = @import("std");
 const Context = @import("../context.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_json = @import("../../util/json.zig");
 
 pub const PermanentMaterialType = enum {
     image,
@@ -15,6 +16,31 @@ pub const PermanentMaterialType = enum {
     voice,
     news,
 };
+
+/// 下载素材的缺省体积上限（字节）：100 MB。
+///
+/// 微信侧素材体积口径：图片 10 MB、语音 2 MB、缩略图 64 KB；永久视频素材没有
+/// 公开的下载上限。本 SDK 缺省取 100 MB 作为"防爆内存"安全网（视频口径），
+/// 需要更严的限制时用 `getMediaWithLimit` / `getMediaToFileWithLimit` 覆盖。
+pub const max_media_bytes: usize = 100 * 1024 * 1024;
+
+/// 图片素材推荐上限（微信侧 10 MB）。
+pub const max_image_bytes: usize = 10 * 1024 * 1024;
+
+/// 语音素材推荐上限（微信侧 2 MB）。
+pub const max_voice_bytes: usize = 2 * 1024 * 1024;
+
+/// 视频素材推荐上限（微信侧视频类素材无公开下载上限，取 100 MB）。
+pub const max_video_bytes: usize = 100 * 1024 * 1024;
+
+/// 按素材类型给出推荐的下载上限（可直接传给 `getMediaWithLimit`）。
+pub fn maxBytesFor(mtype: PermanentMaterialType) usize {
+    return switch (mtype) {
+        .image => max_image_bytes,
+        .voice => max_voice_bytes,
+        .video, .news => max_video_bytes,
+    };
+}
 
 /// 单篇图文素材。
 pub const Article = struct {
@@ -339,18 +365,75 @@ pub const Material = struct {
 
     /// 下载临时素材（`media/get`；对照 Go 侧自行用 `util.HTTPGet` 拉取的场景）。
     ///
-    /// 微信会 302 到 CDN，内部走 `HttpClient.getFollowRedirect` 手动跟随。
+    /// 微信会 302 到 CDN，内部走 `HttpClient.getFollowRedirectLimited` 手动跟随，
+    /// 缺省体积上限为 `max_media_bytes`（100 MB，防爆内存的安全网）。
     /// 若响应是 JSON 错误体（如 media_id 无效）返回 `WechatError.ApiError`；
     /// 返回的字节由调用方负责 `free`。
     pub fn getMedia(self: *Self, media_id: []const u8) ![]u8 {
+        return self.getMediaWithLimit(media_id, max_media_bytes);
+    }
+
+    /// 下载临时素材并限制体积（`media/get`）。
+    ///
+    /// `max_bytes` 是响应体上限：**边读边累加**，超过则立即中止并返回
+    /// `error.ResponseTooLarge`（不会把超限素材整个读进内存）。视频素材建议
+    /// 用 `getMediaToFileWithLimit` 流式落盘；按类型取推荐上限见 `maxBytesFor`。
+    ///
+    /// 若响应是 JSON 错误体（如 media_id 无效）返回 `WechatError.ApiError`；
+    /// 返回的字节由调用方负责 `free`。
+    pub fn getMediaWithLimit(self: *Self, media_id: []const u8, max_bytes: usize) ![]u8 {
         const media_url = try self.getMediaURL(media_id);
         defer self.allocator.free(media_url);
 
         const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.getFollowRedirect(media_url);
+        const resp = try client.getFollowRedirectLimited(media_url, max_bytes);
         defer self.allocator.free(resp);
 
         return self.allocator.dupe(u8, try util_error.handleFileResponse(resp, "GetMedia"));
+    }
+
+    /// 下载临时素材并流式落盘，返回写入字节数（缺省上限 `max_media_bytes`）。
+    ///
+    /// 适合视频等大素材：响应体不驻留内存。返回的字节数由调用方用于核对文件大小。
+    pub fn getMediaToFile(self: *Self, media_id: []const u8, file_path: []const u8) !u64 {
+        return self.getMediaToFileWithLimit(media_id, file_path, max_media_bytes);
+    }
+
+    /// 下载临时素材并流式落盘（带体积上限），返回写入字节数。
+    ///
+    /// - 边收边写，不把整个素材读进内存；超过 `max_bytes` 时中止、**删除不完整
+    ///   文件**并返回 `error.ResponseTooLarge`；
+    /// - 微信返回错误时是体积很小的 JSON 错误体，落盘后会回读判定：识别为错误体
+    ///   时删除文件并返回 `WechatError.ApiError`（不会把错误 JSON 当素材留在磁盘上）；
+    /// - `file_path` 已存在时会被覆盖。
+    pub fn getMediaToFileWithLimit(
+        self: *Self,
+        media_id: []const u8,
+        file_path: []const u8,
+        max_bytes: usize,
+    ) !u64 {
+        const media_url = try self.getMediaURL(media_id);
+        defer self.allocator.free(media_url);
+
+        const client = util_http.getDefaultClient(self.allocator);
+        const written = try client.getFollowRedirectToFile(media_url, file_path, max_bytes);
+        try self.rejectJsonErrorFile(file_path, written, "GetMedia");
+        return written;
+    }
+
+    /// 微信的错误响应体是体积很小的 JSON（如 `{"errcode":40007,...}`）。落盘路径
+    /// 为避免把错误 JSON 当成素材留在磁盘上，对不超过 `peek_bytes` 的小文件回读
+    /// 判定：识别为 JSON 错误体时删除文件并返回 `WechatError.ApiError`。
+    fn rejectJsonErrorFile(self: *Self, file_path: []const u8, written: u64, api_name: []const u8) !void {
+        const peek_bytes: usize = 4096;
+        if (written == 0 or written > peek_bytes) return;
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const body = std.Io.Dir.cwd().readFileAlloc(io, file_path, self.allocator, .limited(peek_bytes)) catch return;
+        defer self.allocator.free(body);
+        _ = util_error.handleFileResponse(body, api_name) catch |err| {
+            std.Io.Dir.cwd().deleteFile(io, file_path) catch {};
+            return err;
+        };
     }
 
     /// 删除永久素材。
@@ -470,18 +553,9 @@ pub const Material = struct {
         try buf.append(allocator, '}');
     }
 
-    fn appendJsonString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
-        for (s) |c| {
-            switch (c) {
-                '"' => try buf.appendSlice(allocator, "\\\""),
-                '\\' => try buf.appendSlice(allocator, "\\\\"),
-                '\n' => try buf.appendSlice(allocator, "\\n"),
-                '\r' => try buf.appendSlice(allocator, "\\r"),
-                '\t' => try buf.appendSlice(allocator, "\\t"),
-                else => try buf.append(allocator, c),
-            }
-        }
-    }
+    /// JSON 字符串转义（实现收敛到 `util.json.appendEscapedString`；此前漏转义
+    /// `c < 0x20` 控制字符，图文素材正文含控制字符时会产出非法 JSON）。
+    const appendJsonString = util_json.appendEscapedString;
 };
 
 /// 组装 `update_news` 请求体：`{"media_id":"...","index":N,"articles":{...}}`。
@@ -579,8 +653,8 @@ fn setupTestClient(alloc: std.mem.Allocator, cap: *TestCapture) void {
 }
 
 fn releaseTestClient() void {
-    const client = util_http.getDefaultClient(std.heap.page_allocator);
-    client.setTransport(null, null);
+    // 不依赖「用别的 allocator 再取一次指针」的宽容语义：直接销毁线程局部实例，
+    // 注入的 transport 随实例一起消失（下次 getDefaultClient 会重新初始化）。
     util_http.deinitDefaultClient();
 }
 
@@ -778,6 +852,82 @@ test "Material.getMediaURL 拼接含 access_token 的下载地址" {
         "https://api.weixin.qq.com/cgi-bin/media/get?access_token=stub-ak&media_id=MEDIA_DL_1",
         url,
     );
+}
+
+test "Material.getMediaWithLimit 超限返回 ResponseTooLarge、限内正常" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const big = try alloc.alloc(u8, 4096);
+    @memset(big, 'A');
+
+    var cap = TestCapture{ .allocator = alloc, .response = big };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var m = Material.init(&ctx, alloc);
+
+    try std.testing.expectError(error.ResponseTooLarge, m.getMediaWithLimit("BIG", 1024));
+
+    const data = try m.getMediaWithLimit("BIG", 4096);
+    defer alloc.free(data);
+    try std.testing.expectEqual(@as(usize, 4096), data.len);
+
+    // 缺省入口按 `max_media_bytes`（100 MB）放行。
+    const via_default = try m.getMedia("BIG");
+    defer alloc.free(via_default);
+    try std.testing.expectEqual(@as(usize, 4096), via_default.len);
+
+    // 按类型的推荐上限：图片 10 MB、语音 2 MB、视频 100 MB。
+    try std.testing.expectEqual(@as(usize, 10 * 1024 * 1024), maxBytesFor(.image));
+    try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), maxBytesFor(.voice));
+    try std.testing.expectEqual(max_media_bytes, maxBytesFor(.video));
+}
+
+test "Material.getMediaToFile 落盘、超限清文件、JSON 错误体清文件" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const tmp_path = "zwechat_oa_material_getmedia_tofile_test.bin";
+    defer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const big = try alloc.alloc(u8, 4096);
+    @memset(big, 'B');
+
+    var cap = TestCapture{ .allocator = alloc, .response = "fake-media-payload" };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var m = Material.init(&ctx, alloc);
+
+    const written = try m.getMediaToFile("MEDIA_DL_1", tmp_path);
+    try std.testing.expectEqual(@as(u64, 18), written);
+    const got = try std.Io.Dir.cwd().readFileAlloc(io, tmp_path, alloc, .limited(64));
+    try std.testing.expectEqualStrings("fake-media-payload", got);
+
+    // 超限：中止并删除不完整文件（先清掉上一次的产物）。
+    std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+    cap.response = big;
+    try std.testing.expectError(
+        error.ResponseTooLarge,
+        m.getMediaToFileWithLimit("MEDIA_DL_1", tmp_path, 128),
+    );
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, tmp_path, .{}));
+
+    // JSON 错误体：删除文件并返回 ApiError，不把错误 JSON 当素材留下。
+    cap.response = "{\"errcode\":40007,\"errmsg\":\"invalid media_id\"}";
+    try std.testing.expectError(
+        util_error.WechatError.ApiError,
+        m.getMediaToFile("MEDIA_DL_1", tmp_path),
+    );
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, tmp_path, .{}));
 }
 
 test "Material.getMedia 经 transport 拿到二进制内容" {

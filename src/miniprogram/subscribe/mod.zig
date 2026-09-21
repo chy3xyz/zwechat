@@ -9,6 +9,7 @@ const Context = @import("../context/mod.zig").Context;
 const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 /// 订阅消息请求。
 pub const Message = struct {
@@ -132,16 +133,25 @@ pub const Subscribe = struct {
         const body = try jsonStringifyMessage(self.allocator, msg);
         defer self.allocator.free(body);
 
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
+        const Sender = struct {
+            sub: *Self,
+            body: []const u8,
 
-        const resp = try self.postJSON(uri, body);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                return c.sub.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "SendGetMsgId", Sender{
+            .sub = self,
+            .body = body,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(struct {
@@ -164,27 +174,31 @@ pub const Subscribe = struct {
         const body = try jsonStringifyUniformMessage(self.allocator, msg);
         defer self.allocator.free(body);
 
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/cgi-bin/message/wxopen/template/uniform_send?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
+        const Sender = struct {
+            sub: *Self,
+            body: []const u8,
 
-        const resp = try self.postJSON(uri, body);
-        defer self.allocator.free(resp);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/cgi-bin/message/wxopen/template/uniform_send?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                return c.sub.postJSON(uri, c.body);
+            }
+        };
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "UniformSend")) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "UniformSend", Sender{
+            .sub = self,
+            .body = body,
+        });
+        self.allocator.free(resp);
     }
 
     /// 获取当前帐号下的个人模板列表。
     pub fn listTemplates(self: *Self) !std.json.Parsed(TemplateList) {
-        return self.getParsed("https://api.weixin.qq.com/wxaapi/newtmpl/gettemplate", TemplateList);
+        return self.getParsed("https://api.weixin.qq.com/wxaapi/newtmpl/gettemplate", "ListTemplates", TemplateList);
     }
 
     /// 获取类目。
@@ -193,16 +207,21 @@ pub const Subscribe = struct {
         errmsg: []const u8 = "",
         data: []const Category = &.{},
     }) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/wxaapi/newtmpl/getcategory?access_token={s}",
-            .{access_token},
-        );
-        defer self.allocator.free(uri);
+        const Sender = struct {
+            sub: *Self,
 
-        const resp = try self.httpGet(uri);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/wxaapi/newtmpl/getcategory?access_token={s}",
+                    .{token},
+                );
+                defer allocator.free(uri);
+                return c.sub.httpGet(uri);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "GetCategory", Sender{ .sub = self });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(struct {
@@ -217,28 +236,45 @@ pub const Subscribe = struct {
         return parsed;
     }
 
+    /// 带 token 的 POST 公共路径；`api_name` 用于 ApiError 详情。
     fn postCommon(self: *Self, url: []const u8, body: []const u8, api_name: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ url, access_token });
-        defer self.allocator.free(uri);
+        const Sender = struct {
+            sub: *Self,
+            url: []const u8,
+            body: []const u8,
 
-        const resp = try self.postJSON(uri, body);
-        defer self.allocator.free(resp);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}", .{ c.url, token });
+                defer allocator.free(uri);
+                return c.sub.postJSON(uri, c.body);
+            }
+        };
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, api_name)) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+        const resp = try util_retry.callApi(self.ctx, self.allocator, api_name, Sender{
+            .sub = self,
+            .url = url,
+            .body = body,
+        });
+        self.allocator.free(resp);
     }
 
-    fn getParsed(self: *Self, url: []const u8, comptime T: type) !std.json.Parsed(T) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ url, access_token });
-        defer self.allocator.free(uri);
+    /// 带 token 的 GET + JSON 解析公共路径；`comptime T` 为响应类型。
+    fn getParsed(self: *Self, url: []const u8, api_name: []const u8, comptime T: type) !std.json.Parsed(T) {
+        const Sender = struct {
+            sub: *Self,
+            url: []const u8,
 
-        const resp = try self.httpGet(uri);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}", .{ c.url, token });
+                defer allocator.free(uri);
+                return c.sub.httpGet(uri);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, api_name, Sender{
+            .sub = self,
+            .url = url,
+        });
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(T, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
@@ -552,4 +588,41 @@ test "uniformSend errcode 非 0 返回 ApiError" {
 
     const result = s.uniformSend(.{ .touser = "openid-1" });
     try std.testing.expectError(util_error.WechatError.ApiError, result);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "sendGetMsgId token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token=";
+    try mt.addRoute(base ++ "token-abc", .{
+        .body = "{\"errcode\":40014,\"errmsg\":\"invalid access_token\"}",
+    });
+    try mt.addRoute(base ++ "token-new", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"msgid\":987654}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-test" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var s = Subscribe.init(&ctx, allocator);
+    s.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    const msgid = try s.sendGetMsgId(.{
+        .touser = "openid-1",
+        .template_id = "tmpl-1",
+        .data = &.{.{ .key = "thing1", .value = "hello" }},
+    });
+    try std.testing.expectEqual(@as(i64, 987654), msgid);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
 }

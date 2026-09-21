@@ -9,6 +9,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 pub const SubscribeMessageParams = struct {
     touser: []const u8,
@@ -39,40 +40,35 @@ pub const Message = struct {
     /// 发送小程序订阅消息 (`subscribeMessage.send`)。
     ///
     /// 返回微信原始响应体，调用方负责 `allocator.free`；
-    /// 响应 errcode 非 0 时返回 `WechatError.ApiError`。
+    /// 请求走 `util_retry.callApi`：errcode 为 token 失效码时作废缓存并重试一次，
+    /// 其他非 0 errcode 返回 `WechatError.ApiError`。
     pub fn sendSubscribeMessage(
         self: Message,
         allocator: std.mem.Allocator,
         params: SubscribeMessageParams,
     ) ![]u8 {
-        const access_token = try self.ctx.getAccessToken(allocator);
-        defer allocator.free(access_token);
-
-        const url = try std.fmt.allocPrint(
-            allocator,
-            "https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token={s}",
-            .{access_token},
-        );
-        defer allocator.free(url);
-
         const body = try encodeSubscribeMessageBody(allocator, params);
         defer allocator.free(body);
 
-        const resp = try self.postJSON(allocator, url, body);
-        errdefer allocator.free(resp);
+        const Sender = struct {
+            message: Message,
+            body: []const u8,
 
-        var parsed = std.json.parseFromSlice(struct {
-            errcode: i64 = 0,
-            errmsg: []const u8 = "",
-        }, allocator, resp, .{ .ignore_unknown_fields = true }) catch {
-            return util_error.WechatError.DecodeError;
+            pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const url = try std.fmt.allocPrint(
+                    a,
+                    "https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token={s}",
+                    .{token},
+                );
+                defer a.free(url);
+                return c.message.postJSON(a, url, c.body);
+            }
         };
-        defer parsed.deinit();
 
-        if (parsed.value.errcode != 0) {
-            return util_error.WechatError.ApiError;
-        }
-        return resp;
+        return util_retry.callApi(self.ctx, allocator, "SendSubscribeMessage", Sender{
+            .message = self,
+            .body = body,
+        });
     }
 
     fn postJSON(self: Message, allocator: std.mem.Allocator, uri: []const u8, payload: []const u8) ![]u8 {
@@ -241,6 +237,44 @@ test "sendSubscribeMessage 成功时返回响应体" {
     });
     defer allocator.free(resp);
     try std.testing.expectEqualStrings("{\"errcode\":0,\"errmsg\":\"ok\"}", resp);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "sendSubscribeMessage token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token=";
+    try mt.addRoute(base ++ "token-abc", .{
+        .body = "{\"errcode\":41001,\"errmsg\":\"access_token missing\"}",
+    });
+    try mt.addRoute(base ++ "token-new", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    });
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var m = Message.init(&ctx);
+    m.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    const resp = try m.sendSubscribeMessage(allocator, .{
+        .touser = "oABC",
+        .template_id = "tpl",
+        .data = "{}",
+    });
+    defer allocator.free(resp);
+    try std.testing.expectEqualStrings("{\"errcode\":0,\"errmsg\":\"ok\"}", resp);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -149,6 +149,62 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("bench", "Run performance benchmark suite");
     bench_step.dependOn(&run_bench.step);
 
+    // —— 可选真实接口探针（live probe）——
+    //
+    // 与 `zig build run` 同一风格，但**不 install**：默认 `zig build` 与
+    // `zig build test` 既不会编译也不会运行它，因此不会在 CI / 日常开发路径上
+    // 发出任何真实网络请求。只有显式执行 `zig build live-probe` 才会运行，
+    // 且进程内还有 `ZWECHAT_LIVE_PROBE=1` 门控兜底。
+    //
+    // strict：本工具链的 `zig build <step> -- <args>` 不会把参数转发给被运行的
+    // 进程（`std.Build` 已无 `args` 字段，实测被静默忽略），因此改用构建选项
+    // `-Dstrict`，由这里补上 `--strict` 传给探针。
+    const live_probe_mod = b.createModule(.{
+        .root_source_file = b.path("src/live_probe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zwechat", .module = lib_mod },
+        },
+    });
+    setupOpenSSL(b, live_probe_mod);
+
+    const live_probe_exe = b.addExecutable(.{
+        .name = "live-probe",
+        .root_module = live_probe_mod,
+    });
+    const run_live_probe = b.addRunArtifact(live_probe_exe);
+    if (b.option(bool, "strict", "live-probe: 有 FAIL 时 exit 1（默认只报告，始终 exit 0）") orelse false) {
+        run_live_probe.addArg("--strict");
+    }
+    const live_probe_step = b.step(
+        "live-probe",
+        "Run optional live probes against real WeChat APIs (needs ZWECHAT_LIVE_PROBE=1 + credentials; consumes quota)",
+    );
+    live_probe_step.dependOn(&run_live_probe.step);
+
+    // 探针文件内联的单元测试（纯逻辑、零网络）单独跑。
+    // 刻意**不**并入 `test` step：探针不该被 `zig build test` 自动执行。
+    const live_probe_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/live_probe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zwechat", .module = lib_mod },
+        },
+    });
+    setupOpenSSL(b, live_probe_test_mod);
+
+    const live_probe_tests = b.addTest(.{
+        .root_module = live_probe_test_mod,
+    });
+    const run_live_probe_tests = b.addRunArtifact(live_probe_tests);
+    const live_probe_test_step = b.step(
+        "live-probe-test",
+        "Run the offline unit tests inside src/live_probe.zig (no network)",
+    );
+    live_probe_test_step.dependOn(&run_live_probe_tests.step);
+
     // —— Examples 示例集合 ——
     const examples = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "oa-server", .path = "examples/officialaccount_server.zig" },

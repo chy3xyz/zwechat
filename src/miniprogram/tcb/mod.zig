@@ -8,6 +8,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_retry = @import("../../util/retry.zig");
 
 pub const ConflictMode = enum(i64) {
     insert = 1,
@@ -196,18 +197,33 @@ pub const Tcb = struct {
     }
 
     /// 云函数调用。
+    ///
+    /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次。
     pub fn invokeCloudFunction(self: *Self, env: []const u8, name: []const u8, args: []const u8) !std.json.Parsed(InvokeCloudFunctionRes) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "https://api.weixin.qq.com/tcb/invokecloudfunction?access_token={s}&env={s}&name={s}",
-            .{ access_token, env, name },
-        );
-        defer self.allocator.free(uri);
+        const Sender = struct {
+            allocator: std.mem.Allocator,
+            env: []const u8,
+            name: []const u8,
+            args: []const u8,
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.post(uri, args, null);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(
+                    allocator,
+                    "https://api.weixin.qq.com/tcb/invokecloudfunction?access_token={s}&env={s}&name={s}",
+                    .{ token, c.env, c.name },
+                );
+                defer allocator.free(uri);
+                const client = util_http.getDefaultClient(c.allocator);
+                return client.post(uri, c.args, null);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "InvokeCloudFunction", Sender{
+            .allocator = self.allocator,
+            .env = env,
+            .name = name,
+            .args = args,
+        });
         defer self.allocator.free(resp);
         return parseParsed(InvokeCloudFunctionRes, self.allocator, resp);
     }
@@ -314,31 +330,48 @@ pub const Tcb = struct {
     }
 
     fn postParsed(self: *Self, endpoint: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
-        defer self.allocator.free(uri);
+        const Sender = struct {
+            allocator: std.mem.Allocator,
+            endpoint: []const u8,
+            body: []const u8,
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ c.endpoint, token });
+                defer allocator.free(uri);
+                const client = util_http.getDefaultClient(c.allocator);
+                return client.postJSON(uri, c.body);
+            }
+        };
+
+        const resp = try util_retry.callApi(self.ctx, self.allocator, endpoint, Sender{
+            .allocator = self.allocator,
+            .endpoint = endpoint,
+            .body = body,
+        });
         defer self.allocator.free(resp);
         return parseParsed(T, self.allocator, resp);
     }
 
     fn postCommon(self: *Self, endpoint: []const u8, body: []const u8, api_name: []const u8) !void {
-        const access_token = try self.ctx.getAccessToken(self.allocator);
-        defer self.allocator.free(access_token);
-        const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
-        defer self.allocator.free(uri);
+        const Sender = struct {
+            allocator: std.mem.Allocator,
+            endpoint: []const u8,
+            body: []const u8,
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
-        defer self.allocator.free(resp);
+            pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
+                const uri = try std.fmt.allocPrint(allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ c.endpoint, token });
+                defer allocator.free(uri);
+                const client = util_http.getDefaultClient(c.allocator);
+                return client.postJSON(uri, c.body);
+            }
+        };
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, api_name)) |ce| {
-            defer ce.deinit();
-            return util_error.WechatError.ApiError;
-        }
+        const resp = try util_retry.callApi(self.ctx, self.allocator, api_name, Sender{
+            .allocator = self.allocator,
+            .endpoint = endpoint,
+            .body = body,
+        });
+        self.allocator.free(resp);
     }
 };
 
@@ -584,8 +617,8 @@ fn setupTestClient(alloc: std.mem.Allocator, cap: *TestCapture) void {
 }
 
 fn releaseTestClient() void {
-    const client = util_http.getDefaultClient(std.heap.page_allocator);
-    client.setTransport(null, null);
+    // 不依赖「用别的 allocator 再取一次指针」的宽容语义：直接销毁线程局部实例，
+    // 注入的 transport 随实例一起消失（下次 getDefaultClient 会重新初始化）。
     util_http.deinitDefaultClient();
 }
 
@@ -656,4 +689,45 @@ test "uploadFile 与 databaseCollectionAdd 字符串字段经 JSON 转义" {
     defer body2.deinit();
     try std.testing.expectEqualStrings("env-1", body2.value.env);
     try std.testing.expectEqualStrings("col\"1", body2.value.collection_name);
+}
+
+// ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
+
+const retry_testing = @import("../retry_testing.zig");
+
+test "databaseQuery token 失效自愈：作废缓存后用新 token 重试成功" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    const base = "https://api.weixin.qq.com/tcb/databasequery?access_token=";
+    try mt.addRoute(base ++ "token-abc", .{
+        .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+    });
+    try mt.addRoute(base ++ "token-new", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"pager\":{\"limit\":10,\"offset\":0,\"total\":1},\"data\":[\"{}\"]}",
+    });
+
+    // MockTransport 直接挂在默认 client 上（token 变化反映在 URI 上，需按 URI 路由）。
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-tcb" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var t = Tcb.init(&ctx, allocator);
+
+    var parsed = try t.databaseQuery("env-1", "{}");
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.pager.total);
+
+    try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
 }
