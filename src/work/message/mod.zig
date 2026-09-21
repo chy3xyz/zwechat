@@ -161,8 +161,8 @@ pub const Message = struct {
 
     /// 把任意"已设置好 `msg_type`"的请求 JSON 化后调用 `/cgi-bin/message/send`。
     ///
-    /// `T` 必须是 `SendTextRequest` 或 `SendImageRequest` 之一；调用方
-    /// 应通过 `sendText` / `sendImage` 等包装方法间接调用。
+    /// `T` 必须是 `SendTextRequest` / `SendImageRequest` / `SendMarkdownRequest`
+    /// 之一；调用方应通过 `sendText` / `sendImage` / `sendMarkdown` 等包装方法间接调用。
     fn send(self: *Self, comptime T: type, req: T) !std.json.Parsed(SendResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
@@ -181,7 +181,7 @@ pub const Message = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(SendResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(SendResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();

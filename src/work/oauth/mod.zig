@@ -60,6 +60,30 @@ pub const tfaSuccURL =
     "https://qyapi.weixin.qq.com/cgi-bin/user/tfa_succ?access_token={s}";
 
 // ──────────────────────────────────────────────────────────────────────────────
+// 内部辅助
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// 按 Go `url.QueryEscape` 语义做 percent-encode：
+/// 保留 `[0-9A-Za-z-_.~]`，空格转 `+`，其余字节转 `%XX`（大写 hex）。
+fn queryEscape(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    const hex = "0123456789ABCDEF";
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    for (s) |c| {
+        switch (c) {
+            'A'...'Z', 'a'...'z', '0'...'9', '-', '_', '.', '~' => try buf.append(allocator, c),
+            ' ' => try buf.append(allocator, '+'),
+            else => {
+                try buf.append(allocator, '%');
+                try buf.append(allocator, hex[c >> 4]);
+                try buf.append(allocator, hex[c & 0x0f]);
+            },
+        }
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // 请求 / 响应结构
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -137,33 +161,46 @@ pub const Oauth = struct {
 
     /// 构造网页授权跳转 URL（snsapi_base）。
     ///
-    /// 返回的 URL 由 `redirect_uri` 直接拼接而成；调用方应在传入前自行
-    /// URL 编码（或用 `std.Uri.percentEncodeBackwardsCompatible`），与 Go 行为对齐。
+    /// `redirect_uri` 会按 Go 参考的 `url.QueryEscape` 语义做 percent-encode
+    /// （保留 `[0-9A-Za-z-_.~]`，空格转 `+`，其余转 `%XX` 大写 hex），
+    /// 调用方直接传入原始回调地址即可。
+    /// 返回的 URL 由 `self.allocator` 分配，调用方负责 `free`。
     pub fn getRedirectURL(self: *Self, redirect_uri: []const u8) ![]u8 {
+        const escaped = try queryEscape(self.allocator, redirect_uri);
+        defer self.allocator.free(escaped);
         return std.fmt.allocPrint(
             self.allocator,
             oauthTargetURL,
-            .{ self.ctx.config.corp_id, redirect_uri },
+            .{ self.ctx.config.corp_id, escaped },
         );
     }
 
     /// 构造网页授权跳转 URL（snsapi_privateinfo）。
+    ///
+    /// `redirect_uri` 的编码行为与 `getRedirectURL` 一致；
+    /// 返回的 URL 同样由调用方负责 `free`。
     pub fn getRedirectPrivateURL(self: *Self, redirect_uri: []const u8, agent_id: []const u8) ![]u8 {
+        const escaped = try queryEscape(self.allocator, redirect_uri);
+        defer self.allocator.free(escaped);
         return std.fmt.allocPrint(
             self.allocator,
             oauthTargetPrivateURL,
-            .{ self.ctx.config.corp_id, redirect_uri, agent_id },
+            .{ self.ctx.config.corp_id, escaped, agent_id },
         );
     }
 
     /// 构造独立窗口登录二维码 URL。
     ///
-    /// `state` 通常由调用方生成（Go 版使用 `util.RandomStr(16)`）。
+    /// `state` 通常由调用方生成（Go 版使用 `util.RandomStr(16)`）；
+    /// `redirect_uri` 的编码行为与 `getRedirectURL` 一致；
+    /// 返回的 URL 同样由调用方负责 `free`。
     pub fn getQrContentTargetURL(self: *Self, redirect_uri: []const u8, state: []const u8) ![]u8 {
+        const escaped = try queryEscape(self.allocator, redirect_uri);
+        defer self.allocator.free(escaped);
         return std.fmt.allocPrint(
             self.allocator,
             oauthQrContentTargetURL,
-            .{ self.ctx.config.corp_id, self.ctx.config.agent_id, redirect_uri, state },
+            .{ self.ctx.config.corp_id, self.ctx.config.agent_id, escaped, state },
         );
     }
 
@@ -186,7 +223,7 @@ pub const Oauth = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(ResUserInfo, self.allocator, body, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(ResUserInfo, self.allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -212,7 +249,7 @@ pub const Oauth = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(GetUserInfoResponse, self.allocator, body, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(GetUserInfoResponse, self.allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -247,7 +284,7 @@ pub const Oauth = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(GetUserDetailResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(GetUserDetailResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -280,7 +317,7 @@ pub const Oauth = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(GetTfaInfoResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(GetTfaInfoResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -346,7 +383,7 @@ test "URL 模板常量值正确" {
     try std.testing.expect(std.mem.indexOf(u8, tfaSuccURL, "user/tfa_succ") != null);
 }
 
-test "Oauth.getRedirectURL 拼接 corp_id 和 redirect_uri" {
+test "Oauth.getRedirectURL 拼接 corp_id 并对 redirect_uri 做 QueryEscape" {
     var ctx: Context = .{
         .config = .{ .corp_id = "wwabc123" },
         .access_token_handle = .{ .ptr = undefined, .vtable = undefined },
@@ -354,13 +391,14 @@ test "Oauth.getRedirectURL 拼接 corp_id 和 redirect_uri" {
     var fba_buf: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&fba_buf);
     var o = Oauth.init(&ctx, fba.allocator());
-    const url = try o.getRedirectURL("https://example.com/cb");
+    const url = try o.getRedirectURL("https://example.com/cb?a=1&b=2");
     try std.testing.expect(std.mem.indexOf(u8, url, "wwabc123") != null);
-    try std.testing.expect(std.mem.indexOf(u8, url, "https://example.com/cb") != null);
+    // 与 Go url.QueryEscape("https://example.com/cb?a=1&b=2") 的结果一致。
+    try std.testing.expect(std.mem.indexOf(u8, url, "redirect_uri=https%3A%2F%2Fexample.com%2Fcb%3Fa%3D1%26b%3D2") != null);
     try std.testing.expect(std.mem.indexOf(u8, url, "scope=snsapi_base") != null);
 }
 
-test "Oauth.getRedirectPrivateURL 包含 agentid" {
+test "Oauth.getRedirectPrivateURL 包含 agentid 且编码 redirect_uri" {
     var ctx: Context = .{
         .config = .{ .corp_id = "wwxyz", .agent_id = "42" },
         .access_token_handle = .{ .ptr = undefined, .vtable = undefined },
@@ -372,6 +410,35 @@ test "Oauth.getRedirectPrivateURL 包含 agentid" {
     try std.testing.expect(std.mem.indexOf(u8, url, "wwxyz") != null);
     try std.testing.expect(std.mem.indexOf(u8, url, "scope=snsapi_privateinfo") != null);
     try std.testing.expect(std.mem.indexOf(u8, url, "agentid=42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, url, "redirect_uri=https%3A%2F%2Fexample.com%2Fcb") != null);
+}
+
+test "Oauth.getQrContentTargetURL 编码 redirect_uri 并携带 state" {
+    var ctx: Context = .{
+        .config = .{ .corp_id = "wwqr", .agent_id = "1000009" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = undefined },
+    };
+    var fba_buf: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&fba_buf);
+    var o = Oauth.init(&ctx, fba.allocator());
+    const url = try o.getQrContentTargetURL("https://example.com/qr cb", "state123");
+    try std.testing.expect(std.mem.indexOf(u8, url, "appid=wwqr") != null);
+    try std.testing.expect(std.mem.indexOf(u8, url, "agentid=1000009") != null);
+    // 空格转 '+'（Go QueryEscape 语义）。
+    try std.testing.expect(std.mem.indexOf(u8, url, "redirect_uri=https%3A%2F%2Fexample.com%2Fqr+cb") != null);
+    try std.testing.expect(std.mem.indexOf(u8, url, "state=state123") != null);
+}
+
+test "queryEscape 符合 Go QueryEscape 语义" {
+    const alloc = std.testing.allocator;
+    // 保留字符不编码。
+    const plain = try queryEscape(alloc, "AZaz09-_.~");
+    defer alloc.free(plain);
+    try std.testing.expectEqualStrings("AZaz09-_.~", plain);
+    // 空格转 '+'，其余转大写 hex。
+    const esc = try queryEscape(alloc, "a b&c=中");
+    defer alloc.free(esc);
+    try std.testing.expectEqualStrings("a+b%26c%3D%E4%B8%AD", esc);
 }
 
 test "ResUserInfo 默认值（字段大小写与 Go 一致）" {

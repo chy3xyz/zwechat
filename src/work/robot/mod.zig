@@ -112,7 +112,7 @@ pub const Robot = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(WebhookSendResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(WebhookSendResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -176,7 +176,14 @@ fn appendJsonString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u
             '\n' => try buf.appendSlice(allocator, "\\n"),
             '\r' => try buf.appendSlice(allocator, "\\r"),
             '\t' => try buf.appendSlice(allocator, "\\t"),
-            else => try buf.append(allocator, c),
+            // RFC 8259：U+0000–U+001F 必须转义，统一输出 \u00XX。
+            else => if (c < 0x20) {
+                var hex: [6]u8 = undefined;
+                const esc = std.fmt.bufPrint(&hex, "\\u{x:0>4}", .{c}) catch unreachable;
+                try buf.appendSlice(allocator, esc);
+            } else {
+                try buf.append(allocator, c);
+            },
         }
     }
 }
@@ -225,4 +232,33 @@ test "encodeMarkdownMessage 生成合法 JSON" {
     defer alloc.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"msgtype\":\"markdown\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"markdown\":{\"content\":\"# title\"}") != null);
+}
+
+test "encodeTextMessage 转义控制字符生成合法 JSON" {
+    const alloc = std.testing.allocator;
+    var users = [_][]const u8{"u\x01"};
+    const body = try encodeTextMessage(alloc, .{
+        .content = "a\x07\x0bb",
+        .mentioned_list = &users,
+    });
+    defer alloc.free(body);
+
+    // <0x20 控制字符必须被转义，不能原样写入。
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\u0007") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\u000b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\u0001") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\x07") == null);
+
+    // 输出可被 std.json 解析回原文。
+    const Decoded = struct {
+        msgtype: []const u8,
+        text: struct {
+            content: []const u8,
+            mentioned_list: []const []const u8,
+        },
+    };
+    var parsed = try std.json.parseFromSlice(Decoded, alloc, body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("a\x07\x0bb", parsed.value.text.content);
+    try std.testing.expectEqualStrings("u\x01", parsed.value.text.mentioned_list[0]);
 }

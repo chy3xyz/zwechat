@@ -151,7 +151,7 @@ pub const Invoice = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(GetInvoiceInfoResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(GetInvoiceInfoResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -174,13 +174,14 @@ pub const Invoice = struct {
         );
         defer self.allocator.free(uri);
 
+        const body = try encodeInvoiceBatchJson(self.allocator, req.item_list);
+        defer self.allocator.free(body);
+
         const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, "{\"item_list\":[]}");
+        const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        _ = req; // 解析后已使用占位请求体；这里只做骨架演示。
-
-        var parsed = std.json.parseFromSlice(GetInvoiceBatchResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(GetInvoiceBatchResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -189,6 +190,41 @@ pub const Invoice = struct {
         return parsed;
     }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 内部辅助：手写 JSON 序列化
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `GetInvoiceBatchRequest` 编码为 `{"item_list":[{"card_id":"...","encrypt_code":"..."},...]}`。
+fn encodeInvoiceBatchJson(allocator: std.mem.Allocator, item_list: []const InvoiceRef) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "{\"item_list\":[");
+    for (item_list, 0..) |item, i| {
+        if (i > 0) try buf.append(allocator, ',');
+        try buf.appendSlice(allocator, "{\"card_id\":\"");
+        try appendJsonString(allocator, &buf, item.card_id);
+        try buf.appendSlice(allocator, "\",\"encrypt_code\":\"");
+        try appendJsonString(allocator, &buf, item.encrypt_code);
+        try buf.appendSlice(allocator, "\"}");
+    }
+    try buf.appendSlice(allocator, "]}");
+    return buf.toOwnedSlice(allocator);
+}
+
+fn appendJsonString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '"' => try buf.appendSlice(allocator, "\\\""),
+            '\\' => try buf.appendSlice(allocator, "\\\\"),
+            '\n' => try buf.appendSlice(allocator, "\\n"),
+            '\r' => try buf.appendSlice(allocator, "\\r"),
+            '\t' => try buf.appendSlice(allocator, "\\t"),
+            else => try buf.append(allocator, c),
+        }
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 测试
@@ -221,4 +257,25 @@ test "UserInfo 默认值" {
 test "GetInvoiceBatchRequest 默认值" {
     const r = GetInvoiceBatchRequest{};
     try std.testing.expectEqual(@as(usize, 0), r.item_list.len);
+}
+
+test "encodeInvoiceBatchJson 序列化 item_list" {
+    const alloc = std.testing.allocator;
+    const items = [_]InvoiceRef{
+        .{ .card_id = "card_1", .encrypt_code = "enc\"1" },
+        .{ .card_id = "card_2", .encrypt_code = "enc2" },
+    };
+    const body = try encodeInvoiceBatchJson(alloc, &items);
+    defer alloc.free(body);
+    try std.testing.expectEqualStrings(
+        "{\"item_list\":[{\"card_id\":\"card_1\",\"encrypt_code\":\"enc\\\"1\"},{\"card_id\":\"card_2\",\"encrypt_code\":\"enc2\"}]}",
+        body,
+    );
+}
+
+test "encodeInvoiceBatchJson 空列表" {
+    const alloc = std.testing.allocator;
+    const body = try encodeInvoiceBatchJson(alloc, &.{});
+    defer alloc.free(body);
+    try std.testing.expectEqualStrings("{\"item_list\":[]}", body);
 }

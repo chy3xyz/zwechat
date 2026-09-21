@@ -29,11 +29,17 @@ pub const appchatSendURL = "https://qyapi.weixin.qq.com/cgi-bin/appchat/send";
 // 响应 / 数据结构
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 群聊详情。
+/// `GetChatInfo` 响应：顶层为 errcode/errmsg，群字段包在 `chat_info` 内
+/// （对齐企业微信 `GET /cgi-bin/appchat/get` 的真实返回结构）。
 pub const ChatInfo = struct {
     errcode: i64 = 0,
     errmsg: []const u8 = "",
-    chat_id: []const u8 = "",
+    chat_info: ChatInfoInner = .{},
+};
+
+/// `ChatInfo.chat_info` 内层结构。注意 key 是 `chatid`（不是 `chat_id`）。
+pub const ChatInfoInner = struct {
+    chatid: []const u8 = "",
     name: []const u8 = "",
     owner: []const u8 = "",
     userlist: [][]const u8 = &.{},
@@ -47,11 +53,11 @@ pub const CreateChatRequest = struct {
     userlist: [][]const u8 = &.{},
 };
 
-/// `CreateChat` 响应。
+/// `CreateChat` 响应。微信返回的 key 是 `chatid`（不是 `chat_id`）。
 pub const CreateChatResponse = struct {
     errcode: i64 = 0,
     errmsg: []const u8 = "",
-    chat_id: []const u8 = "",
+    chatid: []const u8 = "",
 };
 
 /// `UpdateChat` 请求体。
@@ -107,7 +113,7 @@ pub const AppChat = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(CreateChatResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(CreateChatResponse, self.allocator, resp, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -134,7 +140,7 @@ pub const AppChat = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(ChatInfo, self.allocator, body, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(ChatInfo, self.allocator, body, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -164,7 +170,7 @@ pub const AppChat = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(CommonResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(CommonResponse, self.allocator, resp, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -196,7 +202,7 @@ fn encodeCreateChatRequest(allocator: std.mem.Allocator, req: CreateChatRequest)
         try appendJsonString(allocator, &buf, u);
         try buf.append(allocator, '"');
     }
-    try buf.append(allocator, "]}");
+    try buf.appendSlice(allocator, "]}");
     return buf.toOwnedSlice(allocator);
 }
 
@@ -224,7 +230,7 @@ fn encodeUpdateChatRequest(allocator: std.mem.Allocator, req: UpdateChatRequest)
         try appendJsonString(allocator, &buf, u);
         try buf.append(allocator, '"');
     }
-    try buf.append(allocator, "]}");
+    try buf.appendSlice(allocator, "]}");
     return buf.toOwnedSlice(allocator);
 }
 
@@ -270,10 +276,87 @@ test "UpdateChatRequest 默认值" {
     try std.testing.expectEqual(@as(usize, 0), r.del_user_list.len);
 }
 
-test "ChatInfo 默认值" {
+test "ChatInfo 默认值（chat_info 内层包装）" {
     const c = ChatInfo{};
-    try std.testing.expectEqualStrings("", c.chat_id);
-    try std.testing.expectEqualStrings("", c.name);
-    try std.testing.expectEqualStrings("", c.owner);
-    try std.testing.expectEqual(@as(usize, 0), c.userlist.len);
+    try std.testing.expectEqualStrings("", c.chat_info.chatid);
+    try std.testing.expectEqualStrings("", c.chat_info.name);
+    try std.testing.expectEqualStrings("", c.chat_info.owner);
+    try std.testing.expectEqual(@as(usize, 0), c.chat_info.userlist.len);
+}
+
+test "CreateChatResponse 默认值（chatid）" {
+    const r = CreateChatResponse{};
+    try std.testing.expectEqualStrings("", r.chatid);
+}
+
+// ── Mock transport 测试 ──────────────────────────────────────────────────────
+
+const StubToken = struct {
+    fn getToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        return allocator.dupe(u8, "token-abc");
+    }
+};
+const token_vtable = @import("../../credential/mod.zig").AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+
+fn makeCtx() Context {
+    return .{
+        .config = .{ .corp_id = "ww-test" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+}
+
+test "getChatInfo 解析 chat_info 包装结构" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/appchat/get?access_token=token-abc&chatid=g-1", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"chat_info\":{\"chatid\":\"g-1\",\"name\":\"研发群\",\"owner\":\"zhangsan\",\"userlist\":[\"zhangsan\",\"lisi\"]}}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var ctx = makeCtx();
+    var ac = AppChat.init(&ctx, allocator);
+    var parsed = try ac.getChatInfo("g-1");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("g-1", parsed.value.chat_info.chatid);
+    try std.testing.expectEqualStrings("研发群", parsed.value.chat_info.name);
+    try std.testing.expectEqualStrings("zhangsan", parsed.value.chat_info.owner);
+    try std.testing.expectEqual(@as(usize, 2), parsed.value.chat_info.userlist.len);
+    try std.testing.expectEqualStrings("lisi", parsed.value.chat_info.userlist[1]);
+}
+
+test "createChat 解析 chatid 字段" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/appchat/create?access_token=token-abc", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"chatid\":\"g-new\"}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var ctx = makeCtx();
+    var ac = AppChat.init(&ctx, allocator);
+    var userlist = [_][]const u8{"zhangsan"};
+    var parsed = try ac.createChat(.{
+        .chat_id = "g-new",
+        .name = "群",
+        .owner = "zhangsan",
+        .userlist = &userlist,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("g-new", parsed.value.chatid);
 }

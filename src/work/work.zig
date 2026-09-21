@@ -3,8 +3,7 @@
 //!
 //! 对应 `_ref/wechat/work/work.go` 的 `Work` struct：聚合企业微信全部子模块
 //! （externalcontact / invoice / addresslist / appchat / robot / oauth / jsapi 等）
-//! 的运行时入口；当前阶段实现 framework + access_token / js_ticket 透传，
-//! 各子模块的懒加载字段在后续 pass 填充。
+//! 的运行时入口；各子模块通过 `getXxx` 懒加载工厂按需构造。
 
 const std = @import("std");
 const cache = @import("../cache/mod.zig");
@@ -30,6 +29,13 @@ const smartbot = @import("smartbot/mod.zig");
 ///
 /// 构造完成后可重复调用 `getAccessToken` / `getJsTicket` 拿到当前可用的 token 与
 /// ticket；子模块（如 oauth / jsapi 等）将在后续阶段以懒加载方法的形式补齐。
+///
+/// ⚠️ **地址稳定性警告**：`Work` 实例一旦被 `getJs()` / 各 `getXxx()` 工厂使用，
+/// 其内存地址就必须保持稳定——派生的子模块持有 `&self.ctx` 裸指针，`getJs()`
+/// 注入的 `WorkJsTicketAdapter` 也持有 `*Work`。**禁止把 `Work` 按值拷贝 / 移动**
+/// （包括从函数按值返回后再取地址、放入会搬迁的 ArrayList 等），
+/// 否则已派生的 `Js` / 子模块会悬垂。需要传递时请使用 `*Work` 指针，
+/// 并把 `Work` 放在 `var` 局部变量 / 堆上固定位置。
 pub const Work = struct {
     ctx: Context,
     /// 缓存当前正在使用的 WorkJsTicket（按 agent_id 区分 corp / agent）。
@@ -42,6 +48,9 @@ pub const Work = struct {
     corp_js_adapter: ?WorkJsTicketAdapter = null,
     /// agent ticket 适配器（由 `getJs()` 初始化并复用）。
     agent_js_adapter: ?WorkJsTicketAdapter = null,
+    /// `newDefaultWork` 分配的 `WorkAccessToken` box（仅该路径非空）。
+    /// `deinit` 时释放；`init` / `newWork` 构造的实例此字段为 null。
+    owned_access_token: ?*credential.WorkAccessToken = null,
 
     /// 通过已构造好的 `Context` 直接组装实例。
     pub fn init(ctx: Context) Work {
@@ -96,7 +105,20 @@ pub const Work = struct {
             .ptr = @ptrCast(ak_box),
             .vtable = &work_access_token_handle_vtable,
         };
+        w.owned_access_token = ak_box;
         return w;
+    }
+
+    /// 释放 `newDefaultWork` 分配的 access_token box。
+    ///
+    /// `allocator` 必须与构造时传入 `newDefaultWork` 的 allocator 一致。
+    /// 对 `init` / `newWork` 构造的实例是空操作（无堆资源）。
+    /// 注意：`config.cache` 指向的缓存实例由调用方持有并自行释放，不在此处处理。
+    pub fn deinit(self: *Work, allocator: std.mem.Allocator) void {
+        if (self.owned_access_token) |box| {
+            allocator.destroy(box);
+            self.owned_access_token = null;
+        }
     }
 
     /// 返回内部 `Context` 指针。
@@ -108,6 +130,11 @@ pub const Work = struct {
     ///
     /// 调用方拿到 `Js` 后可直接调用 `getConfig`（corp）或 `getAgentConfig`（agent），
     /// 无需手动 `setJsTicketHandle`。
+    ///
+    /// ⚠️ **生命周期警告**：返回的 `Js` 内部持有指向本 `Work` 实例
+    /// （`&self.ctx` 以及 `self` 上的 `WorkJsTicketAdapter`）的裸指针。
+    /// 调用方必须保证 `Work` 实例的地址在 `Js` 存活期内保持稳定：
+    /// 禁止在调用 `getJs()` 后移动 / 按值拷贝 `Work`，否则 `Js` 内的指针悬空。
     pub fn getJs(self: *Work) jsapi.Js {
         if (self.corp_js_adapter == null) {
             self.corp_js_adapter = WorkJsTicketAdapter.init(self, .corp_js);
@@ -402,6 +429,34 @@ test "Work.getJsTicket 已设置 js_ticket_handle 时直接转发" {
 test "Work.newDefaultWork 在 cache 为空时返回 CacheUnavailable" {
     const result = Work.newDefaultWork(.{ .corp_id = "ww-no", .corp_secret = "s", .agent_id = "a" }, std.testing.allocator);
     try std.testing.expectError(error.CacheUnavailable, result);
+}
+
+test "Work.newDefaultWork + deinit 无内存泄漏" {
+    const allocator = std.testing.allocator;
+    var mem = try cache.Memory.create(allocator);
+    defer {
+        mem.deinit();
+        allocator.destroy(mem);
+    }
+    var w = try Work.newDefaultWork(.{
+        .corp_id = "ww-deinit",
+        .corp_secret = "secret",
+        .agent_id = "1000001",
+        .cache = mem.asCache(),
+    }, allocator);
+    // deinit 释放 newDefaultWork 分配的 access_token box；
+    // testing.allocator 会校验无泄漏。
+    w.deinit(allocator);
+    try std.testing.expect(w.owned_access_token == null);
+    // 二次 deinit 是安全的（幂等）。
+    w.deinit(allocator);
+}
+
+test "Work.newWork 构造的实例 deinit 是空操作" {
+    var state = TestHandleState{ .token = "tok" };
+    var w = Work.newWork(.{ .corp_id = "ww-nowork" }, makeFakeHandle(&state), null);
+    w.deinit(std.testing.allocator);
+    try std.testing.expect(w.owned_access_token == null);
 }
 
 test "Work.setDefaultTicketType 切换 corp / agent" {

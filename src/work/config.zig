@@ -34,7 +34,8 @@ pub const Config = struct {
     ras_private_key: []const u8 = "",
     /// 微信客服回调 Token（用于校验回调请求签名）。
     token: []const u8 = "",
-    /// 微信客服回调 EncodingAESKey（用于解密回调消息内容）。
+    /// 回调消息 EncodingAESKey（43 字符 base64，用于企业微信回调消息的 AES 加解密）。
+    /// `work/server` / `work/smartbot` 会在使用时自动 base64 解码为 32 字节原始 key。
     encoding_aes_key: []const u8 = "",
 };
 

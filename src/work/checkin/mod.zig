@@ -189,7 +189,7 @@ pub const Checkin = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(CheckinDataResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(CheckinDataResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -220,7 +220,7 @@ pub const Checkin = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(CheckinOptionResponse, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(CheckinOptionResponse, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -360,4 +360,56 @@ test "encodeCheckinOptionJson 生成正确 JSON" {
     });
     defer alloc.free(body);
     try std.testing.expectEqualStrings("{\"datetime\":1700000000,\"useridlist\":[\"u1\"]}", body);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mock access_token 句柄（测试用）
+// ─────────────────────────────────────────────────────────────────────────────
+
+const StubToken = struct {
+    fn getToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        return allocator.dupe(u8, "token-abc");
+    }
+};
+const token_vtable = @import("../../credential/mod.zig").AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+
+fn makeCtx() Context {
+    return .{
+        .config = .{ .corp_id = "ww-test" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+}
+
+test "getCheckinOption 解析含 note_can_use_local_pic/schedulelist/open_sp_checkin 的真实响应" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/checkin/getcheckinoption?access_token=token-abc", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"info\":[{\"userid\":\"zhangsan\",\"group\":{\"grouptype\":1,\"groupid\":100,\"groupname\":\"研发组\",\"note_can_use_local_pic\":true,\"open_sp_checkin\":true,\"schedulelist\":[{\"schedule_id\":1,\"schedule_name\":\"早班\"}],\"checkindate\":[{\"workdays\":[1,2,3,4,5],\"checkintime\":[{\"work_sec\":32400,\"off_work_sec\":61200}]}]}}]}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var ctx = makeCtx();
+    var c = Checkin.init(&ctx, allocator);
+    var parsed = try c.getCheckinOption(.{
+        .datetime = 1700000000,
+        .useridlist = &.{"zhangsan"},
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.info.len);
+    const g = parsed.value.info[0].group;
+    try std.testing.expectEqualStrings("研发组", g.groupname);
+    try std.testing.expectEqual(@as(i64, 100), g.groupid);
+    try std.testing.expectEqual(@as(usize, 1), g.checkindate.len);
+    try std.testing.expectEqual(@as(usize, 5), g.checkindate[0].workdays.len);
+    try std.testing.expectEqual(@as(i64, 32400), g.checkindate[0].checkintime[0].work_sec);
+    // note_can_use_local_pic / schedulelist / open_sp_checkin 是结构体未建模的字段，
+    // 解析不报错即说明 ignore_unknown_fields 生效。
 }
