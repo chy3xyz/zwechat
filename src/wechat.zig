@@ -2,9 +2,8 @@
 //! wechat — 顶层 Wechat struct
 //!
 //! 对应 `_ref/wechat/wechat.go`：聚合官方账号、小程序、支付、开放平台、
-//! 企业微信等子模块。当前阶段实现 `init` / `setCache` / `getOfficialAccount` 三个入口，
-//! 其它业务模块（小程序、支付、开放平台、企业微信）的方法将在后续阶段按
-//! Go 参考实现的同名方法补齐。
+//! 企业微信等子模块，提供 `init` / `setCache` / `getOfficialAccount` /
+//! `getMiniProgram` / `getPay` / `getWork` / `getOpenPlatform` 入口。
 //!
 //! ## 用法
 //!
@@ -15,11 +14,28 @@
 //! wc.setCache(mem.asCache());
 //!
 //! const cfg = officialaccount.Config{ .app_id = "wx...", .app_secret = "..." };
-//! const oa = try wc.getOfficialAccount(
-//!     allocator,
-//!     cfg,
-//!     credential.DefaultAccessToken.asHandleFactory(),
-//! );
+//! const oa = try wc.getOfficialAccount(allocator, cfg, defaultAccessTokenFactory);
+//! ```
+//!
+//! 其中 `default_access_token_factory` 由调用方提供，典型实现如下：
+//!
+//! ```zig
+//! fn defaultAccessTokenFactory(
+//!     cfg: officialaccount.Config,
+//!     c: cache.Cache,
+//! ) anyerror!credential.AccessTokenHandle {
+//!     // ⚠️ 所有权：`handle.ptr` 指向 `DefaultAccessToken` 实例本身，
+//!     // 该实例必须活到 handle 不再被使用（通常与 OfficialAccount 同生命周期）。
+//!     // 绝不要返回指向栈上临时变量的 handle —— 函数返回后即悬垂。
+//!     const dat = try allocator.create(credential.DefaultAccessToken);
+//!     dat.* = credential.DefaultAccessToken.init(
+//!         cfg.app_id,
+//!         cfg.app_secret,
+//!         credential.CacheKeyOfficialAccountPrefix,
+//!         c,
+//!     );
+//!     return dat.asHandle();
+//! }
 //! ```
 
 const std = @import("std");

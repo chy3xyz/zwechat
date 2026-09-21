@@ -37,6 +37,7 @@ const util_rsa_impl = @import("util/rsa_impl.zig");
 const util_asn1 = @import("util/asn1.zig");
 const util_pkcs12 = @import("util/pkcs12.zig");
 const util_template = @import("util/template.zig");
+const util_sync = @import("util/sync.zig");
 const _integration = @import("integration_test.zig");
 
 // —— officialaccount ——
@@ -166,6 +167,7 @@ test "test_runner 编译门 — 强制所有模块被解析 (v2)" {
     _ = util_asn1;
     _ = util_pkcs12;
     _ = util_template;
+    _ = util_sync;
     _ = _integration;
     _ = oa_mod;
     _ = oa_config;

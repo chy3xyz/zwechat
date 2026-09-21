@@ -17,7 +17,10 @@
 const std = @import("std");
 
 /// 版本号，与 `build.zig.zon` 保持一致。
-pub const version = "0.0.1";
+///
+/// 测试会从 `build.zig.zon` 重新读取版本号对账，任何单侧修改都会让
+/// `zig build test` 失败，防止再次漂移。
+pub const version = "0.4.3";
 
 /// 顶层 Wechat 入口。
 pub const wechat = @import("wechat.zig");
@@ -41,7 +44,18 @@ pub const openplatform = @import("openplatform/mod.zig");
 pub const middleware = @import("middleware/mod.zig");
 
 test "version 与 build.zig.zon 保持一致" {
-    try std.testing.expectEqualStrings("0.0.1", version);
+    // 从 build.zig.zon 源码中提取 `.version = "X.Y.Z"` 做对账，
+    // 防止常量与包清单再次漂移（历史上曾停留在 0.0.1 而 zon 已升到 0.4.x）。
+    const allocator = std.testing.allocator;
+    const io = std.Options.debug_io;
+    const zon = try std.Io.Dir.cwd().readFileAlloc(io, "build.zig.zon", allocator, .limited(64 * 1024));
+    defer allocator.free(zon);
+
+    const marker = ".version = \"";
+    const start = std.mem.indexOf(u8, zon, marker) orelse return error.ZonVersionNotFound;
+    const rest = zon[start + marker.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return error.ZonVersionNotFound;
+    try std.testing.expectEqualStrings(rest[0..end], version);
 }
 
 test "root 导出所有业务模块" {

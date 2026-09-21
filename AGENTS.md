@@ -2,7 +2,7 @@
 
 `zwechat` 是使用 Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付、开放平台、企业微信、智能对话等能力。
 
-> ✅ **当前状态**：`zig 0.17.0-dev.1567+f0354179a`。`zig build` / `zig build test` / `zig build run` 全部通过，**357 个内联单元测试全部通过且零内存泄漏**。
+> ✅ **当前状态**：`zig 0.17.0-dev.2151+2ec5523d5`。`zig build` / `zig build test` / `zig build run` 全部通过，**827 个内联单元测试全部通过且零内存泄漏**。
 >
 > 目录包括：
 > - `_ref/wechat/` — 完整克隆的 Go 参考实现（`silenceper/wechat/v2`，Apache-2.0），作为移植依据（**只读**）。
@@ -35,11 +35,11 @@
 
 | 项 | 取值 |
 |---|---|
-| 语言 | Zig `0.17.0-dev.1567+f0354179a`（参考同 workspace 下 `zigmodu`） |
+| 语言 | Zig `0.17.0-dev.2151+2ec5523d5`（参考同 workspace 下 `zigmodu`） |
 | 构建系统 | 原生 `zig build`（`build.zig` + `build.zig.zon`） |
 | 许可证 | Apache License 2.0（与上游参考保持一致，保留 `_ref/wechat/LICENSE`） |
 | 运行目标 | 静态库 + 可执行示例 |
-| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **357 个测试，0 泄漏** |
+| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **827 个测试，0 泄漏** |
 
 外部依赖按需声明在 `build.zig.zon`，尽量减少三方依赖；优先使用 Zig 标准库。当前唯一三方依赖：`httpz`（`chy3xyz/zhttp` v0.6.1，git URL + hash 经 `zig fetch` 引入，OpenSSL 后端，用于微信支付 mTLS）。
 
@@ -75,6 +75,7 @@ src/
 │   ├── time.zig           # getCurrTS ✅
 │   ├── util.zig           # SliceChunk ✅
 │   ├── template.zig       # TODO：消息模板
+│   ├── sync.zig           # SpinMutex（CAS 自旋锁，cache/credential 共用）✅
 │   ├── xml.zig            # XML 编解码（支付回调用）✅
 │   ├── asn1.zig           # DER 解析器 ✅
 │   └── pkcs12.zig         # PKCS#12 解析器 ✅
@@ -106,7 +107,7 @@ src/
 ├── openplatform/          # 开放平台：account/component_access_token 已实现，其余子模块待补齐
 ├── work/                  # 企业微信（顶层 Work + context + config + oauth + jsapi 已实现；addresslist/appchat/checkin/externalcontact/invoice/kf/material/message/msgaudit/robot 持续补齐）
 ├── aispeech/              # 智能对话（占位）
-└── test_runner.zig        # ✅ 编译门（强制 @import 每个模块），357 个测试全部发现
+└── test_runner.zig        # ✅ 编译门（强制 @import 每个模块），827 个测试全部发现
 ```
 
 ---
@@ -343,7 +344,21 @@ const oa = wc.getOfficialAccount(cfg);
   - `std.ArrayListUnmanaged` 必须用 `.empty` 常量（不能再用 `.{}`）。
   - `std.http.Client` 集成 `std.Io` runtime；multipart / PKCS#12 需手写。
 - **Cache 接口选型**：vtable 风格（`*anyopaque` + `*const VTable`），与 std.Io / std.Build 一致，便于未来加 Redis / Memcache 实现而不破坏 ABI。
+- **SpinMutex 统一**：`cache.Memory` 与 `credential` 各令牌获取器原先各自内联一份 5 行 CAS 自旋锁（Zig 0.17-dev 移除了 `std.Thread.Mutex`），已统一收敛到 `src/util/sync.zig`（`util/mod.zig` 以 `sync` 导出；`work_access_token.zig` 的 `pub const SpinMutex` 保留为再导出以兼容已有引用）。
 - **Credential 抽象**：`Fetcher` 函数指针让所有微信服务端交互可被 stub，测试无需真实 HTTP；JSON 响应结构体所有字段都有默认值，能同时容忍成功响应与 `errcode != 0` 的失败响应。
+- **微信 JSON 契约对齐（批量修复）**：std.json 默认 `ignore_unknown_fields = false`——字段名与微信 JSON key 差一个字符即整个调用 DecodeError。已全仓清扫：解析微信 HTTP 响应的 `parseFromSlice` 站点一律加 `.ignore_unknown_fields = true`；字段名必须与微信返回 key **逐字一致**，包括官方笔误（`vaild`、msgaudit 的 `exteranalopenid`）、camelCase（`phoneNumber`/`purePhoneNumber`/`countryCode`）、`w/h`（img_size）、`chatid`（appchat）。请求侧凡嵌用户文本/JSON 的字段一律经 `std.json.Stringify` 转义，禁止 `allocPrint` 裸插值（tcb query、msgSecCheck content 曾因此产生非法 JSON）。virtualpayment 的 `env` 契约是**数字**（0/1）不是字符串，序列化处已特判 `@intFromEnum`。
+- **懒分析陷阱（泛型参数顺序）**：Zig 只分析被实例化的泛型——多个模块的私有泛型 helper（`ocr.fetch`、`tcb.postParsed`/`databaseReq`、`virtualpayment.callUser`/`callPay`/`postBody`）曾出现 `comptime T` 声明位置与全部调用点不一致的潜伏编译错误，旧工具链下从未被触达。教训：新泛型 helper 落地时必须有一个**真实调用它的测试**，否则错位要等到别人第一次调用才炸。
+- **公开 API 变更记录（契约修正，非兼容性保证）**：`work/material` 删除 `getMediaList`（`/cgi-bin/material/get_materiallist` 端点在企业微信不存在）；`work/msgaudit` 重写 `getRoomInfo(roomid)`（真实端点 `groupchat/get`）与 `getAgreeInfo`（真实端点 `check_single_agree`，响应用 `agree_status` 字符串）；`work/appchat` 的 `ChatInfo` 增加 `chat_info` 内层、`CreateChatResponse.chat_id`→`chatid`；`openplatform/account` 四方法（createOpenAccount/getOpenAccount/bind/unbind）均改收 `authorizer_access_token` 并以 `?access_token=` 注入，`Context` 新增 `getAuthrAccessToken`/`refreshAuthrAccessToken`（api_authorizer_token 刷新链路，缓存 key `authorizer_access_token_{appid}`）。`miniprogram/auth` 的 `checkEncryptedData` 请求体改 JSON。
+- **工具链升级 0.17.0-dev.2151 适配**：`std.builtin.Type.Struct` 的 `.fields` 拆分为 `.field_names`/`.field_types` 并行遍历；`inline for` 内 `continue` 报 comptime control flow 错（重构为布尔标志）；`std.Uri.Component{ .raw = s }.formatQuery()` 是 0.17 的 query 编码入口（`isQueryChar` 已私有化）。
+- **懒分析陷阱第二波（40 方法修复）**：miniprogram/{analysis,operation,minidrama,express,order,subscribe} 的私有泛型 helper 再现 `comptime T` 声明位与调用点错位（40 个公开方法首次调用即编译炸），连同 ocr/tcb/virtualpayment 共 9 个模块全部统一为「T 在参数末位」约定。**纪律**：每个模块至少要有 1 个走 mock transport 真实调用公开方法的测试——纯默认值断言的「伪测试」无法实例化泛型，永远发现不了这类错误。
+- **并发模型决策（三轮评估后定案）**：① Memcache/Redis 是单连接客户端，SpinMutex 保护**整个请求-响应往返**（交错写 socket 即协议损坏）；② credential 四个获取器改 singleflight 式——锁只护缓存读/写双检，HTTP 回源在锁外（接受 N 个并发幂等回源，避免 N-1 线程持自旋锁空转烧 CPU）；③ openplatform token 链路**刻意持锁跨 HTTP**——authorizer 刷新会轮换 refresh_token，并发覆盖会永久丢凭据，串行化是必须的；④ `Cache.get` 返回借用切片，有效期至该实例任何后续写操作/deinit（Memcache/Redis 后端任何后续 get 即失效），跨写持有必须 dupe——`cache/mod.zig` 的 get 文档已写明。
+- **公开 API 变更记录（追加）**：`miniprogram/content.checkText(text)` → `checkText(openid, text, scene)`（msg_sec_check 的 openid/scene 是必填）；`officialaccount/customerservice.listAccounts()` 改返回类型化 `Parsed(KfListResponse)`；`officialaccount/user.OpenidList.openids` → `.data.openid`（对齐微信真实嵌套响应）；`miniprogram/riskcontrol` 双收 `unoin_id`（官方笔误，真实线上 key）+ `union_id` 兜底，读用 `getUnionId()`；`work/externalcontact` 补 `ExternalProfile` 子树（ExternalAttr 三类平铺）。**弃用标注（不删方法）**：`MiniProgram.getMessage/getContent` 标记弃用（推荐 getSubscribe().send / getSecurity().msgSecCheck），`getBusiness.getPhoneNumber` 标注推荐用 `getAuth().getPhoneNumber`。
+- **errcode 漏检补齐**：`officialaccount/user`（getUserInfo/getOpenidList）、`customerservice/listAccounts`、`miniprogram/qrcode.getUnlimited`（接入此前零调用的 `util_error.handleFileResponse` 识别 JSON 错误体）。SDK 纪律：解析微信响应必须 errcode 检查或走 `decodeWithCommonError`，失败抛 `WechatError.ApiError`，不推给调用方。
+- **P3 功能补齐批次（对照 Go 参考逐方法移植，全部带 mock-transport 调用测试）**：openplatform 首次授权链路（`context/auth.zig`：queryAuthCode/getPreCode/getAuthrInfo/getComponentLoginPage/getBindComponentURL(V2)）+ FastRegisterWeapp（`miniprogram/component.zig`）；work/addresslist 33/33 全覆盖（部门/成员/标签/互转/邀请/互联企业）；work/externalcontact 78/79（contact_way 全套、groupchat、离职/在职继承、群发、朋友圈、客户规则、获客助手；仅 GetCallbackMessage 非 REST 未移植）；work/kf 31 个服务端 API（syncMsg 游标、升级服务、知识库、统计）；officialaccount 客服消息全类型 + 转客服 + typing、用户标签/黑名单/batchGet；datacube 21/21、broadcast 12、material AddVideo、customerservice 账号管理 7。基础设施：`util/http.zig` 新增 `getFollowRedirect`（GET 手动 302 跟随，≤2 跳，仅 http/https，防开放重定向）+ `officialaccount/material.getMedia`/`work/material.getTempFile` 媒体下载；miniprogram 长尾 mediaCheckAsync/getPaidUnionID/queryScheme/uniformSend。要点：`std.Uri.Component.formatQuery` 不转义 `&=?/:`，与 Go `url.QueryEscape` 不兼容，授权链接构造需手写 Go 语义转义；返回 `std.json.Parsed` 必须 `.allocate = .alloc_always`。
+- **P3 收尾批次**：openplatform/miniprogram 代运营接口（`basic.zig`：账号信息/昵称/签名/头像/搜索状态，走 authorizer token）；oa material AddMaterial 图片/语音、broadcast preview（PreviewTarget union，替代 Go 链式 API）+ SendImage；miniprogram 订阅推送解析（`PushReceiver.getMsgData` JSON/XML 双路径）；kf 富媒体（`sendMsgRich` 9 类消息 union、syncMsg 9 类消息 + 4 类事件强类型）；pay v3 退款（`pay/v3/refund.zig`，Go 参考无 v3，以微信官方文档为准；notify 解密复用现有 GCM 能力）；oa user 分页封装（`listAllUserOpenIDs`/`getAllBlackList`，带游标不推进兜底）。`doc/api_guide.md` 从 235 行扩到 ~620 行（开放平台授权全链路时序 + work/miniprogram/oa 高频场景 + 缓存凭据配置 + 每章「常见坑」框）。
+- **msgaudit 解密 SDK 决策：明确不做**。企业微信会话存档消息解密依赖官方私有 `libWeWorkFinanceSdk`（C ABI + 预编译 .so/.dll），Go 参考也是 cgo 直连；Zig 侧引入需 link 闭源二进制且无法离线测试，与「测试不依赖外部服务」纪律冲突。当前只提供元数据接口（getRoomInfo/getAgreeInfo/getChatInfo）。如未来业务必需，再单独立项做 C ABI 绑定 + 真机集成测试。
+- **最后三处尾巴（已清零）**：① broadcast 全员群发 `sendXxxToAll` 六组（`mass/sendall` + `filter:{is_to_all:true}`，对应 Go `chooseTagOrOpenID` 的 `user==nil` 分支）；② miniprogram 推送事件 **15/15 全覆盖**（getEvent 全部 case，JSON/XML 双路径，未知事件仍回退 raw 兜底）；③ kf `OriginData` 原始 JSON 回捕——用 `std.json` 的 `jsonParse` 钩子实现：`SyncMessage.jsonParse` 先把消息元素物化成 `std.json.Value` 树，再 `parseFromValueLeaky` 解出强类型字段并把树挂到 `origin_data`（单次解析、同一 arena、对既有代码零侵入），配套 `getOriginData`/`originAs`/`originPayloadAs` 支持对未建模字段/newtype 的二次解析。代价：每条消息多一份 Value 副本（解析开销与内存约翻倍），若成热点可按 msgtype 白名单开关；重复 JSON 键从报错变为后者覆盖（微信不下发重复键，可接受）。
+- **Go 参考覆盖率现状**（对照 `_ref/wechat`）：officialaccount 客服消息/用户标签/黑名单/datacube 21/21/素材/broadcast 12+6/客服账号管理；work addresslist 33/33、externalcontact 78/79（仅非 REST 的 GetCallbackMessage 未移植）、kf 服务端 31/31 + 富媒体收发 + OriginData、appchat/message/oauth/robot/jsapi/server/material 对齐；miniprogram 全域含推送 15/15 事件解析；openplatform 授权全链路 + 代运营接口；pay v2 六模块 + v3（config/signer/order/notify/refund）。**唯一已知不做**：msgaudit 解密（见上条）。
 - **TLS / PKCS#12 / mTLS**：`util.pkcs12.zig` 已实现最小 PKCS#12 解析（PBES2/PBKDF2/AES-256-CBC），`util.rsa.zig` 提供 `parseP12` 包装。`util.http.postXMLWithTLS` 读取 P12 → 解析 PEM → 使用 httpz 完成 HTTPS POST。mTLS 客户端证书支持（`tls.config.Client.auth` / `cert`）由上游 zhttp v0.6.0 官方实现（提交 `0431984`，注释明确 “required for WeChat Pay (zwechat)”），本项目**不再维护任何本地补丁**。
 - **外部依赖**：`build.zig.zon` 通过 git URL 依赖 `https://github.com/chy3xyz/zhttp`（tag `v0.6.1`，commit `60a0212` + hash），构建时链接 `-lssl -lcrypto -lc`。升级方式：改 `build.zig.zon` 的 `.url` 后运行 `zig fetch --save=<name> <git-url>` 更新 `.hash`；`build.zig` 需同步适配上游模块名/构建选项（v0.6.0 起模块名 `zhttp`、新增 `-Dh3` / `-Dopenssl-include` 选项，本项目以 `h3=false` + 探测到的 include 路径透传；dependency options 字段名须与 `b.option` 注册名逐字一致，连字符用 `@"openssl-include"` 转义）。
 - **测试基础设施**：`src/test_runner.zig` 顶部有一段「编译门」test，强制 `@import` 每个子文件，并在测试体内做 `_ = mod;` 引用 — 否则 0.17-dev 的 dead-strip 可能把带 inline test 的文件排除掉，导致 `zig build test` 报告「All 1 tests passed」假象。
@@ -382,5 +397,5 @@ const oa = wc.getOfficialAccount(cfg);
 - **新增测试时**在 `src/test_runner.zig` 中加一行 `@import`（即便内容只是占位），否则 `zig build test` 不会发现它。
 - **`build.zig.zon` 的 fingerprint 字段**：写一个占位 hex（如 `0xd658b8e96476550b`）即可；若该值不被 Zig 接受，运行 `zig build` 会提示正确的值。
 - **避免 Zig 0.17-dev 已被移除的 API**：`std.Thread.Mutex`（用 `SpinMutex`）、`std.time.timestamp()`（用 `std.Io.Clock.now`）、`std.fmt.AllocPrintError`（用 `Allocator.Error`）、`std.ArrayListUnmanaged = .{}`（用 `.empty`）。
-- **修改完任何模块后**，必须 `zig build test` 确认 357/357 测试仍全部通过；任何内存泄漏会让测试失败。
+- **修改完任何模块后**，必须 `zig build test` 确认 827/827 测试仍全部通过；任何内存泄漏会让测试失败。
 - **避免 Zig 0.17-dev 已被移除的 API**：`std.fs.cwd()`（改用 `std.Io.Dir.cwd()`）、`std.Thread.Mutex`（用 `SpinMutex`）、`std.time.timestamp()`（用 `std.Io.Clock.now`）、`std.fmt.AllocPrintError`（用 `Allocator.Error`）、`std.ArrayListUnmanaged = .{}`（用 `.empty`）。
