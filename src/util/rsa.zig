@@ -112,8 +112,8 @@ pub fn rsaDecryptBase64(
 
 /// PKCS#12 解析（用于支付 TLS 双向认证）。
 ///
-/// **当前实现**：返回 `P12NotImplemented`。标准库未提供 PKCS#12 解析。
-/// Vendor 方案：参考 `golang.org/x/crypto/pkcs12` 的 Zig 移植（约 400-600 行）。
+/// 由 `pkcs12.zig` 提供完整解析（PBES2/PBKDF2/AES-256-CBC），
+/// 返回证书与私钥的 PEM 编码；`cert_pem` / `key_pem` 由调用方负责 `free`。
 pub const P12Error = error{
     P12NotImplemented,
     InvalidP12File,

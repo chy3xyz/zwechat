@@ -4,6 +4,10 @@
 //! 对应 `_ref/wechat/credential/default_js_ticket.go`：先从缓存中取，
 //! 没有则从微信服务器拉取，并缓存；线程安全（自旋锁 + 双检）。
 //!
+//! **singleflight 风格锁范围**：SpinMutex 只保护缓存读/写临界区，HTTP 回源在锁外执行；
+//! 极端并发 miss 时允许多个并发回源（幂等 GET，last-write-wins 无害），
+//! 避免其他线程在锁上空转烧 CPU。
+//!
 //! 缓存 key：`"{prefix}_jsapi_ticket_{app_id}"`（与 Go 一致）。
 //! 缓存 TTL：`expires_in - 1500` 秒。
 
@@ -18,6 +22,8 @@ const mod_zig = @import("mod.zig");
 const JsTicketHandle = mod_zig.JsTicketHandle;
 const CredentialError = mod_zig.CredentialError;
 const Fetcher = mod_zig.Fetcher;
+const SpinMutex = @import("../util/sync.zig").SpinMutex;
+const tokenTTL = mod_zig.tokenTTL;
 
 /// jsapi_ticket 接口 URL 模板（与 Go `getTicketURL` 一致）。
 /// 真实 URL：`https://api.weixin.qq.com/cgi-bin/ticket/getticket?access_token={ak}&type=jsapi`
@@ -31,24 +37,7 @@ fn defaultFetcher(ctx: *anyopaque, allocator: std.mem.Allocator, url: []const u8
     return client.get(url) catch return CredentialError.HttpError;
 }
 
-/// 自旋锁实现（与 `default_access_token.zig` 保持一致）。
-const SpinMutex = struct {
-    state: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
-
-    const UNLOCKED: u8 = 0;
-    const LOCKED: u8 = 1;
-
-    fn lock(self: *SpinMutex) void {
-        while (self.state.cmpxchgWeak(UNLOCKED, LOCKED, .acquire, .monotonic) != null) {
-            std.atomic.spinLoopHint();
-        }
-    }
-
-    fn unlock(self: *SpinMutex) void {
-        self.state.store(UNLOCKED, .release);
-    }
-};
-
+/// 自旋锁实现统一取自 `util/sync.zig`（与 `default_access_token.zig` 保持一致）。
 /// 默认 `jsapi_ticket` 实现（对应 Go 的 `DefaultJsTicket`）。
 pub const DefaultJsTicket = struct {
     app_id: []const u8,
@@ -124,7 +113,8 @@ pub const DefaultJsTicket = struct {
 
     /// 获取 jsapi_ticket，先缓存后服务端。
     ///
-    /// 流程与 `DefaultAccessToken.getAccessToken` 一致，区别仅在于：
+    /// 流程与 `DefaultAccessToken.getAccessToken` 一致（singleflight 风格，HTTP 回源在锁外），
+    /// 区别仅在于：
     /// - 拉取前需要传入 `access_token`。
     /// - 响应字段名为 `ticket`（而非 `access_token`）。
     pub fn getTicket(
@@ -140,22 +130,24 @@ pub const DefaultJsTicket = struct {
             if (val.len > 0) return allocator.dupe(u8, val);
         }
 
-        // 2) 上锁 + 双检
+        // 2) 加锁双检：命中则直接用现成值
         self.lock.lock();
-        defer self.lock.unlock();
-
         if (try self.cache.get(key)) |val| {
-            if (val.len > 0) return allocator.dupe(u8, val);
+            if (val.len > 0) {
+                self.lock.unlock();
+                return allocator.dupe(u8, val);
+            }
         }
+        self.lock.unlock();
 
-        // 3) 从服务端拉取
+        // 3) 锁外从服务端拉取（自旋锁不跨网络 I/O）
         const url = try self.buildURL(allocator, access_token);
         defer allocator.free(url);
 
         const body = try self.fetcher(self.fetcher_ctx, allocator, url);
         defer allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(TicketResponse, allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(TicketResponse, allocator, body, .{ .ignore_unknown_fields = true }) catch {
             return CredentialError.DecodeError;
         };
         defer parsed.deinit();
@@ -163,9 +155,15 @@ pub const DefaultJsTicket = struct {
         const resp = parsed.value;
         if (resp.errcode != 0) return CredentialError.ApiError;
 
-        // 4) 写入缓存
-        const ttl = resp.expires_in - 1500;
-        try self.cache.set(key, resp.ticket, ttl);
+        // 4) 重新加锁双检：回源期间可能已被其他线程回写，命中直接用现成的
+        self.lock.lock();
+        defer self.lock.unlock();
+        if (try self.cache.get(key)) |val| {
+            if (val.len > 0) return allocator.dupe(u8, val);
+        }
+
+        // 5) 写入缓存（TTL 由 `tokenTTL` 计算：expires_in - 1500，极值防溢出）
+        try self.cache.set(key, resp.ticket, tokenTTL(resp.expires_in));
 
         return allocator.dupe(u8, resp.ticket);
     }

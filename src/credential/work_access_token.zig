@@ -4,10 +4,12 @@
 //! 对应 `_ref/wechat/credential/default_access_token.go` 中的 `WorkAccessToken`：
 //! 与 `DefaultAccessToken` 实现完全一致，但 URL 用 `qyapi.weixin.qq.com/cgi-bin/gettoken`
 //! 并把字段名 `app_id/app_secret` 换成 `corp_id/corp_secret`。
+//! 锁范围同 `default_access_token.zig`：SpinMutex 只保护缓存临界区，HTTP 回源在锁外。
 
 const std = @import("std");
 const Cache = @import("../cache/mod.zig").Cache;
 const credential = @import("mod.zig");
+const SpinMutexImpl = @import("../util/sync.zig").SpinMutex;
 
 /// 企业微信 access_token URL（使用 `{s}` 占位符以匹配 `std.fmt`）。
 pub const workAccessTokenURL = "https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={s}&corpsecret={s}";
@@ -20,23 +22,8 @@ pub const ResAccessToken = struct {
     expires_in: i64 = 0,
 };
 
-/// 自旋锁（与 default_access_token 一致）。
-pub const SpinMutex = struct {
-    state: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
-
-    const UNLOCKED: u8 = 0;
-    const LOCKED: u8 = 1;
-
-    fn lock(self: *SpinMutex) void {
-        while (self.state.cmpxchgWeak(UNLOCKED, LOCKED, .acquire, .monotonic) != null) {
-            std.atomic.spinLoopHint();
-        }
-    }
-
-    fn unlock(self: *SpinMutex) void {
-        self.state.store(UNLOCKED, .release);
-    }
-};
+/// 自旋锁（统一实现取自 `util/sync.zig`；此处保留 `pub` 再导出以兼容已有引用）。
+pub const SpinMutex = SpinMutexImpl;
 
 /// 企业微信 AccessToken 实现。
 pub const WorkAccessToken = struct {
@@ -112,6 +99,8 @@ pub const WorkAccessToken = struct {
         );
     }
 
+    /// 获取 access_token（singleflight 风格：加锁双检缓存 → 锁外回源 →
+    /// 重新加锁双检并回写）。并发 miss 允许多个并发回源（幂等 GET，last-write-wins 无害）。
     pub fn getAccessToken(self: *Self, allocator: std.mem.Allocator) credential.CredentialError![]u8 {
         const key = try self.cacheKey(allocator);
         defer allocator.free(key);
@@ -120,13 +109,17 @@ pub const WorkAccessToken = struct {
             if (val.len > 0) return allocator.dupe(u8, val);
         }
 
+        // 加锁双检：命中则直接用现成值
         self.lock.lock();
-        defer self.lock.unlock();
-
         if (try self.cache.get(key)) |val| {
-            if (val.len > 0) return allocator.dupe(u8, val);
+            if (val.len > 0) {
+                self.lock.unlock();
+                return allocator.dupe(u8, val);
+            }
         }
+        self.lock.unlock();
 
+        // 锁外从服务端拉取（自旋锁不跨网络 I/O）
         const url = try self.buildURL(allocator);
         defer allocator.free(url);
 
@@ -140,8 +133,14 @@ pub const WorkAccessToken = struct {
 
         if (parsed.value.errcode != 0) return credential.CredentialError.ApiError;
 
-        const ttl = parsed.value.expires_in - 1500;
-        try self.cache.set(key, parsed.value.access_token, ttl);
+        // 重新加锁双检：回源期间可能已被其他线程回写，命中直接用现成的
+        self.lock.lock();
+        defer self.lock.unlock();
+        if (try self.cache.get(key)) |val| {
+            if (val.len > 0) return allocator.dupe(u8, val);
+        }
+
+        try self.cache.set(key, parsed.value.access_token, credential.tokenTTL(parsed.value.expires_in));
 
         return allocator.dupe(u8, parsed.value.access_token);
     }

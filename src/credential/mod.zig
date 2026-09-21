@@ -117,6 +117,22 @@ pub const CacheKeyOfficialAccountPrefix = "gowechat_officialaccount_";
 pub const CacheKeyMiniProgramPrefix = "gowechat_miniprogram_";
 pub const CacheKeyWorkPrefix = "gowechat_work_";
 
+/// 由微信返回的 `expires_in` 计算缓存 TTL（秒）。
+///
+/// 规则（与上游 Go 版对齐并修补其边界缺陷）：
+/// - 提前 1500 秒（25 分钟）失效，避免边界 race（与 Go 一致）。
+/// - 减法用饱和版本：恶意 / 异常的 `expires_in`（如 i64 最小值）不会让
+///   `expires_in - 1500` 在 Debug 下整数溢出 panic。
+/// - 结果下限钳制为 1 秒：Go 版在 `expires_in <= 1500` 时会写入一个
+///   「已过期」的缓存条目（每次读取都 miss，等价于高频回源）；而本仓库
+///   `cache.Memory` 的契约是 `ttl <= 0` 表示永不过期，直接透传会让
+///   短寿命 token 变成**永不过期的陈旧 token**。钳制到 1 秒兼顾两者：
+///   几乎立即回源，又绝不永久缓存。
+pub fn tokenTTL(expires_in: i64) i64 {
+    const ttl = expires_in -| 1500;
+    return @max(ttl, 1);
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // 模块自检
 // ──────────────────────────────────────────────────────────────────────────────
@@ -133,4 +149,19 @@ test "credential 模块导出默认实现与前缀常量" {
     try std.testing.expectEqualStrings("gowechat_officialaccount_", CacheKeyOfficialAccountPrefix);
     try std.testing.expectEqualStrings("gowechat_miniprogram_", CacheKeyMiniProgramPrefix);
     try std.testing.expectEqualStrings("gowechat_work_", CacheKeyWorkPrefix);
+}
+
+test "tokenTTL 常规值提前 1500 秒" {
+    try std.testing.expectEqual(@as(i64, 5700), tokenTTL(7200));
+    try std.testing.expectEqual(@as(i64, 1), tokenTTL(1500));
+    try std.testing.expectEqual(@as(i64, 1), tokenTTL(0));
+}
+
+test "tokenTTL 极值不溢出且不退化为永不过期" {
+    // i64 最小值：旧实现 `expires_in - 1500` 在 Debug 下溢出 panic。
+    try std.testing.expectEqual(@as(i64, 1), tokenTTL(std.math.minInt(i64)));
+    // i64 最大值：饱和后仍为巨大正数。
+    try std.testing.expect(tokenTTL(std.math.maxInt(i64)) > 0);
+    // 任何输入结果都必须 >= 1，避免 cache.Memory 把 ttl <= 0 当作永不过期。
+    try std.testing.expectEqual(@as(i64, 1), tokenTTL(-5));
 }

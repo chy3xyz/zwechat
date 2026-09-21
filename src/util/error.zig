@@ -100,7 +100,7 @@ pub fn parseCommonError(
         CommonErrorJson,
         allocator,
         response,
-        .{ .allocate = .alloc_always },
+        .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // JSON 结构不符合 CommonError 形态时（如空响应 / 非 JSON），不视为错误，
@@ -140,7 +140,11 @@ pub fn decodeWithError(
         allocator,
         response,
         .{ .ignore_unknown_fields = true, .allocate = .alloc_always },
-    ) catch return error.DecodeError;
+    ) catch |err| switch (err) {
+        // 分配失败必须原样向上传播，不能吞成 DecodeError（调用方可能重试）。
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.DecodeError,
+    };
 }
 
 /// 错误集合：仅在 JSON 解析失败（无法解析为 CommonError 形态）时返回。
@@ -226,4 +230,38 @@ test "isTokenInvalidErrCode 准确识别 Token 过期错误码" {
     try std.testing.expect(isTokenInvalidErrCode(42001));
     try std.testing.expect(!isTokenInvalidErrCode(40013));
     try std.testing.expect(!isTokenInvalidErrCode(0));
+}
+
+test "decodeWithError 对 JSON 语法错误返回 DecodeError" {
+    const T = struct { a: i64 = 0 };
+    const parsed = decodeWithError(T, std.testing.allocator, "{bad json", "T");
+    try std.testing.expectError(error.DecodeError, parsed);
+}
+
+test "decodeWithError 传播 OutOfMemory 而非吞成 DecodeError" {
+    // 回归：旧实现 `catch return error.DecodeError` 会把分配失败误报为解码错误，
+    // 调用方无法区分「响应 malformed」与「内存不足」。
+    const FailingAlloc = struct {
+        fn alloc(_: *anyopaque, _: usize, _: std.mem.Alignment, _: usize) ?[*]u8 {
+            return null; // 永远分配失败
+        }
+        fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+            return false;
+        }
+        fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+            return null;
+        }
+        fn free(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize) void {}
+    };
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = FailingAlloc.alloc,
+        .resize = FailingAlloc.resize,
+        .remap = FailingAlloc.remap,
+        .free = FailingAlloc.free,
+    };
+    const failing: std.mem.Allocator = .{ .ptr = undefined, .vtable = &vtable };
+
+    const T = struct { a: i64 = 0 };
+    const parsed = decodeWithError(T, failing, "{\"a\":1}", "T");
+    try std.testing.expectError(error.OutOfMemory, parsed);
 }

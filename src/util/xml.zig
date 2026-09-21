@@ -87,7 +87,7 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8) (std.mem.Allocator
         pos += 1; // consume '>'
 
         // 子元素 value（CDATA 或纯文本）
-        const value = readValue(allocator, input, &pos) catch return error.MalformedXml;
+        const value = readValue(input, &pos) catch return error.MalformedXml;
         try elements.append(allocator, .{ .key = key, .value = value });
 
         // 子元素结束标签 `</key>`
@@ -150,8 +150,7 @@ fn readUntil(input: []const u8, pos: *usize, terminators: []const u8) ?[]const u
 
 /// 在 pos 处读取一个元素 value（CDATA 或纯文本），pos 推进到 value 末尾之后。
 /// 返回的 slice 指向 input 内部，无需分配。
-fn readValue(allocator: std.mem.Allocator, input: []const u8, pos: *usize) ![]const u8 {
-    _ = allocator;
+fn readValue(input: []const u8, pos: *usize) ![]const u8 {
     // CDATA 模式
     if (pos.* + 9 <= input.len and std.mem.eql(u8, input[pos.* .. pos.* + 9], "<![CDATA[")) {
         pos.* += 9;

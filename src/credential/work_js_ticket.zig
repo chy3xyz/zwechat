@@ -7,12 +7,14 @@
 //! - agent ticket: `https://qyapi.weixin.qq.com/cgi-bin/ticket/get?access_token=...&type=agent_config`
 //!
 //! 缓存 key 前缀：`{prefix}_corp_jsapi_ticket_{corpid}` / `{prefix}_agent_jsapi_ticket_{corpid}_{agentid}`。
+//! 锁范围同 `default_access_token.zig`：SpinMutex 只保护缓存临界区，HTTP 回源在锁外。
 
 const std = @import("std");
 const Cache = @import("../cache/mod.zig").Cache;
 const util_http = @import("../util/http.zig");
 const util_error = @import("../util/error.zig");
 const credential = @import("mod.zig");
+const SpinMutex = @import("../util/sync.zig").SpinMutex;
 
 /// Ticket 类型（与 Go `TicketType` 对应）。
 pub const TicketType = enum {
@@ -42,24 +44,6 @@ pub const WorkJsTicket = struct {
     fetcher_ctx: *anyopaque,
 
     const Self = @This();
-
-    /// 自旋锁（与 default_js_ticket 一致；Zig 0.17 移除了 std.Thread.Mutex）。
-    const SpinMutex = struct {
-        state: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
-
-        const UNLOCKED: u8 = 0;
-        const LOCKED: u8 = 1;
-
-        fn lock(self: *SpinMutex) void {
-            while (self.state.cmpxchgWeak(UNLOCKED, LOCKED, .acquire, .monotonic) != null) {
-                std.atomic.spinLoopHint();
-            }
-        }
-
-        fn unlock(self: *SpinMutex) void {
-            self.state.store(UNLOCKED, .release);
-        }
-    };
 
     /// 默认 fetcher：通过 HTTP 客户端拉取。
     fn defaultFetcher(ctx: *anyopaque, allocator: std.mem.Allocator, url: []const u8) credential.CredentialError![]u8 {
@@ -140,7 +124,8 @@ pub const WorkJsTicket = struct {
         };
     }
 
-    /// 获取 ticket（双检 + 缓存 + fetcher）。
+    /// 获取 ticket（singleflight 风格：加锁双检缓存 → 锁外回源 →
+    /// 重新加锁双检并回写）。并发 miss 允许多个并发回源（幂等 GET，last-write-wins 无害）。
     pub fn getTicket(
         self: *Self,
         allocator: std.mem.Allocator,
@@ -155,15 +140,17 @@ pub const WorkJsTicket = struct {
             if (val.len > 0) return allocator.dupe(u8, val);
         }
 
-        // 2) 上锁 + 双检
+        // 2) 加锁双检：命中则直接用现成值
         self.lock.lock();
-        defer self.lock.unlock();
-
         if (try self.cache.get(key)) |val| {
-            if (val.len > 0) return allocator.dupe(u8, val);
+            if (val.len > 0) {
+                self.lock.unlock();
+                return allocator.dupe(u8, val);
+            }
         }
+        self.lock.unlock();
 
-        // 3) 从服务端拉取
+        // 3) 锁外从服务端拉取（自旋锁不跨网络 I/O）
         const url = try self.buildURL(allocator, ticket_type, access_token);
         defer allocator.free(url);
 
@@ -177,9 +164,15 @@ pub const WorkJsTicket = struct {
 
         if (parsed.value.errcode != 0) return credential.CredentialError.ApiError;
 
-        // 4) 写入缓存
-        const ttl = parsed.value.expires_in - 1500;
-        try self.cache.set(key, parsed.value.ticket, ttl);
+        // 4) 重新加锁双检：回源期间可能已被其他线程回写，命中直接用现成的
+        self.lock.lock();
+        defer self.lock.unlock();
+        if (try self.cache.get(key)) |val| {
+            if (val.len > 0) return allocator.dupe(u8, val);
+        }
+
+        // 5) 写入缓存（TTL 由 `credential.tokenTTL` 计算：expires_in - 1500，极值防溢出）
+        try self.cache.set(key, parsed.value.ticket, credential.tokenTTL(parsed.value.expires_in));
 
         return allocator.dupe(u8, parsed.value.ticket);
     }

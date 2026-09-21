@@ -6,6 +6,7 @@
 //!
 //! 设计取舍：
 //! - 仅实现单连接（无连接池），满足 access_token / js_ticket 共享缓存场景。
+//!   单连接由 `SpinMutex` 串行化整个请求-响应往返，多线程并发安全。
 //! - `get` 返回的切片借用自 `Redis.last_value`，调用方应在下一次缓存操作前使用。
 //! - 连接按需建立，遇到网络错误时下次操作自动重连。
 //! - 不支持 TLS；如需 TLS，可外部用 stunnel / redis+tls 代理，或后续扩展。
@@ -13,6 +14,7 @@
 const std = @import("std");
 const Cache = @import("mod.zig").Cache;
 const CacheError = @import("mod.zig").CacheError;
+const SpinMutex = @import("../util/sync.zig").SpinMutex;
 
 /// Redis 连接选项。
 pub const Options = struct {
@@ -44,6 +46,9 @@ pub const Redis = struct {
     last_value: ?[]u8 = null,
     /// 读取 RESP 简单字符串/整数字行时使用的临时缓冲区。
     line_buffer: [512]u8 = undefined,
+    /// 单连接互斥：共享 TCP 连接 + 共享 reader/writer/缓冲区，
+    /// 必须串行化整个请求-响应往返，否则多线程并发会交错写 socket（协议损坏）。
+    mutex: SpinMutex = .{},
 
     pub fn create(allocator: std.mem.Allocator, opts: Options) !*Redis {
         const self = try allocator.create(Redis);
@@ -105,6 +110,8 @@ pub const Redis = struct {
 
     fn getImpl(ctx: *anyopaque, key: []const u8) CacheError!?[]const u8 {
         const self: *Redis = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
         errdefer self.disconnect();
         self.ensureConnected() catch return error.StorageError;
 
@@ -127,6 +134,8 @@ pub const Redis = struct {
 
     fn setImpl(ctx: *anyopaque, key: []const u8, val: []const u8, ttl_seconds: i64) CacheError!void {
         const self: *Redis = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
         errdefer self.disconnect();
         self.ensureConnected() catch return error.StorageError;
 
@@ -151,6 +160,8 @@ pub const Redis = struct {
 
     fn isExistImpl(ctx: *anyopaque, key: []const u8) CacheError!bool {
         const self: *Redis = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
         errdefer self.disconnect();
         self.ensureConnected() catch return error.StorageError;
 
@@ -168,6 +179,8 @@ pub const Redis = struct {
 
     fn deleteImpl(ctx: *anyopaque, key: []const u8) CacheError!void {
         const self: *Redis = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
         errdefer self.disconnect();
         self.ensureConnected() catch return error.StorageError;
 
@@ -549,4 +562,56 @@ test "redis 接口公共 API 全部导出" {
     _ = Redis.deinit;
     _ = Redis.asCache;
     _ = Options;
+}
+
+test "redis 多线程并发 set/get 不同 key 全部正确" {
+    const allocator = std.testing.allocator;
+    const port = try findFreePort();
+
+    const addr = std.Io.net.IpAddress{ .ip4 = .{
+        .bytes = .{ 127, 0, 0, 1 },
+        .port = port,
+    } };
+    var ready = std.atomic.Value(bool).init(false);
+    const thread = try mockRedisServer(allocator, addr, &ready);
+    while (!ready.load(.acquire)) {
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+    }
+
+    const redis = try Redis.create(allocator, .{
+        .host = "127.0.0.1",
+        .port = port,
+    });
+    errdefer allocator.destroy(redis);
+    errdefer redis.deinit();
+
+    const THREADS = 8;
+    const OPS = 20;
+
+    const Worker = struct {
+        fn run(client: *Redis, tid: usize) !void {
+            var i: usize = 0;
+            while (i < OPS) : (i += 1) {
+                var key_buf: [32]u8 = undefined;
+                var val_buf: [32]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buf, "wk_{d}_{d}", .{ tid, i });
+                const val = try std.fmt.bufPrint(&val_buf, "val_{d}_{d}", .{ tid, i });
+                const c = client.asCache();
+                try c.set(key, val, 60);
+                const got = (try c.get(key)).?;
+                // get 返回借用切片，必须在下一次缓存操作前比较。
+                if (!std.mem.eql(u8, got, val)) return error.ValueMismatch;
+            }
+        }
+    };
+
+    const threads = try allocator.alloc(std.Thread, THREADS);
+    defer allocator.free(threads);
+    for (threads, 0..) |*t, tid| t.* = try std.Thread.spawn(.{}, Worker.run, .{ redis, tid });
+    for (threads) |t| t.join();
+
+    // 先断开客户端连接（服务器读循环随之退出），再 join 服务器线程。
+    redis.deinit();
+    allocator.destroy(redis);
+    thread.join();
 }

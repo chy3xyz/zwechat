@@ -6,6 +6,7 @@
 //!
 //! 设计取舍：
 //! - 仅实现单连接（无连接池），满足 access_token / js_ticket 共享缓存场景。
+//!   单连接由 `SpinMutex` 串行化整个请求-响应往返，多线程并发安全。
 //! - `get` 返回的切片借用自 `Memcache.last_value`，调用方应在下一次缓存操作前使用。
 //! - 连接按需建立，遇到网络错误时下次操作自动重连。
 //! - 不支持 TLS；如需 TLS，可外部用 stunnel / memcache+tls 代理，或后续扩展。
@@ -13,6 +14,7 @@
 const std = @import("std");
 const Cache = @import("mod.zig").Cache;
 const CacheError = @import("mod.zig").CacheError;
+const SpinMutex = @import("../util/sync.zig").SpinMutex;
 
 /// Memcache 连接选项。
 pub const Options = struct {
@@ -42,6 +44,9 @@ pub const Memcache = struct {
     last_value: ?[]u8 = null,
     /// 读取文本协议响应行时使用的临时缓冲区。
     line_buffer: [1024]u8 = undefined,
+    /// 单连接互斥：共享 TCP 连接 + 共享 reader/writer/缓冲区，
+    /// 必须串行化整个请求-响应往返，否则多线程并发会交错写 socket（协议损坏）。
+    mutex: SpinMutex = .{},
 
     pub fn create(allocator: std.mem.Allocator, opts: Options) !*Memcache {
         const self = try allocator.create(Memcache);
@@ -103,6 +108,8 @@ pub const Memcache = struct {
 
     fn getImpl(ctx: *anyopaque, key: []const u8) CacheError!?[]const u8 {
         const self: *Memcache = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
         errdefer self.disconnect();
         self.ensureConnected() catch return error.StorageError;
 
@@ -118,10 +125,17 @@ pub const Memcache = struct {
 
     fn setImpl(ctx: *anyopaque, key: []const u8, val: []const u8, ttl_seconds: i64) CacheError!void {
         const self: *Memcache = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
         errdefer self.disconnect();
         self.ensureConnected() catch return error.StorageError;
 
-        const exp: u32 = if (ttl_seconds > 0) @intCast(ttl_seconds) else 0;
+        // exptime 是 u32；ttl_seconds 来自外部输入（如微信响应的 expires_in），
+        // 超过 u32 上限（如 i64 max）时 @intCast 会在 Debug 下 panic，这里钳制到上限。
+        const exp: u32 = if (ttl_seconds > 0)
+            @intCast(@min(ttl_seconds, std.math.maxInt(u32)))
+        else
+            0;
         var header_buf: [256]u8 = undefined;
         const header = std.fmt.bufPrint(&header_buf, "set {s} 0 {d} {d}\r\n", .{ key, exp, val.len }) catch return error.StorageError;
         self.sendCommandRaw(header, val) catch return error.StorageError;
@@ -132,6 +146,8 @@ pub const Memcache = struct {
 
     fn isExistImpl(ctx: *anyopaque, key: []const u8) CacheError!bool {
         const self: *Memcache = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
         errdefer self.disconnect();
         self.ensureConnected() catch return error.StorageError;
 
@@ -146,6 +162,8 @@ pub const Memcache = struct {
 
     fn deleteImpl(ctx: *anyopaque, key: []const u8) CacheError!void {
         const self: *Memcache = @ptrCast(@alignCast(ctx));
+        self.mutex.lock();
+        defer self.mutex.unlock();
         errdefer self.disconnect();
         self.ensureConnected() catch return error.StorageError;
 
@@ -345,11 +363,13 @@ fn mockMemcacheServer(allocator: std.mem.Allocator, bind_addr: std.Io.net.IpAddr
                     _ = writer.interface.writeAll("STORED\r\n") catch break;
                 } else if (std.mem.eql(u8, cmd, "delete")) {
                     const key = it.next() orelse continue;
-                    if (store.fetchRemove(key)) |old| {
+                    // 语义修正：删除成功返回 DELETED，键不存在返回 NOT_FOUND。
+                    // （旧实现先 fetchRemove 再反查 contains，导致永远返回 DELETED。）
+                    const resp = if (store.fetchRemove(key)) |old| blk: {
                         alloc.free(old.key);
                         alloc.free(old.value);
-                    }
-                    const resp = if (store.contains(key)) "NOT_FOUND\r\n" else "DELETED\r\n";
+                        break :blk "DELETED\r\n";
+                    } else "NOT_FOUND\r\n";
                     _ = writer.interface.writeAll(resp) catch break;
                 }
                 try writer.interface.flush();
@@ -462,4 +482,90 @@ test "memcache 接口公共 API 全部导出" {
     _ = Memcache.deinit;
     _ = Memcache.asCache;
     _ = Options;
+}
+
+test "memcache set 超大 TTL 不触发 @intCast panic" {
+    // 回归：ttl_seconds 来自外部输入，超过 u32 上限（exptime 字段宽度）时
+    // 旧实现 `if (ttl_seconds > 0) @intCast(ttl_seconds)` 在 Debug 下 panic；
+    // 修复后钳制到 u32 上限照常写入。
+    const allocator = std.testing.allocator;
+    const port = try findFreePort();
+
+    const addr = std.Io.net.IpAddress{ .ip4 = .{
+        .bytes = .{ 127, 0, 0, 1 },
+        .port = port,
+    } };
+    var ready = std.atomic.Value(bool).init(false);
+    const thread = try mockMemcacheServer(allocator, addr, &ready);
+    while (!ready.load(.acquire)) {
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+    }
+
+    var server_str_buf: [32]u8 = undefined;
+    const server_str = try std.fmt.bufPrint(&server_str_buf, "127.0.0.1:{d}", .{port});
+
+    const mc = try Memcache.create(allocator, .{ .server = server_str });
+
+    const c = mc.asCache();
+    try c.set("big_ttl", "v", std.math.maxInt(i64));
+
+    const got = try c.get("big_ttl");
+    try std.testing.expect(got != null);
+    try std.testing.expectEqualStrings("v", got.?);
+
+    mc.deinit();
+    allocator.destroy(mc);
+    thread.join();
+}
+
+test "memcache 多线程并发 set/get 不同 key 全部正确" {
+    const allocator = std.testing.allocator;
+    const port = try findFreePort();
+
+    const addr = std.Io.net.IpAddress{ .ip4 = .{
+        .bytes = .{ 127, 0, 0, 1 },
+        .port = port,
+    } };
+    var ready = std.atomic.Value(bool).init(false);
+    const thread = try mockMemcacheServer(allocator, addr, &ready);
+    while (!ready.load(.acquire)) {
+        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+    }
+
+    var server_str_buf: [32]u8 = undefined;
+    const server_str = try std.fmt.bufPrint(&server_str_buf, "127.0.0.1:{d}", .{port});
+
+    const mc = try Memcache.create(allocator, .{ .server = server_str });
+    errdefer allocator.destroy(mc);
+    errdefer mc.deinit();
+
+    const THREADS = 8;
+    const OPS = 20;
+
+    const Worker = struct {
+        fn run(client: *Memcache, tid: usize) !void {
+            var i: usize = 0;
+            while (i < OPS) : (i += 1) {
+                var key_buf: [32]u8 = undefined;
+                var val_buf: [32]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buf, "wk_{d}_{d}", .{ tid, i });
+                const val = try std.fmt.bufPrint(&val_buf, "val_{d}_{d}", .{ tid, i });
+                const c = client.asCache();
+                try c.set(key, val, 60);
+                const got = (try c.get(key)).?;
+                // get 返回借用切片，必须在下一次缓存操作前比较。
+                if (!std.mem.eql(u8, got, val)) return error.ValueMismatch;
+            }
+        }
+    };
+
+    const threads = try allocator.alloc(std.Thread, THREADS);
+    defer allocator.free(threads);
+    for (threads, 0..) |*t, tid| t.* = try std.Thread.spawn(.{}, Worker.run, .{ mc, tid });
+    for (threads) |t| t.join();
+
+    // 先断开客户端连接（服务器读循环随之退出），再 join 服务器线程。
+    mc.deinit();
+    allocator.destroy(mc);
+    thread.join();
 }

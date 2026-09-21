@@ -41,6 +41,31 @@ fn toUpperHex(allocator: Allocator, bytes: []const u8) Allocator.Error![]u8 {
     return out;
 }
 
+const hex_lower = "0123456789abcdef";
+
+fn toLowerHex(allocator: Allocator, bytes: []const u8) Allocator.Error![]u8 {
+    const out = try allocator.alloc(u8, bytes.len * 2);
+    errdefer allocator.free(out);
+    for (bytes, 0..) |b, i| {
+        out[i * 2] = hex_lower[b >> 4];
+        out[i * 2 + 1] = hex_lower[b & 0x0F];
+    }
+    return out;
+}
+
+/// 计算 `content` 的 MD5 摘要并返回**小写** hex 字符串。
+///
+/// 与 `calculateSign`（大写 hex，用于签名）不同，本函数用于构造加解密密钥
+/// （如微信支付退款通知的 `MD5(mch_key)` → 32 字节 AES key，上游 Go 用
+/// `hex.EncodeToString` 输出小写）。大小写敏感，混用会导致解密失败。
+///
+/// 错误集：当前仅 `error{OutOfMemory}`；返回的切片由调用方负责 `free`。
+pub fn md5HexLower(allocator: Allocator, content: []const u8) Allocator.Error![]u8 {
+    var digest: [Md5.digest_length]u8 = undefined;
+    Md5.hash(content, &digest, .{});
+    return toLowerHex(allocator, &digest);
+}
+
 // -----------------------------------------------------------------------------
 // 签名
 // -----------------------------------------------------------------------------
@@ -180,6 +205,8 @@ pub fn aesDecryptMsg(
     if (unpadded_len <= 20) return WechatError.DecodeError;
     const raw_len = decodeNetworkByteOrder(plaintext[16..20]);
     const app_id_offset: usize = 20 + @as(usize, @intCast(raw_len));
+    // 注意：这里用 `<` 而非上游 Go 版的 `<=` —— 本库 `buildEncryptedReply` 类
+    // 回复加密路径允许空 app_id（app_id 段长度为 0），保持兼容。
     if (unpadded_len < app_id_offset) return WechatError.DecodeError;
 
     const random = try allocator.dupe(u8, plaintext[0..16]);
@@ -251,14 +278,16 @@ pub fn aesECBDecrypt(
 
     // ECB 解密到一块中间 buffer
     var out = try allocator.alloc(u8, ciphertext.len);
-    errdefer allocator.free(out);
+    defer allocator.free(out);
     var off: usize = 0;
     while (off < ciphertext.len) : (off += 16) {
         var plain: [16]u8 = undefined;
         dec.decrypt(&plain, ciphertext[off..][0..16]);
         @memcpy(out[off..][0..16], &plain);
     }
-    return @constCast(pkcs7Unpad(out));
+    // 去补位后按精确长度重新分配返回，保证调用方 `free` 的切片
+    // 与分配长度一致（避免子切片释放带来的 allocator 兼容性问题）。
+    return allocator.dupe(u8, pkcs7Unpad(out));
 }
 
 // -----------------------------------------------------------------------------
@@ -267,10 +296,13 @@ pub fn aesECBDecrypt(
 
 fn encodeNetworkByteOrder(out: []u8, n: u32) void {
     std.debug.assert(out.len >= 4);
-    out[0] = @intCast(n >> 24);
-    out[1] = @intCast(n >> 16);
-    out[2] = @intCast(n >> 8);
-    out[3] = @intCast(n);
+    // 逐字节取低 8 位：直接 @intCast(n >> k) 在 n 对应字节 >255 时（如 n>>16 的
+    // 低 16 位）会在 Debug/ReleaseSafe 下 panic——真实回复 XML >64KB 才会触发，
+    // 但被动回复加密是公开路径，按 BigEndian 语义写正确。
+    out[0] = @intCast((n >> 24) & 0xFF);
+    out[1] = @intCast((n >> 16) & 0xFF);
+    out[2] = @intCast((n >> 8) & 0xFF);
+    out[3] = @intCast(n & 0xFF);
 }
 
 fn decodeNetworkByteOrder(in: []const u8) u32 {
@@ -325,6 +357,34 @@ test "AESEncryptMsg/AESDecryptMsg round-trip" {
     try std.testing.expectEqualSlices(u8, app_id, result.app_id);
 }
 
+test "AESEncryptMsg/AESDecryptMsg round-trip 长明文（>255 字节，钉住 encodeNetworkByteOrder 逐字节掩码）" {
+    const allocator = std.testing.allocator;
+    const aes_key = "0123456789abcdef0123456789abcdef"; // 32 bytes
+    const random16 = "1234567890abcdef";
+    // 真实被动回复 XML 轻松超过 255 字节；网络字节序长度字段的低字节必须
+    // 按 & 0xFF 取，否则 Debug 下 @intCast 溢出 panic。
+    const filler = comptime blk: {
+        var b: [512]u8 = undefined;
+        @memset(&b, 'x');
+        break :blk b;
+    };
+    var xml_buf: [600]u8 = undefined;
+    const xml = try std.fmt.bufPrint(&xml_buf, "<xml><Content>{s}</Content></xml>", .{&filler});
+    try std.testing.expect(xml.len > 255);
+    const app_id = "wx_test_appid";
+    const cipher = try aesEncryptMsg(allocator, random16, xml, app_id, aes_key);
+    defer allocator.free(cipher);
+    try std.testing.expect(cipher.len % 16 == 0);
+
+    const result = try aesDecryptMsg(allocator, cipher, aes_key);
+    defer {
+        allocator.free(result.random);
+        allocator.free(result.raw_xml_msg);
+        allocator.free(result.app_id);
+    }
+    try std.testing.expectEqualSlices(u8, xml, result.raw_xml_msg);
+}
+
 test "AESEncryptMsg 校验 random 长度错误" {
     const allocator = std.testing.allocator;
     const aes_key = "0123456789abcdef0123456789abcdef";
@@ -363,4 +423,44 @@ test "AesECBDecrypt 用 32-byte 零密文 + 32-byte 零 key 解密出空" {
         WechatError.InvalidArgument => return error.UnexpectedError,
         else => return, // 其他错误（DecodeError 等）也属正常
     }
+}
+
+test "AesECBDecrypt 返回精确长度切片（free 长度 == 分配长度）" {
+    const allocator = std.testing.allocator;
+    const aes_key = "0123456789abcdef0123456789abcdef";
+    // 构造一段已知明文，手动 ECB 加密（库内自洽：块独立加密 + PKCS#7(块16)）。
+    const plain = "{\"refund_fee\":\"6\"}";
+    const padded = try pkcs7Pad(allocator, plain, 16);
+    defer allocator.free(padded);
+
+    const enc = Aes256.initEnc(aes_key[0..32].*);
+    var cipher = try allocator.alloc(u8, padded.len);
+    defer allocator.free(cipher);
+    var off: usize = 0;
+    while (off < padded.len) : (off += 16) {
+        var block: [16]u8 = undefined;
+        enc.encrypt(&block, padded[off..][0..16]);
+        @memcpy(cipher[off..][0..16], &block);
+    }
+
+    const out = try aesECBDecrypt(allocator, cipher, aes_key);
+    defer allocator.free(out);
+    try std.testing.expectEqualSlices(u8, plain, out);
+}
+
+test "md5HexLower 输出小写 hex（与 Go hex.EncodeToString 一致）" {
+    const allocator = std.testing.allocator;
+    const got = try md5HexLower(allocator, "hello");
+    defer allocator.free(got);
+    try std.testing.expectEqualStrings("5d41402abc4b2a76b9719d911017c592", got);
+}
+
+test "AESDecryptMsg 拒绝空 app_id 且空正文的报文（长度守卫）" {
+    const allocator = std.testing.allocator;
+    const aes_key = "0123456789abcdef0123456789abcdef";
+    // raw_xml_msg 与 app_id 均为空：unpadded_len == 20，触发 `<= 20` 长度守卫。
+    const cipher = try aesEncryptMsg(allocator, "1234567890abcdef", "", "", aes_key);
+    defer allocator.free(cipher);
+    const r = aesDecryptMsg(allocator, cipher, aes_key);
+    try std.testing.expectError(WechatError.DecodeError, r);
 }

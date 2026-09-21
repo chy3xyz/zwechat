@@ -46,6 +46,12 @@ pub const Cache = struct {
     /// 获取缓存值。命中且未过期返回 `value`，未命中返回 `null`，错误返回 `CacheError!T`。
     ///
     /// 返回的切片由缓存实现持有；调用方**不应释放**。
+    ///
+    /// **生命周期契约**：返回的是借用切片，有效期至该 Cache 实例的任何后续写操作
+    /// （`set` / `delete` / 同一 key 覆盖写）或 `deinit`。调用方需要跨写操作持有时
+    /// 必须 `allocator.dupe`。Memory 与 Memcache / Redis 后端均适用此契约：
+    /// Memory 按条目存储（覆盖写才失效），Memcache / Redis 复用内部 `last_value`
+    /// 缓冲区（任何后续 `get` 都会 free 并覆盖，立即悬垂）。
     pub fn get(self: Cache, key: []const u8) CacheError!?[]const u8 {
         return self.vtable.get(self.ctx, key);
     }

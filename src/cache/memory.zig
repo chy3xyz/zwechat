@@ -3,13 +3,14 @@
 //!
 //! 对应 `_ref/wechat/cache/memory.go`：进程内线程安全的 KV 缓存，支持过期时间（TTL）。
 //! - 键、值字符串由本结构持有，插入时复制、由 `Memory.deinit` / `delete` / 覆盖写时释放。
-//! - 互斥使用一个原子自旋锁实现（Zig 0.17-dev 已移除 `std.Thread.Mutex`，新 `std.Io.Mutex`
-//!   依赖 Io 运行时不便嵌入数据结构；这里采用最精简的 CAS 自旋锁以保持零依赖）。
+//! - 互斥使用 `util/sync.zig` 的 CAS 自旋锁（Zig 0.17-dev 已移除 `std.Thread.Mutex`，
+//!   新 `std.Io.Mutex` 依赖 Io 运行时不便嵌入数据结构；统一自旋锁实现以保持零依赖）。
 //! - TTL 以纳秒存储（`expire_at_ns: i64`）；`get` / `isExist` 命中过期键时延迟删除。
 
 const std = @import("std");
 const Cache = @import("mod.zig").Cache;
 const CacheError = @import("mod.zig").CacheError;
+const SpinMutex = @import("../util/sync.zig").SpinMutex;
 
 /// 内存缓存条目。值是 dup 出的所有权内存，由 `Memory` 释放。
 /// 键由 `HashMap` 自身管理（同样 dup），不重复保存。
@@ -18,25 +19,6 @@ const Entry = struct {
     /// 纳秒时间戳（`Io.Clock.now(.awake, io).nanoseconds`）。
     /// 0 表示永不过期。
     expire_at_ns: i64,
-};
-
-/// 最简 CAS 自旋锁。Zig 0.17-dev 不再提供 `std.Thread.Mutex`，
-/// 这里用 `std.atomic.Value(u8)` 手工实现 5 行版本，足以覆盖缓存场景。
-const SpinMutex = struct {
-    state: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
-
-    const UNLOCKED: u8 = 0;
-    const LOCKED: u8 = 1;
-
-    fn lock(self: *SpinMutex) void {
-        while (self.state.cmpxchgWeak(UNLOCKED, LOCKED, .acquire, .monotonic) != null) {
-            std.atomic.spinLoopHint();
-        }
-    }
-
-    fn unlock(self: *SpinMutex) void {
-        self.state.store(UNLOCKED, .release);
-    }
 };
 
 /// 内存缓存。对应 Go 版的 `Memory`（`_ref/wechat/cache/memory.go`）。
@@ -133,7 +115,10 @@ pub const Memory = struct {
         const expire_at_ns: i64 = if (ttl_seconds <= 0)
             0
         else
-            nowNanoseconds() +| (ttl_seconds * std.time.ns_per_s);
+            // 乘法用饱和版本：ttl_seconds 来自外部（如微信响应里的 expires_in），
+            // 极大值（如 i64 max）在 Debug 下会让普通 `*` 触发整数溢出 panic。
+            // 饱和到 maxInt(i64) 后实际效果等价于永不过期。
+            nowNanoseconds() +| (ttl_seconds *| std.time.ns_per_s);
 
         // 覆盖写：先释放旧键值，再插入新条目。
         if (self.data.fetchRemove(key)) |old| {
@@ -260,8 +245,7 @@ test "memory TTL 到期后惰性删除" {
     try std.testing.expectEqual(@as(usize, 0), mem.data.count());
 }
 
-test "memory delete 与 deinit 不泄漏" {
-    // 使用 DebugAllocator 风格的 testing.allocator 在内存泄漏 / 双重释放时会失败。
+test "memory delete 与 deinit 不泄漏" {    // 使用 DebugAllocator 风格的 testing.allocator 在内存泄漏 / 双重释放时会失败。
     const allocator = std.testing.allocator;
     const mem = try Memory.create(allocator);
     const c = mem.asCache();
@@ -278,4 +262,24 @@ test "memory delete 与 deinit 不泄漏" {
 
     mem.deinit();
     allocator.destroy(mem);
+}
+
+test "memory 超大 TTL 不触发整数溢出 panic" {
+    // 回归：ttl_seconds 来自外部输入（如微信响应的 expires_in），极大值
+    // （i64 max）在 Debug 模式下会让 `ttl_seconds * ns_per_s` 溢出 panic。
+    // 修复后饱和到 maxInt(i64)，实际效果等价于永不过期。
+    const allocator = std.testing.allocator;
+    const mem = try Memory.create(allocator);
+    defer {
+        mem.deinit();
+        allocator.destroy(mem);
+    }
+
+    const c = mem.asCache();
+    try c.set("huge_ttl", "v", std.math.maxInt(i64));
+
+    const got = try c.get("huge_ttl");
+    try std.testing.expect(got != null);
+    try std.testing.expectEqualStrings("v", got.?);
+    try std.testing.expect(try c.isExist("huge_ttl"));
 }

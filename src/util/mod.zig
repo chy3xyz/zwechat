@@ -18,6 +18,7 @@ pub const asn1 = @import("asn1.zig");
 pub const pkcs12 = @import("pkcs12.zig");
 pub const xml = @import("xml.zig");
 pub const template = @import("template.zig");
+pub const sync = @import("sync.zig");
 
 test "util 模块全部导出" {
     try std.testing.expect(@hasDecl(http, "getDefaultClient"));
@@ -32,4 +33,5 @@ test "util 模块全部导出" {
     try std.testing.expect(@hasDecl(pkcs12, "parse"));
     try std.testing.expect(@hasDecl(xml, "parse"));
     try std.testing.expect(@hasDecl(template, "buildTemplateData"));
+    try std.testing.expect(@hasDecl(sync, "SpinMutex"));
 }

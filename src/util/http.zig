@@ -132,6 +132,53 @@ pub const HttpClient = struct {
         return self.fetchWithStatus(uri, .GET, "", null);
     }
 
+    /// GET 请求并手动跟随 redirect（用于微信 media/get、素材下载等会
+    /// 302 到 CDN 的接口）。
+    ///
+    /// 语义与安全约束：
+    /// - 仅当响应状态为 301/302/303/307/308 且携带 `Location` 头时跳转，
+    ///   最多跳 `max_redirect_hops` 次，超出返回 `error.TooManyRedirects`；
+    /// - 跳前校验 Location：绝对 URL 仅允许 `http` / `https` scheme
+    ///   （拒绝 `file:` / `javascript:` 等开放重定向滥用），以 `/` 开头的
+    ///   相对路径基于当前 URL 的 scheme + host 解析成绝对 URL，
+    ///   其他形态返回 `error.InvalidRedirectLocation`；
+    /// - 跳数耗尽或非 redirect 的最终状态码非 200 时返回
+    ///   `error.HttpStatusNotOk`；redirect 响应缺少 `Location` 头同样返回
+    ///   `error.HttpStatusNotOk`（与既有非 200 行为一致）；
+    /// - 注入了 transport（mock）时不做 redirect 处理，直接返回 transport
+    ///   的响应（mock 语义与 `get` 保持一致）。
+    ///
+    /// 返回的 body 由调用方负责 `free`。
+    pub fn getFollowRedirect(self: *HttpClient, uri: []const u8) ![]u8 {
+        if (self.transport != null) return self.get(uri);
+
+        var current: []u8 = try self.allocator.dupe(u8, uri);
+        defer self.allocator.free(current);
+
+        var hops: u8 = 0;
+        while (true) {
+            const result = try self.fetchGetManual(current);
+            defer self.allocator.free(result.body);
+            defer if (result.location) |loc| {
+                self.allocator.free(loc);
+            };
+
+            if (!isRedirectStatus(result.status)) {
+                if (result.status != .ok) return error.HttpStatusNotOk;
+                return self.allocator.dupe(u8, result.body);
+            }
+            // redirect 状态码：必须有 Location 头。
+            const location = result.location orelse return error.HttpStatusNotOk;
+            hops += 1;
+            if (hops > max_redirect_hops) return error.TooManyRedirects;
+
+            const next = try resolveRedirectUri(self.allocator, current, location);
+            defer self.allocator.free(next);
+            self.allocator.free(current);
+            current = try self.allocator.dupe(u8, next);
+        }
+    }
+
     /// POST 请求（对照 `HTTPPost`）。`content_type` 为 `null` 时不设置
     /// Content-Type，由服务端按缺省处理。
     pub fn post(self: *HttpClient, uri: []const u8, body: []const u8, content_type: ?[]const u8) ![]u8 {
@@ -274,7 +321,9 @@ pub const HttpClient = struct {
         const effective_uri = applyUriModifier(uri);
 
         if (self.transport) |t| {
-            return t(self.transport_ctx.?, self.allocator, effective_uri, method, payload, content_type);
+            const tctx = self.transport_ctx orelse
+                @panic("HttpClient.transport 已设置但 transport_ctx 为空：请用 setTransport 同时传入两者");
+            return t(tctx, self.allocator, effective_uri, method, payload, content_type);
         }
 
         var body_writer: std.Io.Writer.Allocating = .init(self.allocator);
@@ -302,9 +351,54 @@ pub const HttpClient = struct {
         return list.toOwnedSlice(self.allocator);
     }
 
-    /// 返回 self 自身的指针作为 transport ctx（备用，子类型可扩展）。
-    fn getPtr(self: *HttpClient) *anyopaque {
-        return @ptrCast(self);
+    /// 单次 GET 的原始结果：状态码 + body + `Location` 头（redirect 手动跟随用）。
+    const ManualGetResult = struct {
+        status: std.http.Status,
+        body: []u8,
+        location: ?[]u8,
+    };
+
+    /// 手动模式 GET：`redirect_behavior = .unhandled`，把 301/302/303/307/308
+    /// 原样返回给调用方解析（`fetch` 默认会自动跟随且无法校验 Location）。
+    fn fetchGetManual(self: *HttpClient, uri: []const u8) !ManualGetResult {
+        const effective_uri = applyUriModifier(uri);
+        const parsed = std.Uri.parse(effective_uri) catch return error.InvalidUri;
+
+        var req = try self.inner.request(.GET, parsed, .{
+            .redirect_behavior = .unhandled,
+            // 关闭 gzip/deflate 协商，简化手动路径（不需要解压缓冲）。
+            .headers = .{ .accept_encoding = .omit },
+        });
+        defer req.deinit();
+        try req.sendBodiless();
+
+        var response = try req.receiveHead(&.{});
+        // `head.location` 指向 head buffer，body 流初始化后即失效，必须先拷贝。
+        const location: ?[]u8 = if (response.head.location) |loc|
+            try self.allocator.dupe(u8, loc)
+        else
+            null;
+        errdefer if (location) |loc| self.allocator.free(loc);
+
+        var body_writer: std.Io.Writer.Allocating = .init(self.allocator);
+        defer body_writer.deinit();
+
+        var transfer_buffer: [64]u8 = undefined;
+        var decompress: std.http.Decompress = undefined;
+        const reader = response.readerDecompressing(&transfer_buffer, &decompress, &.{});
+        _ = reader.streamRemaining(&body_writer.writer) catch |err| switch (err) {
+            error.ReadFailed => return response.bodyErr().?,
+            else => |e| return e,
+        };
+
+        var list = body_writer.toArrayList();
+        defer list.deinit(self.allocator);
+        const body = try list.toOwnedSlice(self.allocator);
+        return .{
+            .status = response.head.status,
+            .body = body,
+            .location = location,
+        };
     }
 };
 
@@ -339,6 +433,10 @@ pub const MockTransport = struct {
     }
 
     /// 注册一个 URI → 响应的映射。
+    ///
+    /// **所有权**：`uri` 作为键直接借用（不做拷贝），`response.body` 同样借用；
+    /// 二者必须比本 `MockTransport` 活得久（通常用字符串字面量 / 静态数组）。
+    /// 响应 body 在 dispatch 时按需拷贝给调用方。
     pub fn addRoute(self: *MockTransport, uri: []const u8, response: Response) !void {
         try self.routes.put(uri, response);
     }
@@ -366,6 +464,54 @@ pub const MockTransport = struct {
 fn applyUriModifier(uri: []const u8) []const u8 {
     if (uri_modifier) |m| return m(uri);
     return uri;
+}
+
+/// GET 手动跟随 redirect 允许的最大跳数（微信 media/get 通常 1 跳到 CDN，
+/// 留一倍余量，同时限制被恶意链路拖死的暴露面）。
+pub const max_redirect_hops = 2;
+
+/// 判断状态码是否为可跟随的 redirect（301/302/303/307/308）。
+fn isRedirectStatus(status: std.http.Status) bool {
+    return switch (status) {
+        .moved_permanently, // 301
+        .found, // 302
+        .see_other, // 303
+        .temporary_redirect, // 307
+        .permanent_redirect, // 308
+        => true,
+        else => false,
+    };
+}
+
+/// 解析 redirect 的 `Location` 头为下一步要请求的绝对 URL。
+///
+/// - 绝对 URL：仅允许 `http` / `https` scheme，其他（`file:` /
+///   `javascript:` / `ftp:` 等）返回 `error.InvalidRedirectLocation`；
+/// - 以 `/` 开头的相对路径：基于 `base_uri` 的 scheme + host 拼成绝对 URL；
+/// - 其他形态（空、协议相对 `//host` 等）一律拒绝。
+fn resolveRedirectUri(
+    allocator: std.mem.Allocator,
+    base_uri: []const u8,
+    location: []const u8,
+) ![]u8 {
+    if (std.ascii.startsWithIgnoreCase(location, "http://") or
+        std.ascii.startsWithIgnoreCase(location, "https://"))
+    {
+        return allocator.dupe(u8, location);
+    }
+    // 协议相对 URL（`//host/path`）不在此解析（避免把 authority 误当 path）。
+    if (location.len < 2 or location[0] != '/' or location[1] == '/')
+        return error.InvalidRedirectLocation;
+    const base = std.Uri.parse(base_uri) catch return error.InvalidRedirectLocation;
+    const host = base.host orelse return error.InvalidRedirectLocation;
+    if (base.scheme.len == 0) return error.InvalidRedirectLocation;
+    var host_buf: [1024]u8 = undefined;
+    const host_raw = host.toRaw(&host_buf) catch return error.InvalidRedirectLocation;
+    // 注意保留端口：std.Uri 的 host 不含 port，丢端口会打到默认 80/443。
+    if (base.port) |port| {
+        return std.fmt.allocPrint(allocator, "{s}://{s}:{d}{s}", .{ base.scheme, host_raw, port, location });
+    }
+    return std.fmt.allocPrint(allocator, "{s}://{s}{s}", .{ base.scheme, host_raw, location });
 }
 
 /// 生成 24 字节 hex 形式的 multipart boundary。
@@ -410,8 +556,8 @@ fn writeMultipartPart(
         } else {
             const io = std.Io.Threaded.global_single_threaded.io();
             const file = std.Io.Dir.cwd().openFile(
-                field.file_path,
                 io,
+                field.file_path,
                 .{ .mode = .read_only },
             ) catch |err| switch (err) {
                 error.FileNotFound => return error.FileNotFound,
@@ -579,4 +725,230 @@ test "setTransport(null) 恢复默认 transport" {
     defer client.deinit();
     client.setTransport(null, null);
     try std.testing.expect(client.transport == null);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 假 HTTP server：验证 getFollowRedirect 的 redirect 手动跟随语义。
+// 约定与 redis/memcache 的 mock server 一致：127.0.0.1 + std.Io.net.Server。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 假 HTTP server 线程状态：按顺序为每个连接回一份预设的原始 HTTP 响应，
+/// 并把每个请求的请求行追加到 `capture`（用于断言最终请求了哪个 URL）。
+const FakeServerState = struct {
+    io: std.Io,
+    server: *std.Io.net.Server,
+    /// 每个连接要返回的原始 HTTP 响应字节（按顺序消费，消费完线程退出）。
+    responses: []const []const u8,
+    hits: *std.atomic.Value(u32),
+    /// 请求行捕获缓冲（形如 "GET /final HTTP/1.1;"）。
+    capture: []u8,
+    capture_len: *usize,
+
+    fn run(self: *const FakeServerState) void {
+        for (self.responses) |resp| {
+            var stream = self.server.accept(self.io) catch return;
+            defer stream.close(self.io);
+
+            // 读完请求头（直到空行），避免对端 RST 干扰响应写入。
+            var header_buf: [8192]u8 = undefined;
+            var filled: usize = 0;
+            while (std.mem.indexOf(u8, header_buf[0..filled], "\r\n\r\n") == null) {
+                if (filled >= header_buf.len) return;
+                var chunk: [1][]u8 = .{header_buf[filled..]};
+                const n = stream.read(self.io, &chunk) catch return;
+                if (n == 0) return;
+                filled += n;
+            }
+            // 捕获请求行（第一个 \r\n 之前）。
+            if (std.mem.indexOf(u8, header_buf[0..filled], "\r\n")) |eol| {
+                const line = header_buf[0..eol];
+                if (self.capture_len.* + line.len + 1 <= self.capture.len) {
+                    @memcpy(self.capture[self.capture_len.*..][0..line.len], line);
+                    self.capture[self.capture_len.* + line.len] = ';';
+                    self.capture_len.* += line.len + 1;
+                }
+            }
+            _ = self.hits.fetchAdd(1, .seq_cst);
+
+            var write_buf: [4096]u8 = undefined;
+            var w = stream.writer(self.io, &write_buf);
+            w.interface.writeAll(resp) catch return;
+            w.interface.flush() catch return;
+        }
+    }
+};
+
+/// 在 127.0.0.1 上从 18081 起探测一个可绑定的端口并监听。
+fn listenLocal(io: std.Io) !struct { server: std.Io.net.Server, port: u16 } {
+    var port: u16 = 18081;
+    while (true) {
+        const addr: std.Io.net.IpAddress = .{ .ip4 = .{
+            .bytes = .{ 127, 0, 0, 1 },
+            .port = port,
+        } };
+        if (std.Io.net.IpAddress.listen(&addr, io, .{ .reuse_address = true })) |server| {
+            return .{ .server = server, .port = port };
+        } else |err| switch (err) {
+            error.AddressInUse => {
+                port += 1;
+                if (port > 19000) return err;
+                continue;
+            },
+            else => return err,
+        }
+    }
+}
+
+/// 连上目标端口后立即关闭：用于让阻塞在 accept 的假服务器线程退出，
+/// 使 `join` 不会死锁（负面用例中客户端可能提前失败、少发请求）。
+fn unblockAccept(io: std.Io, port: u16) void {
+    const addr: std.Io.net.IpAddress = .{ .ip4 = .{
+        .bytes = .{ 127, 0, 0, 1 },
+        .port = port,
+    } };
+    var stream = addr.connect(io, .{ .mode = .stream }) catch return;
+    stream.close(io);
+}
+
+test "getFollowRedirect 跟随 302 拿到最终内容且请求了第二个 URL" {
+    const allocator = std.testing.allocator;
+    // server 线程使用独立 Io（global_single_threaded 非线程安全，禁止跨线程共享）。
+    var server_threaded: std.Io.Threaded = .init_single_threaded;
+    const sio = server_threaded.io();
+    const bound = try listenLocal(sio);
+    var server = bound.server;
+    defer server.deinit(sio);
+
+    var hits = std.atomic.Value(u32).init(0);
+    var capture: [512]u8 = undefined;
+    var capture_len: usize = 0;
+
+    var resp_first_buf: [256]u8 = undefined;
+    const resp_first = try std.fmt.bufPrint(
+        &resp_first_buf,
+        "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{d}/final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        .{bound.port},
+    );
+    const responses = [_][]const u8{
+        resp_first,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 16\r\nConnection: close\r\n\r\nfake-media-bytes",
+    };
+    const state = FakeServerState{
+        .io = sio,
+        .server = &server,
+        .responses = &responses,
+        .hits = &hits,
+        .capture = &capture,
+        .capture_len = &capture_len,
+    };
+    const t = try std.Thread.spawn(.{}, FakeServerState.run, .{&state});
+    defer t.join();
+
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+
+    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/media", .{bound.port});
+    defer allocator.free(uri);
+
+    const body = try client.getFollowRedirect(uri);
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("fake-media-bytes", body);
+    // 共请求 2 次：第一次 302，第二次 /final 拿内容。
+    try std.testing.expectEqual(@as(u32, 2), hits.load(.seq_cst));
+    try std.testing.expect(std.mem.indexOf(u8, capture[0..capture_len], "GET /final HTTP/1.1") != null);
+}
+
+test "getFollowRedirect 拒绝非 http/https 的 Location" {
+    const allocator = std.testing.allocator;
+    var server_threaded: std.Io.Threaded = .init_single_threaded;
+    const sio = server_threaded.io();
+    const bound = try listenLocal(sio);
+    var server = bound.server;
+    defer server.deinit(sio);
+
+    var hits = std.atomic.Value(u32).init(0);
+    var capture: [512]u8 = undefined;
+    var capture_len: usize = 0;
+
+    const responses = [_][]const u8{
+        "HTTP/1.1 302 Found\r\nLocation: ftp://evil.example/x.bin\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    };
+    const state = FakeServerState{
+        .io = sio,
+        .server = &server,
+        .responses = &responses,
+        .hits = &hits,
+        .capture = &capture,
+        .capture_len = &capture_len,
+    };
+    const t = try std.Thread.spawn(.{}, FakeServerState.run, .{&state});
+    defer t.join();
+
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+
+    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/media", .{bound.port});
+    defer allocator.free(uri);
+
+    try std.testing.expectError(error.InvalidRedirectLocation, client.getFollowRedirect(uri));
+    unblockAccept(sio, bound.port);
+    try std.testing.expectEqual(@as(u32, 1), hits.load(.seq_cst));
+}
+
+test "getFollowRedirect 跳数超限返回 TooManyRedirects" {
+    const allocator = std.testing.allocator;
+    var server_threaded: std.Io.Threaded = .init_single_threaded;
+    const sio = server_threaded.io();
+    const bound = try listenLocal(sio);
+    var server = bound.server;
+    defer server.deinit(sio);
+
+    var hits = std.atomic.Value(u32).init(0);
+    var capture: [512]u8 = undefined;
+    var capture_len: usize = 0;
+
+    // 3 次请求：第 3 次响应时跳数超限（max_redirect_hops = 2）。
+    const responses = [_][]const u8{
+        "HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+    };
+    const state = FakeServerState{
+        .io = sio,
+        .server = &server,
+        .responses = &responses,
+        .hits = &hits,
+        .capture = &capture,
+        .capture_len = &capture_len,
+    };
+    const t = try std.Thread.spawn(.{}, FakeServerState.run, .{&state});
+    defer t.join();
+
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+
+    const uri = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/media", .{bound.port});
+    defer allocator.free(uri);
+
+    try std.testing.expectError(error.TooManyRedirects, client.getFollowRedirect(uri));
+    // 客户端提前失败后，服务器线程仍阻塞在 accept：补一个空连接让其退出再 join。
+    unblockAccept(sio, bound.port);
+    try std.testing.expectEqual(@as(u32, 3), hits.load(.seq_cst));
+}
+
+test "resolveRedirectUri 绝对/相对/非法 Location 语义" {
+    const allocator = std.testing.allocator;
+
+    const abs = try resolveRedirectUri(allocator, "http://a.example/x", "https://cdn.example/f.bin");
+    defer allocator.free(abs);
+    try std.testing.expectEqualStrings("https://cdn.example/f.bin", abs);
+
+    const rel = try resolveRedirectUri(allocator, "http://a.example:8080/x", "/final?q=1");
+    defer allocator.free(rel);
+    try std.testing.expectEqualStrings("http://a.example:8080/final?q=1", rel);
+
+    try std.testing.expectError(error.InvalidRedirectLocation, resolveRedirectUri(allocator, "http://a.example/x", "ftp://evil.example/x"));
+    try std.testing.expectError(error.InvalidRedirectLocation, resolveRedirectUri(allocator, "http://a.example/x", "javascript:alert(1)"));
+    try std.testing.expectError(error.InvalidRedirectLocation, resolveRedirectUri(allocator, "http://a.example/x", ""));
+    try std.testing.expectError(error.InvalidRedirectLocation, resolveRedirectUri(allocator, "http://a.example/x", "//other.example/y"));
 }

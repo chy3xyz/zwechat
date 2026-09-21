@@ -18,12 +18,13 @@ pub fn sliceChunk(
     allocator: std.mem.Allocator,
     src: []const []const u8,
     chunk_size: usize,
-) (std.mem.Allocator.Error || error{InvalidArgument})![][]const []const u8 {
+) std.mem.Allocator.Error![][]const []const u8 {
     const size = if (chunk_size == 0) 1 else chunk_size;
-    if (src.len == 0) return &.{};
-    if (size == 0) return error.InvalidArgument;
+    if (src.len == 0) return &.{}; // 空输入：无任何分配，调用方无需 free
 
-    const chunk_num = (src.len + size - 1) / size;
+    // (len - 1) / size + 1 与 (len + size - 1) / size 等价，但避免 len 接近
+    // maxInt(usize) 时 `len + size - 1` 的加法溢出。
+    const chunk_num = (src.len - 1) / size + 1;
     const result = try allocator.alloc([]const []const u8, chunk_num);
     errdefer allocator.free(result);
 
