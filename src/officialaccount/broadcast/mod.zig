@@ -251,7 +251,7 @@ pub const Broadcast = struct {
                 const uri = try std.fmt.allocPrint(a, "{s}?access_token={s}", .{ massStatusSendURL, token });
                 defer a.free(uri);
 
-                const json_body = try std.fmt.allocPrint(a, "{{\"msg_id\":\"{s}\"}}", .{c.msg_id});
+                const json_body = try util_json.stringFieldObject(a, "msg_id", c.msg_id);
                 defer a.free(json_body);
 
                 const client = util_http.getDefaultClient(a);

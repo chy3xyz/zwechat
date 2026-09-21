@@ -332,7 +332,7 @@ pub const Material = struct {
         const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ getMaterialURL, access_token });
         defer self.allocator.free(uri);
 
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"media_id\":\"{s}\"}}", .{media_id});
+        const body = try util_json.stringFieldObject(self.allocator, "media_id", media_id);
         defer self.allocator.free(body);
 
         const client = util_http.getDefaultClient(self.allocator);
@@ -444,7 +444,7 @@ pub const Material = struct {
         const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ delMaterialURL, access_token });
         defer self.allocator.free(uri);
 
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"media_id\":\"{s}\"}}", .{media_id});
+        const body = try util_json.stringFieldObject(self.allocator, "media_id", media_id);
         defer self.allocator.free(body);
 
         const client = util_http.getDefaultClient(self.allocator);
@@ -564,7 +564,7 @@ fn buildUpdateNewsBody(allocator: std.mem.Allocator, article: *const Article, me
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.appendSlice(allocator, "{\"media_id\":\"");
-    try buf.appendSlice(allocator, media_id);
+    try util_json.appendEscapedString(allocator, &buf, media_id);
     try buf.appendSlice(allocator, "\",\"index\":");
     var num_buf: [24]u8 = undefined;
     const num = std.fmt.bufPrint(&num_buf, "{d}", .{index}) catch unreachable;
@@ -694,6 +694,50 @@ test "buildUpdateNewsBody 组装 update_news 请求体" {
         "{\"media_id\":\"MEDIA7\",\"index\":2,\"articles\":{\"title\":\"t\",\"thumb_media_id\":\"M\",\"show_cover_pic\":0}}",
         body,
     );
+}
+
+test "buildUpdateNewsBody 转义 media_id（回归：原先裸 appendSlice）" {
+    const allocator = std.testing.allocator;
+    const article = Article{ .title = "t", .show_cover_pic = 0 };
+    const body = try buildUpdateNewsBody(allocator, &article, "M\"ED\x01", 0);
+    defer allocator.free(body);
+    try std.testing.expect(std.mem.startsWith(u8, body, "{\"media_id\":\"M\\\"ED\\u0001\","));
+
+    const reparsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer reparsed.deinit();
+    try std.testing.expectEqualStrings("M\"ED\x01", reparsed.value.object.get("media_id").?.string);
+}
+
+test "Material.getNews / deleteMaterial 转义 media_id（回归：allocPrint 裸插值）" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // getNews：media_id 含引号与控制字符。
+    var cap = TestCapture{ .allocator = alloc, .response = "{\"news_item\":[]}" };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var m = Material.init(&ctx, alloc);
+
+    var parsed = try m.getNews("M\"E\x01");
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("{\"media_id\":\"M\\\"E\\u0001\"}", cap.payload);
+    {
+        const reparsed = try std.json.parseFromSlice(std.json.Value, alloc, cap.payload, .{});
+        defer reparsed.deinit();
+        try std.testing.expectEqualStrings("M\"E\x01", reparsed.value.object.get("media_id").?.string);
+    }
+
+    // deleteMaterial：同一路径。
+    var cap2 = TestCapture{ .allocator = alloc, .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    setupTestClient(alloc, &cap2);
+    defer releaseTestClient();
+
+    try m.deleteMaterial("M\\E");
+    try std.testing.expectEqualStrings("{\"media_id\":\"M\\\\E\"}", cap2.payload);
 }
 
 test "Material.addNews 返回 media_id 且由调用方释放" {

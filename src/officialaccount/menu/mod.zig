@@ -116,7 +116,7 @@ pub const Menu = struct {
     /// 测试个性化菜单匹配。
     /// 返回的 `std.json.Parsed(TryMatchResult)` 由调用方持有并负责 `deinit`。
     pub fn menuTryMatch(self: *Self, user_id: []const u8) !std.json.Parsed(TryMatchResult) {
-        const req_body = try std.fmt.allocPrint(self.allocator, "{{\"user_id\":\"{s}\"}}", .{user_id});
+        const req_body = try util_json.stringFieldObject(self.allocator, "user_id", user_id);
         defer self.allocator.free(req_body);
 
         const body = try util_retry.callApi(self.ctx, self.allocator, "MenuTryMatch", TokenReq{
@@ -629,6 +629,37 @@ test "menuTryMatch 返回 button 列表" {
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 1), parsed.value.button.len);
     try std.testing.expectEqualStrings("view", parsed.value.button[0].type);
+}
+
+test "menuTryMatch 对含引号/控制字符的 user_id 转义（回归：手写 JSON 拼接）" {
+    const allocator = std.testing.allocator;
+    // user_id 直接来自调用方；含 `"`/控制字符时旧手写拼接会产出非法 JSON。
+    const Capture = struct {
+        payload: []u8 = &.{},
+        fn dispatch(ctx: *anyopaque, a: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+            _ = uri;
+            _ = method;
+            _ = content_type;
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.payload = try a.dupe(u8, payload);
+            return a.dupe(u8, "{\"errcode\":0,\"errmsg\":\"ok\",\"button\":[]}");
+        }
+    };
+    var cap = Capture{};
+    defer if (cap.payload.len > 0) allocator.free(cap.payload);
+
+    var ctx = makeCtx();
+    var m = Menu.init(&ctx, allocator);
+    m.setTransport(Capture.dispatch, &cap);
+
+    var parsed = try m.menuTryMatch("o\"AB\x01");
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("{\"user_id\":\"o\\\"AB\\u0001\"}", cap.payload);
+
+    // 产出必须是合法 JSON。
+    const reparsed = try std.json.parseFromSlice(std.json.Value, allocator, cap.payload, .{});
+    defer reparsed.deinit();
+    try std.testing.expectEqualStrings("o\"AB\x01", reparsed.value.object.get("user_id").?.string);
 }
 
 // —— token 失效自愈 / 非 token 错误不重试 ——

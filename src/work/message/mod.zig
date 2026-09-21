@@ -14,6 +14,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_json = @import("../../util/json.zig");
 const util_retry = @import("../../util/retry.zig");
 
 // ─────────────────────────────────────────────────────────────────────────────

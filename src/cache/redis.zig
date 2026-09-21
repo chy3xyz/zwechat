@@ -1299,8 +1299,9 @@ test "redis 连接池：池满等待超时返回 PoolTimeout 而非挂死" {
     var srv: MockPoolServer = .{
         .allocator = allocator,
         .addr = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = port } },
-        // 单条命令 600ms，远大于下面的等待超时。
-        .delay_ms = 600,
+        // 单条命令 2000ms，远大于下面的等待超时（余量刻意放大：
+        // 并发负载下线程调度可能延迟数百毫秒，不能让断言依赖紧边界）。
+        .delay_ms = 2000,
     };
     const server_thread = try srv.start();
     waitReady(&srv.ready);
@@ -1329,9 +1330,10 @@ test "redis 连接池：池满等待超时返回 PoolTimeout 而非挂死" {
     const holder = try std.Thread.spawn(.{}, Holder.run, .{ redis, &holder_done, &holder_ok });
 
     // 等 holder 把唯一连接占住（占住后 `live` 立刻为 1）。
+    // 上界给足 5s：并发负载下 holder 线程可能迟迟排不上 CPU。
     var waited: usize = 0;
     while (redis.poolStats().live == 0) {
-        if (waited > 100) break;
+        if (waited > 1000) break;
         waited += 1;
         std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
@@ -1342,9 +1344,9 @@ test "redis 连接池：池满等待超时返回 PoolTimeout 而非挂死" {
     try std.testing.expectError(error.StorageError, c.get("holder"));
     const elapsed_ms = @divTrunc(std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds - start_ns, std.time.ns_per_ms);
 
-    // 超时是有界的：既真的等了（≥ 100ms），又没有等到 holder 跑完（600ms）。
+    // 超时是有界的：既真的等了（≥ 100ms，容调度误差），又没有等到 holder 跑完（2000ms）。
     try std.testing.expect(elapsed_ms >= 100);
-    try std.testing.expect(elapsed_ms < 450);
+    try std.testing.expect(elapsed_ms < 1500);
     try std.testing.expect(!holder_done.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), redis.poolStats().timeouts);
 

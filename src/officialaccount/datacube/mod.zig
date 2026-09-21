@@ -11,6 +11,21 @@ const Context = @import("../context.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
+const util_uri = @import("../../util/uri.zig");
+
+/// 追加一个已转义的 query 参数：先写 `prefix`（形如 `&action=`），
+/// 再把 `value` 按 Go `url.QueryEscape` 语义编码后追加。
+fn appendEscapedParam(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    prefix: []const u8,
+    value: []const u8,
+) !void {
+    try buf.appendSlice(allocator, prefix);
+    const escaped = try util_uri.queryEscape(allocator, value);
+    defer allocator.free(escaped);
+    try buf.appendSlice(allocator, escaped);
+}
 
 /// 广告位类型（对照 publisher.go `AdSlot`），用于 `getPublisherAdPosGeneral` 的 `ad_slot` 参数。
 pub const AdSlot = struct {
@@ -200,21 +215,19 @@ pub const DataCube = struct {
                 defer uri_buf.deinit(a);
                 try uri_buf.appendSlice(a, "https://api.weixin.qq.com/publisher/stat?access_token=");
                 try uri_buf.appendSlice(a, token);
-                try uri_buf.appendSlice(a, "&action=");
-                try uri_buf.appendSlice(a, c.action);
+                // 与 Go `url.Values.Encode()` 对齐：值按 QueryEscape 转义，
+                // 避免 ad_slot / 日期里的 `&` `=` 被服务端当成参数分隔符。
+                try appendEscapedParam(a, &uri_buf, "&action=", c.action);
                 if (c.ad_slot.len > 0) {
-                    try uri_buf.appendSlice(a, "&ad_slot=");
-                    try uri_buf.appendSlice(a, c.ad_slot);
+                    try appendEscapedParam(a, &uri_buf, "&ad_slot=", c.ad_slot);
                 }
-                try uri_buf.appendSlice(a, "&end_date=");
-                try uri_buf.appendSlice(a, c.end_date);
+                try appendEscapedParam(a, &uri_buf, "&end_date=", c.end_date);
                 var num_buf: [24]u8 = undefined;
                 try uri_buf.appendSlice(a, "&page=");
                 try uri_buf.appendSlice(a, std.fmt.bufPrint(&num_buf, "{d}", .{c.page}) catch unreachable);
                 try uri_buf.appendSlice(a, "&page_size=");
                 try uri_buf.appendSlice(a, std.fmt.bufPrint(&num_buf, "{d}", .{c.page_size}) catch unreachable);
-                try uri_buf.appendSlice(a, "&start_date=");
-                try uri_buf.appendSlice(a, c.start_date);
+                try appendEscapedParam(a, &uri_buf, "&start_date=", c.start_date);
                 const uri = try uri_buf.toOwnedSlice(a);
                 defer a.free(uri);
 

@@ -1177,6 +1177,61 @@ test "queryUserBalance 非 token 错误（45009）不重试也不作废" {
     try std.testing.expectEqual(@as(usize, 1), cap.calls);
 }
 
+test "requestAddress 逐字回归：callUser / callPay 两种 URI 拼装与改造前一致" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-vp", .app_key = "appkey-123" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &test_token_vtable },
+    };
+    var v = VirtualPayment.init(&ctx, alloc);
+    v.setSessionKey("sk-1");
+
+    // callUser：pay_sig + signature，顺序为 `?access_token=&pay_sig=&signature=`。
+    var user_resp = try v.queryUserBalance(.{ .openid = "ou-1" });
+    defer user_resp.deinit();
+
+    var user_sig_input = std.ArrayList(u8).empty;
+    defer user_sig_input.deinit(alloc);
+    try user_sig_input.appendSlice(alloc, "/xpay/query_user_balance");
+    try user_sig_input.appendSlice(alloc, "&");
+    try user_sig_input.appendSlice(alloc, cap.payloadAt(0));
+    const user_pay_sig = try hmacSha256Hex(alloc, "appkey-123", user_sig_input.items);
+    const user_signature = try hmacSha256Hex(alloc, "sk-1", cap.payloadAt(0));
+    const expected_user_uri = try std.fmt.allocPrint(
+        alloc,
+        "https://api.weixin.qq.com/xpay/query_user_balance?access_token=stub-ak&pay_sig={s}&signature={s}",
+        .{ user_pay_sig, user_signature },
+    );
+    try std.testing.expectEqualStrings(expected_user_uri, cap.uriAt(0));
+
+    // callPay：只有 pay_sig，尾部没有 signature。
+    var pay_resp = try v.queryOrder(.{ .openid = "ou-1", .order_id = "o-1" });
+    defer pay_resp.deinit();
+
+    var pay_sig_input = std.ArrayList(u8).empty;
+    defer pay_sig_input.deinit(alloc);
+    try pay_sig_input.appendSlice(alloc, "/xpay/query_order");
+    try pay_sig_input.appendSlice(alloc, "&");
+    try pay_sig_input.appendSlice(alloc, cap.payloadAt(1));
+    const pay_pay_sig = try hmacSha256Hex(alloc, "appkey-123", pay_sig_input.items);
+    const expected_pay_uri = try std.fmt.allocPrint(
+        alloc,
+        "https://api.weixin.qq.com/xpay/query_order?access_token=stub-ak&pay_sig={s}",
+        .{pay_pay_sig},
+    );
+    try std.testing.expectEqualStrings(expected_pay_uri, cap.uriAt(1));
+}
+
 /// 从 `...?access_token=X&pay_sig=...` 中取出 access_token 的值。
 fn tokenOf(uri: []const u8) []const u8 {
     const key = "access_token=";

@@ -19,6 +19,7 @@ const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
 const util_uri = @import("../../util/uri.zig");
+const util_json = @import("../../util/json.zig");
 const credential = @import("../../credential/mod.zig");
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -139,11 +140,31 @@ pub const Oauth = struct {
     ctx: *Context,
     allocator: std.mem.Allocator,
 
+    /// 可选的可注入 transport（测试用，注入 capture transport 拦截 HTTP）。
+    transport: ?util_http.HttpClient.Transport = null,
+    transport_ctx: ?*anyopaque = null,
+
     const Self = @This();
 
     /// `ctx` 由调用方保证生命周期长于本实例；`allocator` 用于拼装 URL 与解析响应。
     pub fn init(ctx: *Context, allocator: std.mem.Allocator) Self {
         return .{ .ctx = ctx, .allocator = allocator };
+    }
+
+    /// 注入自定义 transport（`null` 恢复真实 HTTP）。
+    pub fn setTransport(self: *Self, t: ?util_http.HttpClient.Transport, ctx: ?*anyopaque) void {
+        self.transport = t;
+        self.transport_ctx = ctx;
+    }
+
+    fn postJSON(self: *Self, allocator: std.mem.Allocator, uri: []const u8, payload: []const u8) ![]u8 {
+        if (self.transport) |t| {
+            var client = util_http.HttpClient.init(allocator);
+            defer client.deinit();
+            client.setTransport(t, self.transport_ctx);
+            return client.postJSON(uri, payload);
+        }
+        return util_http.getDefaultClient(allocator).postJSON(uri, payload);
     }
 
     /// 构造网页授权跳转 URL（snsapi_base）。
@@ -269,11 +290,8 @@ pub const Oauth = struct {
     /// 走 `util/retry.callApi`：token 失效时自动作废缓存并重试一次。
     /// 返回的 `std.json.Parsed(GetUserDetailResponse)` 由调用方持有并负责 `deinit`。
     pub fn getUserDetail(self: *Self, user_ticket: []const u8) !std.json.Parsed(GetUserDetailResponse) {
-        const body = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"user_ticket\":\"{s}\"}}",
-            .{user_ticket},
-        );
+        // user_ticket 由调用方提供，走 JSON 转义（原先 allocPrint 裸插值）。
+        const body = try util_json.stringFieldObject(self.allocator, "user_ticket", user_ticket);
         defer self.allocator.free(body);
 
         const Sender = struct {
@@ -287,7 +305,7 @@ pub const Oauth = struct {
                     .{token},
                 );
                 defer allocator.free(uri);
-                return util_http.getDefaultClient(c.self.allocator).postJSON(uri, c.body);
+                return c.self.postJSON(allocator, uri, c.body);
             }
         };
 
@@ -311,11 +329,8 @@ pub const Oauth = struct {
     /// 走 `util/retry.callApi`：token 失效时自动作废缓存并重试一次。
     /// 返回的 `std.json.Parsed(GetTfaInfoResponse)` 由调用方持有并负责 `deinit`。
     pub fn getTfaInfo(self: *Self, code: []const u8) !std.json.Parsed(GetTfaInfoResponse) {
-        const body = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"code\":\"{s}\"}}",
-            .{code},
-        );
+        // code 来自调用方，走 JSON 转义（原先 allocPrint 裸插值）。
+        const body = try util_json.stringFieldObject(self.allocator, "code", code);
         defer self.allocator.free(body);
 
         const Sender = struct {
@@ -329,7 +344,7 @@ pub const Oauth = struct {
                     .{token},
                 );
                 defer allocator.free(uri);
-                return util_http.getDefaultClient(c.self.allocator).postJSON(uri, c.body);
+                return c.self.postJSON(allocator, uri, c.body);
             }
         };
 
@@ -352,11 +367,18 @@ pub const Oauth = struct {
     /// 使用二次验证（POST JSON）。
     /// 走 `util/retry.callApi`：token 失效时自动作废缓存并重试一次。
     pub fn tfaSucc(self: *Self, user_id: []const u8, tfa_code: []const u8) !void {
-        const body = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"userid\":\"{s}\",\"tfa_code\":\"{s}\"}}",
-            .{ user_id, tfa_code },
-        );
+        // userid / tfa_code 均来自调用方，走 std.json.Stringify 转义
+        //（原先 allocPrint 裸插值，含 `"`/控制字符即产出非法 JSON）。
+        var out: std.Io.Writer.Allocating = .init(self.allocator);
+        defer out.deinit();
+        var jw: std.json.Stringify = .{ .writer = &out.writer };
+        try jw.beginObject();
+        try jw.objectField("userid");
+        try jw.write(user_id);
+        try jw.objectField("tfa_code");
+        try jw.write(tfa_code);
+        try jw.endObject();
+        const body = try out.toOwnedSlice();
         defer self.allocator.free(body);
 
         const Sender = struct {
@@ -370,7 +392,7 @@ pub const Oauth = struct {
                     .{token},
                 );
                 defer allocator.free(uri);
-                return util_http.getDefaultClient(c.self.allocator).postJSON(uri, c.body);
+                return c.self.postJSON(allocator, uri, c.body);
             }
         };
 
@@ -524,6 +546,76 @@ fn makeHealCtx(state: *HealState) Context {
         .config = .{ .corp_id = "ww-oauth-heal" },
         .access_token_handle = .{ .ptr = @ptrCast(state), .vtable = &HealState.vtable },
     };
+}
+
+/// 记录 payload 并返回固定响应的 transport。
+const Capture = struct {
+    payload: []u8 = &.{},
+    fn dispatch(ctx: *anyopaque, a: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = uri;
+        _ = method;
+        _ = content_type;
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.payload = try a.dupe(u8, payload);
+        return a.dupe(u8, "{\"errcode\":0,\"errmsg\":\"ok\"}");
+    }
+};
+
+test "getUserDetail 转义 user_ticket 中的引号与控制字符（回归：allocPrint 裸插值）" {
+    const allocator = std.testing.allocator;
+    var cap = Capture{};
+    defer if (cap.payload.len > 0) allocator.free(cap.payload);
+
+    var state = HealState{};
+    var ctx = makeHealCtx(&state);
+    var o = Oauth.init(&ctx, allocator);
+    o.setTransport(Capture.dispatch, &cap);
+
+    var parsed = try o.getUserDetail("tk\"A\x01");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("{\"user_ticket\":\"tk\\\"A\\u0001\"}", cap.payload);
+    const reparsed = try std.json.parseFromSlice(std.json.Value, allocator, cap.payload, .{});
+    defer reparsed.deinit();
+    try std.testing.expectEqualStrings("tk\"A\x01", reparsed.value.object.get("user_ticket").?.string);
+}
+
+test "getTfaInfo 转义 code 中的引号与反斜杠（回归：allocPrint 裸插值）" {
+    const allocator = std.testing.allocator;
+    var cap = Capture{};
+    defer if (cap.payload.len > 0) allocator.free(cap.payload);
+
+    var state = HealState{};
+    var ctx = makeHealCtx(&state);
+    var o = Oauth.init(&ctx, allocator);
+    o.setTransport(Capture.dispatch, &cap);
+
+    var parsed = try o.getTfaInfo("a\\\"b");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("{\"code\":\"a\\\\\\\"b\"}", cap.payload);
+    const reparsed = try std.json.parseFromSlice(std.json.Value, allocator, cap.payload, .{});
+    defer reparsed.deinit();
+    try std.testing.expectEqualStrings("a\\\"b", reparsed.value.object.get("code").?.string);
+}
+
+test "tfaSucc 转义 userid / tfa_code 中的控制字符（回归：allocPrint 裸插值）" {
+    const allocator = std.testing.allocator;
+    var cap = Capture{};
+    defer if (cap.payload.len > 0) allocator.free(cap.payload);
+
+    var state = HealState{};
+    var ctx = makeHealCtx(&state);
+    var o = Oauth.init(&ctx, allocator);
+    o.setTransport(Capture.dispatch, &cap);
+
+    try o.tfaSucc("u\x1f1", "0\"0");
+
+    const reparsed = try std.json.parseFromSlice(std.json.Value, allocator, cap.payload, .{});
+    defer reparsed.deinit();
+    const obj = reparsed.value.object;
+    try std.testing.expectEqualStrings("u\x1f1", obj.get("userid").?.string);
+    try std.testing.expectEqualStrings("0\"0", obj.get("tfa_code").?.string);
 }
 
 test "userInfoToId token 失效自愈：40001 → 作废缓存 → 新 token 重试成功（GET 路径）" {

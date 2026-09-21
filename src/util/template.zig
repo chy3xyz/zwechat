@@ -8,27 +8,17 @@
 //! 也能生成合法的 JSON（微信模板消息正文经常包含换行与用户输入）。
 
 const std = @import("std");
+const json = @import("json.zig");
 
 /// 追加一段 JSON 字符串字面量（带首尾双引号与转义）。
+/// 转义实现收敛到 `util.json.appendEscapedString`（全仓唯一致的 RFC 8259 转义）。
 fn appendJsonString(
     allocator: std.mem.Allocator,
     buf: *std.ArrayList(u8),
     s: []const u8,
 ) std.mem.Allocator.Error!void {
     try buf.append(allocator, '"');
-    for (s) |c| switch (c) {
-        '"' => try buf.appendSlice(allocator, "\\\""),
-        '\\' => try buf.appendSlice(allocator, "\\\\"),
-        '\n' => try buf.appendSlice(allocator, "\\n"),
-        '\r' => try buf.appendSlice(allocator, "\\r"),
-        '\t' => try buf.appendSlice(allocator, "\\t"),
-        // 其余控制字符（< 0x20）必须转义，否则产出非法 JSON。
-        else => if (c < 0x20) {
-            try buf.print(allocator, "\\u{x:0>4}", .{c});
-        } else {
-            try buf.append(allocator, c);
-        },
-    };
+    try json.appendEscapedString(allocator, buf, s);
     try buf.append(allocator, '"');
 }
 

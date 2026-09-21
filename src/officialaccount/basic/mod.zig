@@ -9,6 +9,7 @@ const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
+const util_json = @import("../../util/json.zig");
 
 /// IP 列表结果（`getCallbackIP` / `getAPIDomainIP` 的返回类型）。
 ///
@@ -57,7 +58,7 @@ pub const Basic = struct {
 
     /// 清理接口调用次数（`appid` 维度的配额）。
     pub fn clearQuota(self: *Self) !void {
-        const payload = try std.fmt.allocPrint(self.allocator, "{{\"appid\":\"{s}\"}}", .{self.ctx.config.app_id});
+        const payload = try util_json.stringFieldObject(self.allocator, "appid", self.ctx.config.app_id);
         defer self.allocator.free(payload);
 
         const resp = try util_retry.callApi(self.ctx, self.allocator, "ClearQuota", TokenReq{

@@ -10,6 +10,7 @@ const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
+const util_json = @import("../../util/json.zig");
 
 pub const GetDomainInfoRequest = struct {
     action: []const u8 = "",
@@ -248,7 +249,7 @@ pub const Operation = struct {
 
     /// 查询域名配置。
     pub fn getDomainInfo(self: *Self, req: GetDomainInfoRequest) !std.json.Parsed(GetDomainInfoResponse) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"action\":\"{s}\"}}", .{req.action});
+        const body = try util_json.stringFieldObject(self.allocator, "action", req.action);
         defer self.allocator.free(body);
         return self.postParsed("wxa/getwxadevinfo", body, GetDomainInfoResponse);
     }

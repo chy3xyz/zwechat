@@ -265,7 +265,7 @@ pub const Tcb = struct {
 
     /// 数据库迁移状态查询。
     pub fn databaseMigrateQueryInfo(self: *Self, env: []const u8, job_id: i64) !std.json.Parsed(DatabaseMigrateQueryInfoRes) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"env\":\"{s}\",\"job_id\":{d}}}", .{ env, job_id });
+        const body = try jsonStringifyEnvJobId(self.allocator, env, job_id);
         defer self.allocator.free(body);
         return self.postParsed("tcb/databasemigratequeryinfo", body, DatabaseMigrateQueryInfoRes);
     }
@@ -531,6 +531,23 @@ fn jsonStringifyEnvPath(allocator: std.mem.Allocator, env: []const u8, path: []c
     return out.toOwnedSlice();
 }
 
+/// `databaseMigrateQueryInfo` 请求体：`{"env":"...","job_id":N}`。
+///
+/// `env` 来自调用方，此前用 `allocPrint` 裸插值，含 `"` / `\` / 控制字符时
+/// 会产出非法 JSON；这里与同文件其余请求体一样交给 `std.json.Stringify` 转义。
+fn jsonStringifyEnvJobId(allocator: std.mem.Allocator, env: []const u8, job_id: i64) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+    try s.beginObject();
+    try s.objectField("env");
+    try s.write(env);
+    try s.objectField("job_id");
+    try s.write(job_id);
+    try s.endObject();
+    return out.toOwnedSlice();
+}
+
 fn jsonStringifyEnvCollection(allocator: std.mem.Allocator, env: []const u8, collection_name: []const u8) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
@@ -689,6 +706,45 @@ test "uploadFile 与 databaseCollectionAdd 字符串字段经 JSON 转义" {
     defer body2.deinit();
     try std.testing.expectEqualStrings("env-1", body2.value.env);
     try std.testing.expectEqualStrings("col\"1", body2.value.collection_name);
+}
+
+test "databaseMigrateQueryInfo 请求体对 env 中的引号、反斜杠与控制字符转义" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"status\":\"success\",\"record_success\":3}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-tcb" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &test_token_vtable },
+    };
+    var t = Tcb.init(&ctx, alloc);
+
+    // 正常输入：字节序列与旧的 `allocPrint` 实现逐字一致。
+    var plain = try t.databaseMigrateQueryInfo("env-1", 42);
+    defer plain.deinit();
+    try std.testing.expectEqualStrings("{\"env\":\"env-1\",\"job_id\":42}", cap.payload);
+
+    // 含特殊字符的 env：旧实现裸插值会拼出非法 JSON（该文件另一处同型问题
+    // 见 `jsonStringifyEnvQuery` 的收敛注释）。
+    const env = "env\"x\\y\x01";
+    var parsed = try t.databaseMigrateQueryInfo(env, 42);
+    defer parsed.deinit();
+
+    const body = try std.json.parseFromSlice(struct {
+        env: []const u8,
+        job_id: i64,
+    }, alloc, cap.payload, .{});
+    defer body.deinit();
+    try std.testing.expectEqualStrings(env, body.value.env);
+    try std.testing.expectEqual(@as(i64, 42), body.value.job_id);
+    try std.testing.expectEqual(@as(i64, 3), parsed.value.record_success);
 }
 
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────

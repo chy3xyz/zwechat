@@ -8,6 +8,7 @@ const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
+const util_json = @import("../../util/json.zig");
 
 /// `jscode2session` 返回。
 pub const ResCode2Session = struct {
@@ -116,7 +117,7 @@ pub const Auth = struct {
     ///
     /// 请求走 `util_retry.callApi`：errcode 为 token 失效码时作废缓存并重试一次。
     pub fn getPhoneNumber(self: *Self, code: []const u8) !std.json.Parsed(GetPhoneNumberResponse) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"code\":\"{s}\"}}", .{code});
+        const body = try util_json.stringFieldObject(self.allocator, "code", code);
         defer self.allocator.free(body);
 
         const Sender = struct {

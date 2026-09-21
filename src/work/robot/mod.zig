@@ -12,6 +12,7 @@
 const std = @import("std");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_json = @import("../../util/json.zig");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL 常量
@@ -168,25 +169,9 @@ fn encodeMarkdownMessage(allocator: std.mem.Allocator, msg: MarkdownMessage) ![]
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendJsonString(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), s: []const u8) !void {
-    for (s) |c| {
-        switch (c) {
-            '"' => try buf.appendSlice(allocator, "\\\""),
-            '\\' => try buf.appendSlice(allocator, "\\\\"),
-            '\n' => try buf.appendSlice(allocator, "\\n"),
-            '\r' => try buf.appendSlice(allocator, "\\r"),
-            '\t' => try buf.appendSlice(allocator, "\\t"),
-            // RFC 8259：U+0000–U+001F 必须转义，统一输出 \u00XX。
-            else => if (c < 0x20) {
-                var hex: [6]u8 = undefined;
-                const esc = std.fmt.bufPrint(&hex, "\\u{x:0>4}", .{c}) catch unreachable;
-                try buf.appendSlice(allocator, esc);
-            } else {
-                try buf.append(allocator, c);
-            },
-        }
-    }
-}
+/// JSON 字符串转义（实现收敛到 `util.json.appendEscapedString`；
+/// 同时把 `\b`/`\f` 由 `\u0008`/`\u000c` 改为与 Go / `std.json` 一致的短转义）。
+const appendJsonString = util_json.appendEscapedString;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 测试

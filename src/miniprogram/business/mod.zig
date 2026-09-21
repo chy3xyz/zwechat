@@ -9,6 +9,7 @@ const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
+const util_json = @import("../../util/json.zig");
 
 /// 获取手机号请求。
 pub const GetPhoneNumberRequest = struct {
@@ -59,7 +60,7 @@ pub const Business = struct {
     ///
     /// 请求走 `util_retry.callApi`：errcode 为 token 失效码时作废缓存并重试一次。
     pub fn getPhoneNumber(self: *Self, req: GetPhoneNumberRequest) !std.json.Parsed(PhoneInfo) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"code\":\"{s}\"}}", .{req.code});
+        const body = try util_json.stringFieldObject(self.allocator, "code", req.code);
         defer self.allocator.free(body);
 
         const Sender = struct {

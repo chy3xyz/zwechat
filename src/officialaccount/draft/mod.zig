@@ -13,6 +13,7 @@ const Context = @import("../context.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
+const util_json = @import("../../util/json.zig");
 
 pub const Draft = struct {
     ctx: *Context,
@@ -64,7 +65,7 @@ pub const Draft = struct {
                 );
                 defer a.free(uri);
 
-                const body = try std.fmt.allocPrint(a, "{{\"media_id\":\"{s}\"}}", .{c.media_id});
+                const body = try util_json.stringFieldObject(a, "media_id", c.media_id);
                 defer a.free(body);
 
                 const client = util_http.getDefaultClient(a);
@@ -88,7 +89,7 @@ pub const Draft = struct {
                 );
                 defer a.free(uri);
 
-                const body = try std.fmt.allocPrint(a, "{{\"media_id\":\"{s}\"}}", .{c.media_id});
+                const body = try util_json.stringFieldObject(a, "media_id", c.media_id);
                 defer a.free(body);
 
                 const client = util_http.getDefaultClient(a);
@@ -118,11 +119,7 @@ pub const Draft = struct {
                 );
                 defer a.free(uri);
 
-                const body = try std.fmt.allocPrint(
-                    a,
-                    "{{\"media_id\":\"{s}\",\"index\":{d},\"articles\":{s}}}",
-                    .{ c.media_id, c.index, c.article_json },
-                );
+                const body = try buildUpdateBody(a, c.media_id, c.index, c.article_json);
                 defer a.free(body);
 
                 const client = util_http.getDefaultClient(a);
@@ -207,6 +204,34 @@ pub const Draft = struct {
         });
     }
 };
+
+/// 组装 `draft/update` 请求体：`{"media_id":"...","index":N,"articles":{...}}`。
+/// 纯函数，便于单元测试。
+///
+/// `media_id` 来自调用方，按 JSON 字符串规则转义：此前手写 `allocPrint` 裸插值，
+/// 含 `"` / `\` / 控制字符时会拼出非法 JSON。
+///
+/// `article_json` 是调用方预拼好的**单篇文章 JSON 对象**，这里**有意原样注入**
+/// （对它转义会把它降级成字符串字面量，微信侧按对象解析会失败）。
+fn buildUpdateBody(
+    allocator: std.mem.Allocator,
+    media_id: []const u8,
+    index: i64,
+    article_json: []const u8,
+) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "{\"media_id\":\"");
+    try util_json.appendEscapedString(allocator, &buf, media_id);
+    try buf.appendSlice(allocator, "\",\"index\":");
+    var num_buf: [24]u8 = undefined;
+    const num = std.fmt.bufPrint(&num_buf, "{d}", .{index}) catch unreachable;
+    try buf.appendSlice(allocator, num);
+    try buf.appendSlice(allocator, ",\"articles\":");
+    try buf.appendSlice(allocator, article_json);
+    try buf.append(allocator, '}');
+    return buf.toOwnedSlice(allocator);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 测试辅助：假 AccessTokenHandle（dupe 出 token，允许调用方 free）+
@@ -387,6 +412,36 @@ test "Draft.update 组装 media_id/index/articles 请求体" {
         "{\"media_id\":\"MEDIA123\",\"index\":1,\"articles\":{\"title\":\"t\",\"thumb_media_id\":\"m\"}}",
         cap.payload,
     );
+}
+
+test "Draft.update media_id 含引号/反斜杠/控制字符时产出合法 JSON" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{ .allocator = alloc, .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var d = Draft.init(&ctx, alloc);
+
+    // 旧实现把 media_id 裸插进 JSON 字符串：这些字符会拼出非法 JSON。
+    const media_id = "MED\"IA\\1\x01";
+    const article_json = "{\"title\":\"t\"}";
+    try d.update(media_id, 0, article_json);
+
+    const body = try std.json.parseFromSlice(struct {
+        media_id: []const u8,
+        index: i64,
+        articles: std.json.Value,
+    }, alloc, cap.payload, .{});
+    defer body.deinit();
+    try std.testing.expectEqualStrings(media_id, body.value.media_id);
+    try std.testing.expectEqual(@as(i64, 0), body.value.index);
+    // articles 是有意 raw 注入：解析回来仍是对象（而不是被转义成字符串）。
+    try std.testing.expectEqualStrings("t", body.value.articles.object.get("title").?.string);
 }
 
 test "Draft.delete errcode 非 0 返回 ApiError" {

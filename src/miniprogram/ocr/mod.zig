@@ -2,13 +2,15 @@
 //! miniprogram/ocr — OCR 识别
 //!
 //! 对应 `_ref/wechat/miniprogram/ocr/ocr.go`：身份证 / 银行卡 / 行驶证 / 驾驶证 /
-//! 营业执照 / 通用印刷体 OCR。`img_url` 需为已 URL 编码的图片地址。
+//! 营业执照 / 通用印刷体 OCR。`img_url` 传**原始**图片地址即可——本模块按 Go
+//! `url.QueryEscape` 语义转义后放进 query（与参考实现逐字对齐）。
 
 const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
+const util_uri = @import("../../util/uri.zig");
 
 pub const Position = struct {
     left_top: Coordinate = .{},
@@ -135,7 +137,7 @@ pub const OCR = struct {
         self.transport_ctx = ctx;
     }
 
-    /// 身份证 OCR（`img_url` 为已 URL 编码的图片地址）。
+    /// 身份证 OCR（`img_url` 传原始图片地址，本模块负责转义）。
     pub fn idCard(self: *Self, img_url: []const u8) !std.json.Parsed(ResIDCard) {
         return self.fetch(ResIDCard, "idcard", img_url);
     }
@@ -166,11 +168,12 @@ pub const OCR = struct {
     }
 
     fn fetch(self: *Self, comptime T: type, path: []const u8, img_url: []const u8) !std.json.Parsed(T) {
-        // img_url 作为 query 参数需先按 URI 规则转义（空格、&、?、# 等）。
-        var encoded_buf: std.Io.Writer.Allocating = .init(self.allocator);
-        defer encoded_buf.deinit();
-        try (std.Uri.Component{ .raw = img_url }).formatQuery(&encoded_buf.writer);
-        const encoded = try encoded_buf.toOwnedSlice();
+        // img_url 作为 query 参数必须先按 Go `url.QueryEscape` 语义转义：
+        // 值里的 `&` / `=` / `?` 否则会被服务端当成参数分隔符，把 img_url 截断
+        // （CDN 签名 URL 带 `?sign=...&t=...` 时必现）。
+        // 这里刻意不用 `std.Uri.Component.formatQuery`——它的保留集包含
+        // `&=?/:`，正是导致截断的原因。
+        const encoded = try util_uri.queryEscape(self.allocator, img_url);
         defer self.allocator.free(encoded);
 
         const Sender = struct {
@@ -253,7 +256,8 @@ test "idCard 解析 type 与未知字段容忍" {
     const allocator = std.testing.allocator;
     var mt = util_http.MockTransport.init(allocator);
     defer mt.deinit();
-    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/idcard?img_url=https://example.com/a.jpg&access_token=token-abc", .{
+    // img_url 按 Go url.QueryEscape 语义转义（`:`→%3A、`/`→%2F）。
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/idcard?img_url=https%3A%2F%2Fexample.com%2Fa.jpg&access_token=token-abc", .{
         .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"type\":\"Front\",\"name\":\"张三\",\"id\":\"11010119900307xxxx\",\"new_unknown_field\":42}",
     });
 
@@ -271,7 +275,7 @@ test "driving 解析 img_size 的 w/h 字段" {
     const allocator = std.testing.allocator;
     var mt = util_http.MockTransport.init(allocator);
     defer mt.deinit();
-    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/driving?img_url=https://example.com/b.jpg&access_token=token-abc", .{
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/driving?img_url=https%3A%2F%2Fexample.com%2Fb.jpg&access_token=token-abc", .{
         .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"plate_num\":\"粤B12345\",\"img_size\":{\"w\":800,\"h\":600}}",
     });
 
@@ -290,7 +294,7 @@ test "bizLicense errcode 非 0 返回 ApiError" {
     const allocator = std.testing.allocator;
     var mt = util_http.MockTransport.init(allocator);
     defer mt.deinit();
-    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/bizlicense?img_url=https://example.com/c.jpg&access_token=token-abc", .{
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/bizlicense?img_url=https%3A%2F%2Fexample.com%2Fc.jpg&access_token=token-abc", .{
         .body = "{\"errcode\":47001,\"errmsg\":\"data format error\"}",
     });
 
@@ -301,11 +305,14 @@ test "bizLicense errcode 非 0 返回 ApiError" {
     try std.testing.expectError(util_error.WechatError.ApiError, o.bizLicense("https://example.com/c.jpg"));
 }
 
-test "img_url 含特殊字符时按 URI 规则转义" {
+test "img_url 含 & 与 ? 时按 Go url.QueryEscape 转义（回归：曾被 formatQuery 截断）" {
     const allocator = std.testing.allocator;
     var mt = util_http.MockTransport.init(allocator);
     defer mt.deinit();
-    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/comm?img_url=https://example.com/a%20b?x=1&y=2&access_token=token-abc", .{
+    // 空格 → `+`；`:`→%3A、`/`→%2F、`?`→%3F、`=`→%3D、`&`→%26。
+    // 若沿用 std.Uri.Component.formatQuery，`?`/`&`/`=` 会原样进入 query，
+    // 服务端会把 `y=2` 当成独立参数、`access_token` 被后续值顶掉。
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/comm?img_url=https%3A%2F%2Fexample.com%2Fa+b%3Fx%3D1%26y%3D2&access_token=token-abc", .{
         .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"items\":[],\"img_size\":{\"w\":100,\"h\":50}}",
     });
 
@@ -329,10 +336,10 @@ test "idCard token 失效自愈：作废缓存后用新 token 重试成功" {
     var mt = util_http.MockTransport.init(allocator);
     defer mt.deinit();
     // token 位于 img_url 之后，重试后仅该段变化。
-    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/idcard?img_url=https://example.com/a.jpg&access_token=token-abc", .{
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/idcard?img_url=https%3A%2F%2Fexample.com%2Fa.jpg&access_token=token-abc", .{
         .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
     });
-    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/idcard?img_url=https://example.com/a.jpg&access_token=token-new", .{
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/idcard?img_url=https%3A%2F%2Fexample.com%2Fa.jpg&access_token=token-new", .{
         .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"type\":\"Front\",\"name\":\"张三\"}",
     });
 
@@ -351,7 +358,7 @@ test "idCard token 失效自愈：作废缓存后用新 token 重试成功" {
     try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
     try std.testing.expectEqualStrings(
-        "https://api.weixin.qq.com/cv/ocr/idcard?img_url=https://example.com/a.jpg&access_token=token-new",
+        "https://api.weixin.qq.com/cv/ocr/idcard?img_url=https%3A%2F%2Fexample.com%2Fa.jpg&access_token=token-new",
         mt.history.items[1],
     );
 }

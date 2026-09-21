@@ -134,11 +134,9 @@ pub const Invoice = struct {
     /// 对应 `_ref/wechat/work/invoice/invoice.go` 的 `GetInvoiceInfo`。
     /// 走 `util/retry.callApi`：token 失效（40001 等）时自动作废缓存并重试一次。
     pub fn getInvoiceInfo(self: *Self, req: GetInvoiceInfoRequest) !std.json.Parsed(GetInvoiceInfoResponse) {
-        const body = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"card_id\":\"{s}\",\"encrypt_code\":\"{s}\"}}",
-            .{ req.card_id, req.encrypt_code },
-        );
+        // card_id / encrypt_code 均直接来自调用方，必须走 JSON 转义：旧实现用
+        // `allocPrint` 裸插值，含 `"` / `\` / 控制字符时产出非法 JSON。
+        const body = try encodeInvoiceRefJson(self.allocator, req.card_id, req.encrypt_code);
         defer self.allocator.free(body);
 
         const Sender = struct {
@@ -216,6 +214,31 @@ pub const Invoice = struct {
 // 内部辅助：手写 JSON 序列化
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// 单张发票引用编码为 `{"card_id":"...","encrypt_code":"..."}`。
+///
+/// `card_id` / `encrypt_code` 来自调用方，此前 `getInvoiceInfo` 直接 `allocPrint`
+/// 裸插值，含 `"` / `\` / 控制字符时会拼出非法 JSON。
+fn encodeInvoiceRefJson(allocator: std.mem.Allocator, card_id: []const u8, encrypt_code: []const u8) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try appendInvoiceRefJson(allocator, &buf, card_id, encrypt_code);
+    return buf.toOwnedSlice(allocator);
+}
+
+/// 把单张发票引用追加到 `buf`（`encodeInvoiceRefJson` 与批量编码共用）。
+fn appendInvoiceRefJson(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayListUnmanaged(u8),
+    card_id: []const u8,
+    encrypt_code: []const u8,
+) !void {
+    try buf.appendSlice(allocator, "{\"card_id\":\"");
+    try appendJsonString(allocator, buf, card_id);
+    try buf.appendSlice(allocator, "\",\"encrypt_code\":\"");
+    try appendJsonString(allocator, buf, encrypt_code);
+    try buf.appendSlice(allocator, "\"}");
+}
+
 /// `GetInvoiceBatchRequest` 编码为 `{"item_list":[{"card_id":"...","encrypt_code":"..."},...]}`。
 fn encodeInvoiceBatchJson(allocator: std.mem.Allocator, item_list: []const InvoiceRef) ![]u8 {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -224,11 +247,7 @@ fn encodeInvoiceBatchJson(allocator: std.mem.Allocator, item_list: []const Invoi
     try buf.appendSlice(allocator, "{\"item_list\":[");
     for (item_list, 0..) |item, i| {
         if (i > 0) try buf.append(allocator, ',');
-        try buf.appendSlice(allocator, "{\"card_id\":\"");
-        try appendJsonString(allocator, &buf, item.card_id);
-        try buf.appendSlice(allocator, "\",\"encrypt_code\":\"");
-        try appendJsonString(allocator, &buf, item.encrypt_code);
-        try buf.appendSlice(allocator, "\"}");
+        try appendInvoiceRefJson(allocator, &buf, item.card_id, item.encrypt_code);
     }
     try buf.appendSlice(allocator, "]}");
     return buf.toOwnedSlice(allocator);
@@ -290,6 +309,70 @@ test "encodeInvoiceBatchJson 空列表" {
     const body = try encodeInvoiceBatchJson(alloc, &.{});
     defer alloc.free(body);
     try std.testing.expectEqualStrings("{\"item_list\":[]}", body);
+}
+
+/// 捕获最近一次请求的 URI 与 payload，并返回预设响应。
+const TestCapture = struct {
+    allocator: std.mem.Allocator,
+    response: []const u8,
+    uri: []u8 = &.{},
+    payload: []u8 = &.{},
+
+    fn dispatch(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        method: std.http.Method,
+        payload: []const u8,
+        content_type: ?[]const u8,
+    ) anyerror![]u8 {
+        _ = method;
+        _ = content_type;
+        const self: *TestCapture = @ptrCast(@alignCast(ctx));
+        self.uri = try allocator.dupe(u8, uri);
+        self.payload = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, self.response);
+    }
+};
+
+test "getInvoiceInfo 请求体转义：card_id / encrypt_code 含引号、反斜杠、控制字符仍为合法 JSON" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"card_id\":\"card_1\"}",
+    };
+    const client = util_http.getDefaultClient(alloc);
+    client.setTransport(TestCapture.dispatch, @ptrCast(&cap));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = HealState{};
+    var ctx = makeHealCtx(&state);
+    var inv = Invoice.init(&ctx, alloc);
+
+    // 正常输入：字节序列与旧的 `allocPrint` 实现逐字一致。
+    var plain = try inv.getInvoiceInfo(.{ .card_id = "card_1", .encrypt_code = "enc1" });
+    defer plain.deinit();
+    try std.testing.expectEqualStrings(
+        "{\"card_id\":\"card_1\",\"encrypt_code\":\"enc1\"}",
+        cap.payload,
+    );
+
+    // 含特殊字符的入参：旧实现拼出非法 JSON，现在必须能被解析回原值。
+    const card_id = "card\"1\\2";
+    const encrypt_code = "enc\x01code";
+    var parsed = try inv.getInvoiceInfo(.{ .card_id = card_id, .encrypt_code = encrypt_code });
+    defer parsed.deinit();
+
+    const body = try std.json.parseFromSlice(GetInvoiceInfoRequest, alloc, cap.payload, .{});
+    defer body.deinit();
+    try std.testing.expectEqualStrings(card_id, body.value.card_id);
+    try std.testing.expectEqualStrings(encrypt_code, body.value.encrypt_code);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

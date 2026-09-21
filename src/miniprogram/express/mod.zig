@@ -10,6 +10,7 @@ const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
+const util_json = @import("../../util/json.zig");
 
 /// 运单状态。
 pub const WaybillStatus = enum(i64) {
@@ -121,7 +122,7 @@ pub const Express = struct {
 
     /// 查询运单详情信息。
     pub fn queryTrace(self: *Self, req: QueryTraceRequest) !std.json.Parsed(QueryTraceResponse) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"waybill_token\":\"{s}\"}}", .{req.waybill_token});
+        const body = try util_json.stringFieldObject(self.allocator, "waybill_token", req.waybill_token);
         defer self.allocator.free(body);
         return self.postParsed("cgi-bin/express/delivery/open_msg/query_trace", body, QueryTraceResponse);
     }
@@ -142,7 +143,7 @@ pub const Express = struct {
 
     /// 查询跟踪运单详情。
     pub fn queryFollowTrace(self: *Self, req: QueryFollowTraceRequest) !std.json.Parsed(QueryFollowTraceResponse) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"waybill_token\":\"{s}\"}}", .{req.waybill_token});
+        const body = try util_json.stringFieldObject(self.allocator, "waybill_token", req.waybill_token);
         defer self.allocator.free(body);
         return self.postParsed("cgi-bin/express/delivery/open_msg/query_follow_trace", body, QueryFollowTraceResponse);
     }

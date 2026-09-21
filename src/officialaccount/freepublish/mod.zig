@@ -14,6 +14,7 @@ const Context = @import("../context.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
+const util_json = @import("../../util/json.zig");
 
 /// 发布状态（与 Go 参考 `PublishStatus` 常量一一对应）。
 pub const PublishStatus = enum(i32) {
@@ -82,7 +83,7 @@ pub const FreePublish = struct {
                 );
                 defer a.free(uri);
 
-                const body = try std.fmt.allocPrint(a, "{{\"media_id\":\"{s}\"}}", .{c.media_id});
+                const body = try util_json.stringFieldObject(a, "media_id", c.media_id);
                 defer a.free(body);
 
                 const client = util_http.getDefaultClient(a);
@@ -106,7 +107,7 @@ pub const FreePublish = struct {
                 );
                 defer a.free(uri);
 
-                const body = try std.fmt.allocPrint(a, "{{\"article_id\":\"{s}\"}}", .{c.article_id});
+                const body = try util_json.stringFieldObject(a, "article_id", c.article_id);
                 defer a.free(body);
 
                 const client = util_http.getDefaultClient(a);
