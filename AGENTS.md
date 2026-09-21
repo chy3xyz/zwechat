@@ -2,7 +2,7 @@
 
 `zwechat` 是使用 Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付、开放平台、企业微信、智能对话等能力。
 
-> ✅ **当前状态**：`zig 0.17.0-dev.2151+2ec5523d5`。`zig build` / `zig build test` / `zig build run` 全部通过，**827 个内联单元测试全部通过且零内存泄漏**。
+> ✅ **当前状态**：`zig 0.17.0-dev.2151+2ec5523d5`。`zig build` / `zig build test` / `zig build run` 全部通过，**1004 个内联单元测试全部通过且零内存泄漏**。
 >
 > 目录包括：
 > - `_ref/wechat/` — 完整克隆的 Go 参考实现（`silenceper/wechat/v2`，Apache-2.0），作为移植依据（**只读**）。
@@ -39,7 +39,7 @@
 | 构建系统 | 原生 `zig build`（`build.zig` + `build.zig.zon`） |
 | 许可证 | Apache License 2.0（与上游参考保持一致，保留 `_ref/wechat/LICENSE`） |
 | 运行目标 | 静态库 + 可执行示例 |
-| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **827 个测试，0 泄漏** |
+| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **1004 个测试，0 泄漏** |
 
 外部依赖按需声明在 `build.zig.zon`，尽量减少三方依赖；优先使用 Zig 标准库。当前唯一三方依赖：`httpz`（`chy3xyz/zhttp` v0.6.1，git URL + hash 经 `zig fetch` 引入，OpenSSL 后端，用于微信支付 mTLS）。
 
@@ -76,6 +76,9 @@ src/
 │   ├── util.zig           # SliceChunk ✅
 │   ├── template.zig       # TODO：消息模板
 │   ├── sync.zig           # SpinMutex（CAS 自旋锁，cache/credential 共用）✅
+│   ├── retry.zig          # callApi：token 注入 + errcode 判定 + 失效自愈重试一次 ✅
+│   ├── json.zig           # JSON 字符串转义/字段拼接 helper（全仓唯一实现）✅
+│   ├── uri.zig            # queryEscape（Go url.QueryEscape 语义，全仓唯一实现）✅
 │   ├── xml.zig            # XML 编解码（支付回调用）✅
 │   ├── asn1.zig           # DER 解析器 ✅
 │   └── pkcs12.zig         # PKCS#12 解析器 ✅
@@ -107,7 +110,7 @@ src/
 ├── openplatform/          # 开放平台：account/component_access_token 已实现，其余子模块待补齐
 ├── work/                  # 企业微信（顶层 Work + context + config + oauth + jsapi 已实现；addresslist/appchat/checkin/externalcontact/invoice/kf/material/message/msgaudit/robot 持续补齐）
 ├── aispeech/              # 智能对话（占位）
-└── test_runner.zig        # ✅ 编译门（强制 @import 每个模块），827 个测试全部发现
+└── test_runner.zig        # ✅ 编译门（强制 @import 每个模块），1004 个测试全部发现
 ```
 
 ---
@@ -248,7 +251,7 @@ test "WechatError 错误信息格式化" {
 | `src/wechat.zig` | `wechat.go`（顶层 Wechat struct） | `_ref/wechat/README.md` |
 | `src/cache/` | `cache/`（4 文件） | — |
 | `src/credential/` | `credential/`（6 文件） | — |
-| `src/util/` | `util/`（10 文件） | — |
+| `src/util/` | `util/`（14 文件） | — |
 | `src/domain/openapi.zig` | `domain/openapi/`、`internal/openapi/` | — |
 | `src/officialaccount/` | `officialaccount/`（47 文件） | `_ref/wechat/doc/api/officialaccount.md` |
 | `src/miniprogram/` | `miniprogram/`（45 文件） | `_ref/wechat/doc/api/miniprogram.md` |
@@ -358,7 +361,15 @@ const oa = wc.getOfficialAccount(cfg);
 - **P3 收尾批次**：openplatform/miniprogram 代运营接口（`basic.zig`：账号信息/昵称/签名/头像/搜索状态，走 authorizer token）；oa material AddMaterial 图片/语音、broadcast preview（PreviewTarget union，替代 Go 链式 API）+ SendImage；miniprogram 订阅推送解析（`PushReceiver.getMsgData` JSON/XML 双路径）；kf 富媒体（`sendMsgRich` 9 类消息 union、syncMsg 9 类消息 + 4 类事件强类型）；pay v3 退款（`pay/v3/refund.zig`，Go 参考无 v3，以微信官方文档为准；notify 解密复用现有 GCM 能力）；oa user 分页封装（`listAllUserOpenIDs`/`getAllBlackList`，带游标不推进兜底）。`doc/api_guide.md` 从 235 行扩到 ~620 行（开放平台授权全链路时序 + work/miniprogram/oa 高频场景 + 缓存凭据配置 + 每章「常见坑」框）。
 - **msgaudit 解密 SDK 决策：明确不做**。企业微信会话存档消息解密依赖官方私有 `libWeWorkFinanceSdk`（C ABI + 预编译 .so/.dll），Go 参考也是 cgo 直连；Zig 侧引入需 link 闭源二进制且无法离线测试，与「测试不依赖外部服务」纪律冲突。当前只提供元数据接口（getRoomInfo/getAgreeInfo/getChatInfo）。如未来业务必需，再单独立项做 C ABI 绑定 + 真机集成测试。
 - **最后三处尾巴（已清零）**：① broadcast 全员群发 `sendXxxToAll` 六组（`mass/sendall` + `filter:{is_to_all:true}`，对应 Go `chooseTagOrOpenID` 的 `user==nil` 分支）；② miniprogram 推送事件 **15/15 全覆盖**（getEvent 全部 case，JSON/XML 双路径，未知事件仍回退 raw 兜底）；③ kf `OriginData` 原始 JSON 回捕——用 `std.json` 的 `jsonParse` 钩子实现：`SyncMessage.jsonParse` 先把消息元素物化成 `std.json.Value` 树，再 `parseFromValueLeaky` 解出强类型字段并把树挂到 `origin_data`（单次解析、同一 arena、对既有代码零侵入），配套 `getOriginData`/`originAs`/`originPayloadAs` 支持对未建模字段/newtype 的二次解析。代价：每条消息多一份 Value 副本（解析开销与内存约翻倍），若成热点可按 msgtype 白名单开关；重复 JSON 键从报错变为后者覆盖（微信不下发重复键，可接受）。
-- **Go 参考覆盖率现状**（对照 `_ref/wechat`）：officialaccount 客服消息/用户标签/黑名单/datacube 21/21/素材/broadcast 12+6/客服账号管理；work addresslist 33/33、externalcontact 78/79（仅非 REST 的 GetCallbackMessage 未移植）、kf 服务端 31/31 + 富媒体收发 + OriginData、appchat/message/oauth/robot/jsapi/server/material 对齐；miniprogram 全域含推送 15/15 事件解析；openplatform 授权全链路 + 代运营接口；pay v2 六模块 + v3（config/signer/order/notify/refund）。**唯一已知不做**：msgaudit 解密（见上条）。
+- **Go 参考覆盖率现状**（对照 `_ref/wechat`）：officialaccount 客服消息/用户标签/黑名单/datacube 21/21/素材/broadcast 12+6/客服账号管理；work addresslist 33/33、externalcontact 78/79（仅非 REST 的 GetCallbackMessage 未移植）、kf 服务端 31/31 + 富媒体收发 + OriginData、appchat/message/oauth/robot/jsapi/server/material 对齐；miniprogram 全域含推送 15/15 事件解析；openplatform 授权全链路 + 代运营接口；pay v2 六模块 + v3（config/signer/order/notify/refund/transfer）。**唯一已知不做**：msgaudit 解密（见上条）。
+- **错误可观测性（errcode 不再丢）**：`util/error.zig` 的 `parseCommonError`（含 `decodeWithCommonError` 与 `handleFileResponse`）在 errcode != 0 时把 `errcode/errmsg/api_name` 写入**线程局部零分配缓冲**，消费方用 `util_error.lastErrorDetail()` 取（借用，有效期至本线程下次记录/清除；成功不清除，需要「本次成功即无错」语义时先 `clearErrorDetail()`）。`WechatError` 错误集保持不变（兼容）。目的：区分 40001/45009/40003/48001，日志里能查到码。
+- **token 失效自愈（全仓接线）**：机制 = `AccessTokenHandle.VTable.invalidate`（可选字段，默认 null 的实现返回 `error.InvalidateNotSupported`）+ `JsTicketHandle.VTable.invalidate` + 各 Context 的 `invalidateAccessToken`/`invalidateJsTicket` + `util/retry.zig` 的 `callApi(ctx, allocator, api_name, sender)`。语义：取 token → sender 发请求 → 若 errcode 是 token 失效码（40001/40014/41001/42001）→ 作废缓存 → 取新 token → **只重试一次**；非 token 类 errcode → `ApiError`；网络错误不重试。sender 必须提供 `pub fn send(self: @This(), allocator, token) anyerror![]u8`（**必须 pub**）。开放平台 token 链路是例外：**刻意持锁跨 HTTP**（authorizer 刷新会轮换 refresh_token，并发覆盖会永久丢凭据）。
+- **媒体下载限额**：`util/http.zig` 的 `getFollowRedirectLimited(uri, max_bytes)` / `getFollowRedirectToFile(uri, path, max_bytes)`（超限 `error.ResponseTooLarge`，落盘失败会删不完整文件；真流式：Content-Length 预判 + 16KiB 分块累加；**注入 transport 的 mock 路径只能读完后判定**，已在文档写明）。`officialaccount/material` 与 `work/material` 的下载方法默认上限 100 MiB（图片 10 MiB / 语音 2 MiB 等常量另有区分），旧签名保留。
+- **`getDefaultClient` 分配器契约**：启动期用 `initDefaultClient(allocator)` 进入严格模式（幂等；allocator 不一致 → `error.AllocatorMismatch`，其后 `getDefaultClient` 传错 allocator 会 `@panic`）；**懒初始化路径仍保持历史宽容语义**（首个 allocator 生效），可用 `defaultClientAllocatorMatches(allocator)` 自查。测试辅助一律走 `deinitDefaultClient()` 而非依赖宽容语义。
+- **Redis 连接池**：`cache/redis.zig` 的 `Options.max_connections`（默认 1 = 历史单连接语义）与 `pool_timeout_ms`（默认 30s）；池锁**只护空闲表**，网络 I/O 全在锁外；坏连接（协议/IO 错）丢弃不进池；等待有界，超时返回 `error.PoolTimeout`（vtable 边界映射为 `StorageError`）并可用 `redis.poolStats()` 观测（live/idle/in_use/peak_in_use/created/discarded/timeouts）。
+- **手写编码收敛**：`util/json.zig`（`appendEscapedString`：`"`、`\`、`\b`、`\f`、`\n`、`\r`、`\t`、其余 <0x20 → `\u00xx` 小写 hex）与 `util/uri.zig`（`queryEscape`：保留 Go 的 unreserved 集、空格→`+`）分别是全仓唯一实现——原先 11 份手写 JSON escaper 与 3 份手写 QueryEscape 已收敛。注意 `std.Uri.Component.formatQuery` **不**转义 `&=?/:`，与 Go `url.QueryEscape` 不兼容，拼 query 一律用 `util_uri.queryEscape`。有意保留的 raw 注入点（`draft.add` 的 `articles_json`、`subscribe` 的 `data`、`message.sendSubscribeMessage` 的 `data`）是调用方自带 JSON 对象的契约，勿"顺手"转义。
+- **API 面门禁与真实探针**：`tools/api_surface_check.sh`（配 `tools/api_surface.awk`、快照 `api/surface.txt`，CI 已在 test job 中调用）——删除/改名公开符号必须在 CHANGELOG 最新段落或 [Unreleased] 里写明（`容器.旧名` 或 `容器.字段.子字段`，**只写裸叶名不认**），否则 CI 失败；`--update` 刷新快照。已知漏报写在 awk 头部（私有类型内部声明、跨文件别名不展开、函数形参变化不记）。`zig build live-probe`（env `ZWECHAT_LIVE_PROBE=1` + 各域凭据，默认不联网、`-Dstrict` 才以 FAIL 退非零）用于发现"上游改了字段名"这类 mock 测不出的漂移。
+- **文档**：`docs/UPGRADING.md`（面向下游的版本升级速查，含 before/after 与 submodule bump 步骤）、`docs/OPEN_ITEMS.md`（已知取舍与开放项：msgaudit 不做、ignore_unknown_fields 的沉默另一面、redis 吞吐上限、媒体限额、懒初始化宽容语义、OriginData 内存代价、pay v2 错误内联等）。
 - **TLS / PKCS#12 / mTLS**：`util.pkcs12.zig` 已实现最小 PKCS#12 解析（PBES2/PBKDF2/AES-256-CBC），`util.rsa.zig` 提供 `parseP12` 包装。`util.http.postXMLWithTLS` 读取 P12 → 解析 PEM → 使用 httpz 完成 HTTPS POST。mTLS 客户端证书支持（`tls.config.Client.auth` / `cert`）由上游 zhttp v0.6.0 官方实现（提交 `0431984`，注释明确 “required for WeChat Pay (zwechat)”），本项目**不再维护任何本地补丁**。
 - **外部依赖**：`build.zig.zon` 通过 git URL 依赖 `https://github.com/chy3xyz/zhttp`（tag `v0.6.1`，commit `60a0212` + hash），构建时链接 `-lssl -lcrypto -lc`。升级方式：改 `build.zig.zon` 的 `.url` 后运行 `zig fetch --save=<name> <git-url>` 更新 `.hash`；`build.zig` 需同步适配上游模块名/构建选项（v0.6.0 起模块名 `zhttp`、新增 `-Dh3` / `-Dopenssl-include` 选项，本项目以 `h3=false` + 探测到的 include 路径透传；dependency options 字段名须与 `b.option` 注册名逐字一致，连字符用 `@"openssl-include"` 转义）。
 - **测试基础设施**：`src/test_runner.zig` 顶部有一段「编译门」test，强制 `@import` 每个子文件，并在测试体内做 `_ = mod;` 引用 — 否则 0.17-dev 的 dead-strip 可能把带 inline test 的文件排除掉，导致 `zig build test` 报告「All 1 tests passed」假象。
@@ -397,5 +408,5 @@ const oa = wc.getOfficialAccount(cfg);
 - **新增测试时**在 `src/test_runner.zig` 中加一行 `@import`（即便内容只是占位），否则 `zig build test` 不会发现它。
 - **`build.zig.zon` 的 fingerprint 字段**：写一个占位 hex（如 `0xd658b8e96476550b`）即可；若该值不被 Zig 接受，运行 `zig build` 会提示正确的值。
 - **避免 Zig 0.17-dev 已被移除的 API**：`std.Thread.Mutex`（用 `SpinMutex`）、`std.time.timestamp()`（用 `std.Io.Clock.now`）、`std.fmt.AllocPrintError`（用 `Allocator.Error`）、`std.ArrayListUnmanaged = .{}`（用 `.empty`）。
-- **修改完任何模块后**，必须 `zig build test` 确认 827/827 测试仍全部通过；任何内存泄漏会让测试失败。
+- **修改完任何模块后**，必须 `zig build test` 确认 1004/1004 测试仍全部通过；任何内存泄漏会让测试失败。
 - **避免 Zig 0.17-dev 已被移除的 API**：`std.fs.cwd()`（改用 `std.Io.Dir.cwd()`）、`std.Thread.Mutex`（用 `SpinMutex`）、`std.time.timestamp()`（用 `std.Io.Clock.now`）、`std.fmt.AllocPrintError`（用 `Allocator.Error`）、`std.ArrayListUnmanaged = .{}`（用 `.empty`）。

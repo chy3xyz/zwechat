@@ -532,18 +532,16 @@ SDK 不把它折叠成 `error.ApiError`，而是原样放进返回结构体。
 文档更新与代码节奏未完全对齐，属于**已知的文档债**。
 
 **影响**
-- `README.md:10` 与 `README.md:49` 写"**357** 个内联测试"，
-  而 `CHANGELOG.md` 的 `[0.4.4]` 记录为 **449 → 827**。两者不一致，
-  以 CHANGELOG / 实际运行 `zig build test` 输出为准。
+- ~~`README.md:10` 与 `README.md:49` 写"**357** 个内联测试"~~ →
+  **已在 v0.4.5 修正为 1004**；此后以实际 `zig build test` 输出与 CHANGELOG 为准。
 - `docs/api-reference.md` 部分章节早于 v0.4.4：
   例如 §5.6 的 `officialaccount/material` 只列了 4 个方法
   （`addNews`/`deleteMaterial`/`getMaterialCount`/`batchGetMaterial`），
   未含 v0.4.4 新增的 `getMedia`/`getMediaWithLimit`/`getMediaToFile*`
   与 `AddVideo`/`AddMaterial`；§7 的小程序段落也未列出 24 个子模块的全貌。
   **需要精确签名时以源码为准**（本文与 [`UPGRADING.md`](UPGRADING.md) 都按此口径标注）。
-- 工具链版本记录也不完全一致：`AGENTS.md` 记录开发/测试所用为
-  `0.17.0-dev.2151+2ec5523d5`，而 CI 钉的是
-  `.github/workflows/ci.yml:26` 的 `0.17.0-dev.1567+f0354179a`。
+- ~~工具链版本记录也不完全一致：CI 钉的是 `0.17.0-dev.1567+f0354179a`~~
+  → **已在 v0.4.5 统一为 `0.17.0-dev.2151+2ec5523d5`**（旧版缺 `Type.Struct.field_names` 等，实际编译不过）。
 
 **缓解**
 - 下游按"源码 > CHANGELOG > `doc/api_guide.md` > `docs/api-reference.md` > README"的
@@ -552,7 +550,31 @@ SDK 不把它折叠成 `error.ApiError`，而是原样放进返回结构体。
   就是为了绕过这批文档债。
 
 **触发再评估的条件**
-README / api-reference 完成一轮与 v0.4.4 源码的对齐（届时本条可删除）。
+`docs/api-reference.md` 完成一轮与最新源码的对齐（届时本条可删除）。
+
+---
+
+## 11. 测试套件在极端并发负载下偶发失败（端口探测与绑定的 TOCTOU）
+
+**决策（现状）**
+`src/cache/redis.zig` 与 `src/cache/memcache.zig` 的 mock server 测试用
+`findFreePort()`：先随机取端口 `listen` 探测、**关闭**、再把端口交给 mock server 绑定。
+探测与真正绑定之间存在窗口，机器上其它进程（或另一个同时在跑的测试进程）若恰好抢占该端口，
+mock server 绑定失败 → 测试失败。（`findFreePort` 的 20 次重试只覆盖探测阶段的冲突。）
+
+**影响**
+- 在「同一仓库并行跑多个测试进程」或机器负载很高时偶发：本会话实测约 2 次 / 20 次运行。
+- 串行运行（CI 的正常形态）10 次连续全绿，**不影响 CI 稳定性**；属测试基础设施脆弱性，
+  不是产品代码缺陷。
+- v0.4.5 已先消除同一用例里的**时序**脆弱性（`pool_timeout_ms=150` 用例放大 holder 命令耗时与断言余量）。
+
+**缓解**
+- 复跑即可（失败信息会指向 redis/memcache 的 mock server 绑定）。
+- 彻底修法：把**已绑定的 listener** 直接交给 mock server（不再释放端口），
+  或让 mock server 在 `AddressInUse` 时自行换端口重试。
+
+**触发再评估的条件**
+出现一次非并发场景下的重复失败（说明不只是 TOCTOU），或 CI 开始并行跑测试进程。
 
 ---
 

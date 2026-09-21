@@ -61,8 +61,8 @@ usage() {
   --update    用当前源码刷新 api/surface.txt。
   --help      显示本帮助。
 
-有意改名/删除公开 API 时：先跑 --update，再在 CHANGELOG.md 的最新版本段落或
-[Unreleased] 段落写明旧名字，两者一起提交。
+有意改名/删除公开 API 时：先在 CHANGELOG.md 的最新版本段落或 [Unreleased] 段落写明
+旧符号名（限定到容器，如 `Button.type_`），再跑 --update，两者一起提交。
 EOF
 }
 

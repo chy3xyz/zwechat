@@ -23,7 +23,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ZIG_VERSION="0.17.0-dev.1567+f0354179a"
+          ZIG_VERSION="0.17.0-dev.2151+2ec5523d5"
           case "$RUNNER_OS" in
             Linux)   PLAT="x86_64-linux";  EXT="tar.xz" ;;
             macOS)   PLAT="aarch64-macos"; EXT="tar.xz" ;;
@@ -60,6 +60,9 @@ jobs:
       - name: Check Formatting
         run: zig build fmt
 
+      - name: Check Public API Surface
+        run: bash tools/api_surface_check.sh
+
       - name: Run Unit Tests
         run: zig build test
 
@@ -80,7 +83,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ZIG_VERSION="0.17.0-dev.1567+f0354179a"
+          ZIG_VERSION="0.17.0-dev.2151+2ec5523d5"
           PLAT="x86_64-windows"
           FILE="zig-${PLAT}-${ZIG_VERSION}.zip"
           curl -fL --retry 3 --retry-delay 2 -o "$FILE" "https://ziglang.org/builds/$FILE"

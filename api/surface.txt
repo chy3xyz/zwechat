@@ -2442,9 +2442,12 @@ src/officialaccount/datacube/mod.zig: pub fn DataCube.getUserSummary
 src/officialaccount/datacube/mod.zig: pub fn DataCube.init
 src/officialaccount/device/mod.zig: field Device.allocator: std.mem.Allocator
 src/officialaccount/device/mod.zig: field Device.ctx: *Context
+src/officialaccount/device/mod.zig: field Device.transport: ?util_http.HttpClient.Transport
+src/officialaccount/device/mod.zig: field Device.transport_ctx: ?*anyopaque
 src/officialaccount/device/mod.zig: pub const Device
 src/officialaccount/device/mod.zig: pub fn Device.createQRCode
 src/officialaccount/device/mod.zig: pub fn Device.init
+src/officialaccount/device/mod.zig: pub fn Device.setTransport
 src/officialaccount/device/mod.zig: pub fn Device.transMsg
 src/officialaccount/draft/mod.zig: field Draft.allocator: std.mem.Allocator
 src/officialaccount/draft/mod.zig: field Draft.ctx: *Context
@@ -6280,6 +6283,8 @@ src/work/oauth/mod.zig: field GetUserInfoResponse.user_ticket: []const u8
 src/work/oauth/mod.zig: field GetUserInfoResponse.userid: []const u8
 src/work/oauth/mod.zig: field Oauth.allocator: std.mem.Allocator
 src/work/oauth/mod.zig: field Oauth.ctx: *Context
+src/work/oauth/mod.zig: field Oauth.transport: ?util_http.HttpClient.Transport
+src/work/oauth/mod.zig: field Oauth.transport_ctx: ?*anyopaque
 src/work/oauth/mod.zig: field ResUserInfo.DeviceId: []const u8
 src/work/oauth/mod.zig: field ResUserInfo.OpenID: []const u8
 src/work/oauth/mod.zig: field ResUserInfo.UserId: []const u8
@@ -6308,6 +6313,7 @@ src/work/oauth/mod.zig: pub fn Oauth.getTfaInfo
 src/work/oauth/mod.zig: pub fn Oauth.getUserDetail
 src/work/oauth/mod.zig: pub fn Oauth.getUserInfo
 src/work/oauth/mod.zig: pub fn Oauth.init
+src/work/oauth/mod.zig: pub fn Oauth.setTransport
 src/work/oauth/mod.zig: pub fn Oauth.tfaSucc
 src/work/oauth/mod.zig: pub fn Oauth.userInfoToId
 src/work/robot/mod.zig: field MarkdownMessage.content: []const u8
