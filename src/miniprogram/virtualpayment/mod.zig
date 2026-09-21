@@ -707,7 +707,7 @@ pub const VirtualPayment = struct {
     // 内部：签名与请求
     // ─────────────────────────────────────────────────────────────────────────
 
-    fn callUser(self: *Self, comptime R: type, path: []const u8, req: anytype) !std.json.Parsed(R) {
+    fn callUser(self: *Self, path: []const u8, req: anytype, comptime R: type) !std.json.Parsed(R) {
         const body = try jsonStringify(self.allocator, req);
         defer self.allocator.free(body);
         const uri = try self.requestAddress(path, body, true);
@@ -715,7 +715,7 @@ pub const VirtualPayment = struct {
         return self.postBody(uri, body, R);
     }
 
-    fn callPay(self: *Self, comptime R: type, path: []const u8, req: anytype) !std.json.Parsed(R) {
+    fn callPay(self: *Self, path: []const u8, req: anytype, comptime R: type) !std.json.Parsed(R) {
         const body = try jsonStringify(self.allocator, req);
         defer self.allocator.free(body);
         const uri = try self.requestAddress(path, body, false);
@@ -764,12 +764,15 @@ pub const VirtualPayment = struct {
         return hmacSha256Hex(self.allocator, self.session_key, content);
     }
 
-    fn postBody(self: *Self, comptime T: type, uri: []const u8, body: []const u8) !std.json.Parsed(T) {
+    fn postBody(self: *Self, uri: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
         const client = util_http.getDefaultClient(self.allocator);
         const resp = try client.post(uri, body, "application/json;charset=utf-8");
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(T, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(T, self.allocator, resp, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+        }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -798,14 +801,20 @@ fn jsonStringify(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     const info = @typeInfo(T);
     if (info != .@"struct") return error.InvalidType;
     try s.beginObject();
-    inline for (info.@"struct".fields) |field| {
-        const fv = @field(value, field.name);
-        if (comptime isSkippable(field.type)) {
-            // 跳过空字符串 / 零值可选字段（与 Go omitempty 语义对齐的简化）。
-            if (isEmpty(field.type, fv)) continue;
+    inline for (info.@"struct".field_names, info.@"struct".field_types) |name, ftype| {
+        const fv = @field(value, name);
+        // 跳过空字符串 / 零值可选字段（与 Go omitempty 语义对齐的简化）。
+        const should_write = if (comptime isSkippable(ftype)) !isEmpty(ftype, fv) else true;
+        if (should_write) {
+            try s.objectField(name);
+            // 微信 xpay 契约要求 env 为数字（0 正式 / 1 沙箱，见 Go 参考 domain.go），
+            // 而 exhaustive enum 经 stringify 会写成 tag 名字符串，这里特判写 backing int。
+            if (comptime (ftype == Env)) {
+                try s.write(@intFromEnum(fv));
+            } else {
+                try s.write(fv);
+            }
         }
-        try s.objectField(field.name);
-        try s.write(fv);
     }
     try s.endObject();
     return out.toOwnedSlice();
@@ -846,4 +855,137 @@ test "paySign 空 app_key 返回 AppKeyEmpty" {
     var v = VirtualPayment.init(&ctx, std.heap.page_allocator);
     const result = v.paySign("/xpay/test", "{}");
     try std.testing.expectError(error.AppKeyEmpty, result);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 测试辅助：假 AccessTokenHandle + capture transport。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const credential = @import("../../credential/mod.zig");
+
+fn testGetAccessToken(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+    _ = ctx;
+    return allocator.dupe(u8, "stub-ak");
+}
+
+const test_token_vtable = credential.AccessTokenHandle.VTable{
+    .getAccessToken = testGetAccessToken,
+};
+
+const TestCapture = struct {
+    allocator: std.mem.Allocator,
+    response: []const u8,
+    uri: []u8 = &.{},
+    payload: []u8 = &.{},
+
+    fn dispatch(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        method: std.http.Method,
+        payload: []const u8,
+        content_type: ?[]const u8,
+    ) anyerror![]u8 {
+        _ = method;
+        _ = content_type;
+        const self: *TestCapture = @ptrCast(@alignCast(ctx));
+        self.uri = try allocator.dupe(u8, uri);
+        self.payload = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, self.response);
+    }
+};
+
+fn setupTestClient(alloc: std.mem.Allocator, cap: *TestCapture) void {
+    const client = util_http.getDefaultClient(alloc);
+    client.setTransport(TestCapture.dispatch, @ptrCast(cap));
+}
+
+fn releaseTestClient() void {
+    const client = util_http.getDefaultClient(std.heap.page_allocator);
+    client.setTransport(null, null);
+    util_http.deinitDefaultClient();
+}
+
+test "jsonStringify env=.sandbox 输出数字 1 且 production 省略 env 字段" {
+    const allocator = std.testing.allocator;
+
+    const sandbox_body = try jsonStringify(allocator, QueryBizBalanceRequest{ .env = .sandbox });
+    defer allocator.free(sandbox_body);
+    try std.testing.expect(std.mem.indexOf(u8, sandbox_body, "\"env\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sandbox_body, "\"sandbox\"") == null);
+
+    const prod_body = try jsonStringify(allocator, QueryBizBalanceRequest{ .env = .production });
+    defer allocator.free(prod_body);
+    try std.testing.expect(std.mem.indexOf(u8, prod_body, "\"env\"") == null);
+}
+
+test "queryOrder env=.sandbox 请求体 env 为数字且 pay_sig 与发送体一致" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"order\":null}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-vp", .app_key = "appkey-123" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &test_token_vtable },
+    };
+    var v = VirtualPayment.init(&ctx, alloc);
+    var parsed = try v.queryOrder(.{ .openid = "ou-1", .env = .sandbox, .order_id = "o-1" });
+    defer parsed.deinit();
+
+    // 微信 xpay 契约要求 env 为数字（1 沙箱），不得序列化为 "sandbox" 字符串。
+    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "\"env\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "\"env\":\"sandbox\"") == null);
+
+    // pay_sig = HMAC-SHA256(app_key, path + "&" + body)，签名体与发送体是同一份序列化结果。
+    var data = std.ArrayList(u8).empty;
+    defer data.deinit(alloc);
+    try data.appendSlice(alloc, "/xpay/query_order");
+    try data.appendSlice(alloc, "&");
+    try data.appendSlice(alloc, cap.payload);
+    const expected = try hmacSha256Hex(alloc, "appkey-123", data.items);
+    try std.testing.expect(std.mem.indexOf(u8, cap.uri, expected) != null);
+}
+
+test "queryUserBalance 用户态签名与支付签名共用同一份序列化结果" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-vp", .app_key = "appkey-123" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &test_token_vtable },
+    };
+    var v = VirtualPayment.init(&ctx, alloc);
+    v.setSessionKey("sk-1");
+    var parsed = try v.queryUserBalance(.{ .openid = "ou-1", .env = .sandbox, .user_ip = "1.2.3.4" });
+    defer parsed.deinit();
+
+    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "\"env\":1") != null);
+
+    // signature = HMAC-SHA256(session_key, body)。
+    const expected_sig = try hmacSha256Hex(alloc, "sk-1", cap.payload);
+    try std.testing.expect(std.mem.indexOf(u8, cap.uri, expected_sig) != null);
+
+    // pay_sig = HMAC-SHA256(app_key, path + "&" + body)。
+    var data = std.ArrayList(u8).empty;
+    defer data.deinit(alloc);
+    try data.appendSlice(alloc, "/xpay/query_user_balance");
+    try data.appendSlice(alloc, "&");
+    try data.appendSlice(alloc, cap.payload);
+    const expected_pay = try hmacSha256Hex(alloc, "appkey-123", data.items);
+    try std.testing.expect(std.mem.indexOf(u8, cap.uri, expected_pay) != null);
 }

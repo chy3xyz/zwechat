@@ -67,7 +67,7 @@ pub const ShortLink = struct {
             errcode: i64 = 0,
             errmsg: []const u8 = "",
             link: []const u8 = "",
-        }, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        }, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         defer parsed.deinit();

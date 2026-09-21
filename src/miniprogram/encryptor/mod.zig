@@ -56,7 +56,7 @@ pub const Encryptor = struct {
         const plain = try getCipherText(allocator, session_key, encrypted_data, iv);
         defer allocator.free(plain);
 
-        var parsed = std.json.parseFromSlice(PlainData, allocator, plain, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(PlainData, allocator, plain, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return error.DecodeError;
         };
         errdefer parsed.deinit();

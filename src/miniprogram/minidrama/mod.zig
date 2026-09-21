@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
+const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 
@@ -303,10 +304,20 @@ pub const MiniDrama = struct {
     ctx: *Context,
     allocator: std.mem.Allocator,
 
+    /// 可选的可注入 transport（测试用，注入 MockTransport 拦截 HTTP）。
+    transport: ?util_http.HttpClient.Transport = null,
+    transport_ctx: ?*anyopaque = null,
+
     const Self = @This();
 
     pub fn init(ctx: *Context, allocator: std.mem.Allocator) Self {
         return .{ .ctx = ctx, .allocator = allocator };
+    }
+
+    /// 注入自定义 transport（`null` 恢复真实 HTTP）。
+    pub fn setTransport(self: *Self, t: ?util_http.HttpClient.Transport, ctx: ?*anyopaque) void {
+        self.transport = t;
+        self.transport_ctx = ctx;
     }
 
     /// 单文件上传（multipart）。
@@ -336,7 +347,7 @@ pub const MiniDrama = struct {
         const client = util_http.getDefaultClient(self.allocator);
         const resp = try client.postMultipart(uri, fields.items);
         defer self.allocator.free(resp);
-        return parseParsed(SingleFileUploadResponse, self.allocator, resp);
+        return parseParsed(self.allocator, resp, SingleFileUploadResponse);
     }
 
     /// 拉取上传。
@@ -381,7 +392,7 @@ pub const MiniDrama = struct {
         const client = util_http.getDefaultClient(self.allocator);
         const resp = try client.postMultipart(uri, fields.items);
         defer self.allocator.free(resp);
-        return parseParsed(UploadPartResponse, self.allocator, resp);
+        return parseParsed(self.allocator, resp, UploadPartResponse);
     }
 
     /// 确认分片上传。
@@ -450,22 +461,33 @@ pub const MiniDrama = struct {
         return self.postBody("wxa/sec/vod/getcdnlogs", body, GetCdnLogsResponse);
     }
 
-    fn postBody(self: *Self, comptime T: type, endpoint: []const u8, body: []const u8) !std.json.Parsed(T) {
+    fn postBody(self: *Self, endpoint: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
         const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
         defer self.allocator.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const resp = try self.postJSON(uri, body);
         defer self.allocator.free(resp);
-        return parseParsed(T, self.allocator, resp);
+        return parseParsed(self.allocator, resp, T);
     }
 
     fn postJson(self: *Self, endpoint: []const u8, fields: []const JsonField, comptime R: type) !std.json.Parsed(R) {
         const body = try jsonStringifyFields(self.allocator, fields);
         defer self.allocator.free(body);
         return self.postBody(endpoint, body, R);
+    }
+
+    /// POST JSON；注入 transport 时使用之，否则走线程默认 client。
+    fn postJSON(self: *Self, uri: []const u8, body: []const u8) ![]u8 {
+        if (self.transport) |t| {
+            var client = util_http.HttpClient.init(self.allocator);
+            defer client.deinit();
+            client.setTransport(t, self.transport_ctx);
+            return client.postJSON(uri, body);
+        }
+        const client = util_http.getDefaultClient(self.allocator);
+        return client.postJSON(uri, body);
     }
 };
 
@@ -476,8 +498,8 @@ const JsonField = struct {
     is_num: bool = false,
 };
 
-fn parseParsed(comptime T: type, allocator: std.mem.Allocator, resp: []const u8) !std.json.Parsed(T) {
-    var parsed = std.json.parseFromSlice(T, allocator, resp, .{ .allocate = .alloc_always }) catch {
+fn parseParsed(allocator: std.mem.Allocator, resp: []const u8, comptime T: type) !std.json.Parsed(T) {
+    var parsed = std.json.parseFromSlice(T, allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
         return util_error.WechatError.DecodeError;
     };
     errdefer parsed.deinit();
@@ -653,4 +675,84 @@ test "MiniDrama.init 持有 ctx 与 allocator" {
 test "PullUploadResponse 默认值" {
     const r = PullUploadResponse{};
     try std.testing.expectEqual(@as(i64, 0), r.task_id);
+}
+
+// ── 可注入 transport 测试 ────────────────────────────────────────────────
+
+const StubToken = struct {
+    fn getToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        return allocator.dupe(u8, "token-abc");
+    }
+};
+const token_vtable = credential.AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+
+/// 记录 method / uri / payload 并返回预设响应的 transport。
+const CapturingTransport = struct {
+    method: std.http.Method = .GET,
+    uri: []const u8 = "",
+    payload: []const u8 = "",
+    response: []const u8 = "",
+
+    fn dispatch(ctx: *anyopaque, allocator: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = content_type;
+        const self: *CapturingTransport = @ptrCast(@alignCast(ctx));
+        self.method = method;
+        self.uri = try allocator.dupe(u8, uri);
+        self.payload = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, self.response);
+    }
+
+    fn deinit(self: *CapturingTransport, allocator: std.mem.Allocator) void {
+        allocator.free(self.uri);
+        allocator.free(self.payload);
+    }
+};
+
+fn makeCtx() Context {
+    return .{
+        .config = .{ .app_id = "wx-test" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+}
+
+test "getTask POST 查询任务并解析（回归：泛型 T 参数错位）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"task_info\":{\"id\":123,\"task_type\":1,\"status\":2,\"media_id\":456}}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+    m.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try m.getTask(.{ .task_id = 123 });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/gettask?access_token=token-abc", tt.uri);
+    try std.testing.expectEqualStrings("{\"task_id\":123}", tt.payload);
+    try std.testing.expectEqual(@as(i64, 2), parsed.value.task_info.status);
+    try std.testing.expectEqual(@as(i64, 456), parsed.value.task_info.media_id);
+}
+
+test "pullUpload POST 拉取上传并解析（回归：postJson→postBody 泛型错位）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"task_id\":789}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+    m.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try m.pullUpload(.{
+        .media_name = "drama-ep1",
+        .media_url = "https://cdn.example.com/ep1.mp4",
+        .cover_url = "https://cdn.example.com/cover.jpg",
+        .source_context = "ctx-1",
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/pullupload?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"media_name\":\"drama-ep1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"media_url\":\"https://cdn.example.com/ep1.mp4\"") != null);
+    try std.testing.expectEqual(@as(i64, 789), parsed.value.task_id);
 }

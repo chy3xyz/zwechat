@@ -34,6 +34,12 @@ pub const express = @import("express/mod.zig");
 pub const minidrama = @import("minidrama/mod.zig");
 pub const virtualpayment = @import("virtualpayment/mod.zig");
 
+/// ⚠️ **地址稳定性警告**：`MiniProgram` 实例一旦被各 `getXxx()` 工厂使用，
+/// 其内存地址就必须保持稳定——派生的子模块持有 `&self.ctx` 裸指针。
+/// **禁止把 `MiniProgram` 按值拷贝 / 移动**（包括从函数按值返回后再取地址、
+/// 放入会搬迁的 ArrayList 等），否则已派生的子模块会悬垂。
+/// 需要传递时请使用 `*MiniProgram` 指针，并把 `MiniProgram` 放在
+/// `var` 局部变量 / 堆上固定位置。
 pub const MiniProgram = struct {
     ctx: Context,
     auth_instance: ?Auth = null,
@@ -54,6 +60,11 @@ pub const MiniProgram = struct {
     }
 
     /// 懒加载 Auth 子模块。
+    ///
+    /// 注意：`getPhoneNumber(code)` 与 `getBusiness().getPhoneNumber(req)` 重复覆盖
+    /// 同一端点（`getuserphonenumber`）。新代码请优先用本方法：签名更简（直接收
+    /// `code`，无需包一层请求结构体）、归属 auth 登录域（与 code2session /
+    /// checkEncryptedData 同域），且响应含 `errcode` / `errmsg` 便于错误分支。
     pub fn getAuth(self: *Self) Auth {
         return Auth.init(&self.ctx, self.allocator);
     }
@@ -69,11 +80,23 @@ pub const MiniProgram = struct {
     }
 
     /// 懒加载 Message 订阅消息子模块。
+    ///
+    /// ⚠️ 已弃用（重复入口）：`sendSubscribeMessage` 与 `getSubscribe().send` /
+    /// `sendGetMsgId` 重复覆盖同一端点（`message/subscribe/send`）。
+    /// 新代码请优先用 `getSubscribe().send`（类型化 `DataEntry` 列表，无需手工预序列化
+    /// `data` JSON 字符串）或 `sendGetMsgId`（可拿到 msgid）；`sendSubscribeMessage`
+    /// 的 `data` 字段要求调用方预拼 JSON 原始字符串，且无 subscribe 版不具备的能力。
+    /// 仅为兼容已有下游保留，不删方法、不改签名。
     pub fn getMessage(self: *Self) message.Message {
         return message.Message.init(&self.ctx);
     }
 
     /// 懒加载 Security 内容安全审核子模块。
+    ///
+    /// 注意：`msgSecCheck` 与 `getContent().checkText` 重复覆盖同一端点
+    /// （`msg_sec_check`），两版契约等价（均带必填 `openid` / `scene` 参数）。
+    /// 新代码请优先用本方法：语义归属内容安全域，统一走 security 域可避免
+    /// 一处端点两处入口的重复维护。
     pub fn getSecurity(self: *Self) security.Security {
         return security.Security.init(&self.ctx);
     }
@@ -114,11 +137,21 @@ pub const MiniProgram = struct {
     }
 
     /// 懒加载 Content 内容安全（旧接口）子模块。
+    ///
+    /// ⚠️ 已弃用（重复入口）：`checkText` 与 `getSecurity().msgSecCheck` 重复覆盖
+    /// 同一端点（`msg_sec_check`），两版契约等价（均带必填 `openid` / `scene`）。
+    /// 新代码请优先用 `getSecurity().msgSecCheck`（语义归属内容安全域，统一入口）。
+    /// 仅为兼容已有下游保留，不删方法、不改签名。
     pub fn getContent(self: *Self) content.Content {
         return content.Content.init(&self.ctx, self.allocator);
     }
 
     /// 懒加载 Business 业务子模块。
+    ///
+    /// 注意：`getPhoneNumber(req)` 与 `getAuth().getPhoneNumber(code)` 重复覆盖
+    /// 同一端点（`getuserphonenumber`）。新代码请优先用 `getAuth().getPhoneNumber`
+    /// （签名更简、归属 auth 登录域、响应含 `errcode` / `errmsg`）；本方法需把 `code`
+    /// 包进 `GetPhoneNumberRequest`，无 auth 版不具备的能力。仅为兼容已有下游保留。
     pub fn getBusiness(self: *Self) business.Business {
         return business.Business.init(&self.ctx, self.allocator);
     }
@@ -134,6 +167,10 @@ pub const MiniProgram = struct {
     }
 
     /// 懒加载 Subscribe 订阅消息子模块。
+    ///
+    /// 注意：`send` / `sendGetMsgId` 与 `getMessage().sendSubscribeMessage` 重复覆盖
+    /// 同一端点（`message/subscribe/send`）。本方法为推荐入口：`data` 是类型化
+    /// `DataEntry` 列表（无需手工预序列化 JSON 字符串），`sendGetMsgId` 还能拿到 msgid。
     pub fn getSubscribe(self: *Self) subscribe.Subscribe {
         return subscribe.Subscribe.init(&self.ctx, self.allocator);
     }

@@ -39,7 +39,7 @@ pub const WeRun = struct {
         const plain = try encryptor.getCipherText(self.allocator, session_key, encrypted_data, iv);
         defer self.allocator.free(plain);
 
-        return std.json.parseFromSlice(Data, self.allocator, plain, .{ .allocate = .alloc_always }) catch {
+        return std.json.parseFromSlice(Data, self.allocator, plain, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return error.DecodeError;
         };
     }

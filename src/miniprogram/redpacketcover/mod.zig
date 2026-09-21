@@ -65,7 +65,7 @@ pub const RedPacketCover = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(GetRedPacketCoverResp, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(GetRedPacketCoverResp, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();

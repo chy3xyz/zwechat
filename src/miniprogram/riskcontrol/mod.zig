@@ -26,8 +26,24 @@ pub const UserRiskRankRequest = struct {
 pub const UserRiskRank = struct {
     errcode: i64 = 0,
     errmsg: []const u8 = "",
+    /// `unoin_id` 是微信官方文档 `wxa/getuserriskrank` 中真实返回的 key
+    /// （官方笔误，长期存在于线上响应体），以它为主解析。
+    unoin_id: i64 = 0,
+    /// `union_id` 作为别名兜底：若微信日后悄悄修正笔误，该字段可继续取到值，
+    /// 防止回归。
     union_id: i64 = 0,
     risk_rank: u8 = 0,
+
+    const Self = @This();
+
+    /// 读取 union_id，返回 `unoin_id` 与 `union_id` 中**非零**的那个。
+    ///
+    /// 线上返回体以官方笔误 key `unoin_id` 为准；两者同时出现时取非零者
+    /// （若都非零则优先 `unoin_id`，因为它对应真实线上 key）。
+    pub fn getUnionId(self: Self) i64 {
+        if (self.unoin_id != 0) return self.unoin_id;
+        return self.union_id;
+    }
 };
 
 /// 安全风控模块。
@@ -87,7 +103,7 @@ pub const RiskControl = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(UserRiskRank, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(UserRiskRank, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -108,4 +124,95 @@ test "RiskControl.init 持有 ctx 与 allocator" {
 test "UserRiskRank 默认值" {
     const r = UserRiskRank{};
     try std.testing.expectEqual(@as(u8, 0), r.risk_rank);
+    try std.testing.expectEqual(@as(i64, 0), r.getUnionId());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mock access_token 句柄（测试用）
+// ─────────────────────────────────────────────────────────────────────────────
+
+const StubToken = struct {
+    fn getToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        return allocator.dupe(u8, "token-rc");
+    }
+};
+const token_vtable = @import("../../credential/mod.zig").AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+
+fn makeCtx() Context {
+    return .{
+        .config = .{ .app_id = "wx-rc" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+}
+
+test "getUserRiskRank 解析官方笔误 key unoin_id" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/wxa/getuserriskrank?access_token=token-rc", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"unoin_id\":123,\"risk_rank\":0}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var ctx = makeCtx();
+    var rc = RiskControl.init(&ctx, allocator);
+    var parsed = try rc.getUserRiskRank(.{
+        .appid = "wx-rc",
+        .openid = "oAAA",
+        .scene = 1,
+        .client_ip = "127.0.0.1",
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(i64, 123), parsed.value.unoin_id);
+    try std.testing.expectEqual(@as(i64, 123), parsed.value.getUnionId());
+}
+
+test "getUserRiskRank union_id 别名兜底" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    // 无 typo 的正规 key：unoin_id 缺席，union_id 兜底取到值。
+    try mt.addRoute("https://api.weixin.qq.com/wxa/getuserriskrank?access_token=token-rc", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"union_id\":456}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var ctx = makeCtx();
+    var rc = RiskControl.init(&ctx, allocator);
+    var parsed = try rc.getUserRiskRank(.{
+        .appid = "wx-rc",
+        .openid = "oAAA",
+        .scene = 1,
+        .client_ip = "127.0.0.1",
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(i64, 0), parsed.value.unoin_id);
+    try std.testing.expectEqual(@as(i64, 456), parsed.value.union_id);
+    try std.testing.expectEqual(@as(i64, 456), parsed.value.getUnionId());
+}
+
+test "getUserRiskRank 两者并存时取非零者" {
+    // 直接构造结果值验证 getUnionId 取舍逻辑，无需 mock。
+    const both_nonzero = UserRiskRank{ .unoin_id = 123, .union_id = 456 };
+    try std.testing.expectEqual(@as(i64, 123), both_nonzero.getUnionId());
+    const only_alias = UserRiskRank{ .union_id = 456 };
+    try std.testing.expectEqual(@as(i64, 456), only_alias.getUnionId());
+    const only_typo = UserRiskRank{ .unoin_id = 789 };
+    try std.testing.expectEqual(@as(i64, 789), only_typo.getUnionId());
+    const neither = UserRiskRank{};
+    try std.testing.expectEqual(@as(i64, 0), neither.getUnionId());
 }

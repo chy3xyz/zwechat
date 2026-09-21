@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
+const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 
@@ -94,10 +95,20 @@ pub const Express = struct {
     ctx: *Context,
     allocator: std.mem.Allocator,
 
+    /// 可选的可注入 transport（测试用，注入 MockTransport 拦截 HTTP）。
+    transport: ?util_http.HttpClient.Transport = null,
+    transport_ctx: ?*anyopaque = null,
+
     const Self = @This();
 
     pub fn init(ctx: *Context, allocator: std.mem.Allocator) Self {
         return .{ .ctx = ctx, .allocator = allocator };
+    }
+
+    /// 注入自定义 transport（`null` 恢复真实 HTTP）。
+    pub fn setTransport(self: *Self, t: ?util_http.HttpClient.Transport, ctx: ?*anyopaque) void {
+        self.transport = t;
+        self.transport_ctx = ctx;
     }
 
     /// 传运单（返回 `Parsed(TraceWaybillResponse)`）。
@@ -147,17 +158,16 @@ pub const Express = struct {
         return self.postParsed("cgi-bin/express/delivery/open_msg/get_delivery_list", "{}", GetDeliveryListResponse);
     }
 
-    fn postParsed(self: *Self, comptime T: type, endpoint: []const u8, body: []const u8) !std.json.Parsed(T) {
+    fn postParsed(self: *Self, endpoint: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
         const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
         defer self.allocator.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const resp = try self.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(T, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(T, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -171,14 +181,25 @@ pub const Express = struct {
         const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
         defer self.allocator.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const resp = try self.postJSON(uri, body);
         defer self.allocator.free(resp);
 
         if (try util_error.decodeWithCommonError(self.allocator, resp, api_name)) |ce| {
             defer ce.deinit();
             return util_error.WechatError.ApiError;
         }
+    }
+
+    /// POST JSON；注入 transport 时使用之，否则走线程默认 client。
+    fn postJSON(self: *Self, uri: []const u8, body: []const u8) ![]u8 {
+        if (self.transport) |t| {
+            var client = util_http.HttpClient.init(self.allocator);
+            defer client.deinit();
+            client.setTransport(t, self.transport_ctx);
+            return client.postJSON(uri, body);
+        }
+        const client = util_http.getDefaultClient(self.allocator);
+        return client.postJSON(uri, body);
     }
 };
 
@@ -266,4 +287,84 @@ test "Express.init 持有 ctx 与 allocator" {
 test "TraceWaybillResponse 默认值" {
     const r = TraceWaybillResponse{};
     try std.testing.expectEqualStrings("", r.waybill_token);
+}
+
+// ── 可注入 transport 测试 ────────────────────────────────────────────────
+
+const StubToken = struct {
+    fn getToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        return allocator.dupe(u8, "token-abc");
+    }
+};
+const token_vtable = credential.AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+
+/// 记录 method / uri / payload 并返回预设响应的 transport。
+const CapturingTransport = struct {
+    method: std.http.Method = .GET,
+    uri: []const u8 = "",
+    payload: []const u8 = "",
+    response: []const u8 = "",
+
+    fn dispatch(ctx: *anyopaque, allocator: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = content_type;
+        const self: *CapturingTransport = @ptrCast(@alignCast(ctx));
+        self.method = method;
+        self.uri = try allocator.dupe(u8, uri);
+        self.payload = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, self.response);
+    }
+
+    fn deinit(self: *CapturingTransport, allocator: std.mem.Allocator) void {
+        allocator.free(self.uri);
+        allocator.free(self.payload);
+    }
+};
+
+fn makeCtx() Context {
+    return .{
+        .config = .{ .app_id = "wx-test" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+}
+
+test "traceWaybill POST 传运单并解析 waybill_token（回归：泛型 T 参数错位）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"waybill_token\":\"wb-token-xyz\"}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var e = Express.init(&ctx, allocator);
+    e.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try e.traceWaybill(.{
+        .openid = "openid-1",
+        .delivery_id = "SF",
+        .waybill_id = "SF123456789",
+        .trans_id = "wxpay-tx-1",
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/express/delivery/open_msg/trace_waybill?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"delivery_id\":\"SF\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"waybill_id\":\"SF123456789\"") != null);
+    try std.testing.expectEqualStrings("wb-token-xyz", parsed.value.waybill_token);
+}
+
+test "queryTrace POST 查询运单并解析状态" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"waybill_info\":{\"waybill_id\":\"SF123456789\",\"status\":4},\"delivery_info\":{\"delivery_id\":\"SF\",\"delivery_name\":\"顺丰速运\"}}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var e = Express.init(&ctx, allocator);
+    e.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try e.queryTrace(.{ .waybill_token = "wb-token-xyz" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/express/delivery/open_msg/query_trace?access_token=token-abc", tt.uri);
+    try std.testing.expectEqualStrings("{\"waybill_token\":\"wb-token-xyz\"}", tt.payload);
+    try std.testing.expectEqual(WaybillStatus.signed, parsed.value.waybill_info.status);
+    try std.testing.expectEqualStrings("顺丰速运", parsed.value.delivery_info.delivery_name);
 }

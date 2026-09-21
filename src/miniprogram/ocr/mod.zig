@@ -22,14 +22,15 @@ pub const Coordinate = struct {
 };
 
 pub const ImageSize = struct {
-    width: i64 = 0,
-    height: i64 = 0,
+    w: i64 = 0,
+    h: i64 = 0,
 };
 
 pub const ResIDCard = struct {
     errcode: i64 = 0,
     errmsg: []const u8 = "",
-    type_: []const u8 = "",
+    /// 微信返回 `"type"`（Front/Back），字段名与之保持一致。
+    type: []const u8 = "",
     name: []const u8 = "",
     id: []const u8 = "",
     addr: []const u8 = "",
@@ -117,63 +118,90 @@ pub const OCR = struct {
     ctx: *Context,
     allocator: std.mem.Allocator,
 
+    /// 可选的可注入 transport（测试用，注入 MockTransport 拦截 HTTP）。
+    transport: ?util_http.HttpClient.Transport = null,
+    transport_ctx: ?*anyopaque = null,
+
     const Self = @This();
 
     pub fn init(ctx: *Context, allocator: std.mem.Allocator) Self {
         return .{ .ctx = ctx, .allocator = allocator };
     }
 
+    /// 注入自定义 transport（`null` 恢复真实 HTTP）。
+    pub fn setTransport(self: *Self, t: ?util_http.HttpClient.Transport, ctx: ?*anyopaque) void {
+        self.transport = t;
+        self.transport_ctx = ctx;
+    }
+
     /// 身份证 OCR（`img_url` 为已 URL 编码的图片地址）。
     pub fn idCard(self: *Self, img_url: []const u8) !std.json.Parsed(ResIDCard) {
-        return self.fetch("idcard", img_url, ResIDCard);
+        return self.fetch(ResIDCard, "idcard", img_url);
     }
 
     /// 银行卡 OCR。
     pub fn bankCard(self: *Self, img_url: []const u8) !std.json.Parsed(ResBankCard) {
-        return self.fetch("bankcard", img_url, ResBankCard);
+        return self.fetch(ResBankCard, "bankcard", img_url);
     }
 
     /// 行驶证 OCR。
     pub fn driving(self: *Self, img_url: []const u8) !std.json.Parsed(ResDriving) {
-        return self.fetch("driving", img_url, ResDriving);
+        return self.fetch(ResDriving, "driving", img_url);
     }
 
     /// 驾驶证 OCR。
     pub fn drivingLicense(self: *Self, img_url: []const u8) !std.json.Parsed(ResDrivingLicense) {
-        return self.fetch("drivinglicense", img_url, ResDrivingLicense);
+        return self.fetch(ResDrivingLicense, "drivinglicense", img_url);
     }
 
     /// 营业执照 OCR。
     pub fn bizLicense(self: *Self, img_url: []const u8) !std.json.Parsed(ResBizLicense) {
-        return self.fetch("bizlicense", img_url, ResBizLicense);
+        return self.fetch(ResBizLicense, "bizlicense", img_url);
     }
 
     /// 通用印刷体 OCR。
     pub fn common(self: *Self, img_url: []const u8) !std.json.Parsed(ResCommon) {
-        return self.fetch("comm", img_url, ResCommon);
+        return self.fetch(ResCommon, "comm", img_url);
     }
 
     fn fetch(self: *Self, comptime T: type, path: []const u8, img_url: []const u8) !std.json.Parsed(T) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
+        // img_url 作为 query 参数需先按 URI 规则转义（空格、&、?、# 等）。
+        var encoded_buf: std.Io.Writer.Allocating = .init(self.allocator);
+        defer encoded_buf.deinit();
+        try (std.Uri.Component{ .raw = img_url }).formatQuery(&encoded_buf.writer);
+        const encoded = try encoded_buf.toOwnedSlice();
+        defer self.allocator.free(encoded);
+
         const uri = try std.fmt.allocPrint(
             self.allocator,
             "https://api.weixin.qq.com/cv/ocr/{s}?img_url={s}&access_token={s}",
-            .{ path, img_url, access_token },
+            .{ path, encoded, access_token },
         );
         defer self.allocator.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.post(uri, "", null);
+        const resp = try self.post(uri);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(T, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(T, self.allocator, resp, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
         return parsed;
+    }
+
+    fn post(self: *Self, uri: []const u8) ![]u8 {
+        if (self.transport) |t| {
+            var client = util_http.HttpClient.init(self.allocator);
+            defer client.deinit();
+            client.setTransport(t, self.transport_ctx);
+            return client.post(uri, "", null);
+        }
+        const client = util_http.getDefaultClient(self.allocator);
+        return client.post(uri, "", null);
     }
 };
 
@@ -190,4 +218,93 @@ test "ResIDCard 默认值" {
     const r = ResIDCard{};
     try std.testing.expectEqualStrings("", r.name);
     try std.testing.expectEqual(@as(i64, 0), r.errcode);
+}
+
+// —— mock 测试 ——
+
+const credential = @import("../../credential/mod.zig");
+
+const StubToken = struct {
+    fn getToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        return allocator.dupe(u8, "token-abc");
+    }
+};
+const token_vtable = credential.AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+
+fn makeCtx() Context {
+    return .{
+        .config = .{ .app_id = "wx-ocr" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+}
+
+test "idCard 解析 type 与未知字段容忍" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/idcard?img_url=https://example.com/a.jpg&access_token=token-abc", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"type\":\"Front\",\"name\":\"张三\",\"id\":\"11010119900307xxxx\",\"new_unknown_field\":42}",
+    });
+
+    var ctx = makeCtx();
+    var o = OCR.init(&ctx, allocator);
+    o.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try o.idCard("https://example.com/a.jpg");
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("Front", parsed.value.type);
+    try std.testing.expectEqualStrings("张三", parsed.value.name);
+}
+
+test "driving 解析 img_size 的 w/h 字段" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/driving?img_url=https://example.com/b.jpg&access_token=token-abc", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"plate_num\":\"粤B12345\",\"img_size\":{\"w\":800,\"h\":600}}",
+    });
+
+    var ctx = makeCtx();
+    var o = OCR.init(&ctx, allocator);
+    o.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try o.driving("https://example.com/b.jpg");
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("粤B12345", parsed.value.plate_num);
+    try std.testing.expectEqual(@as(i64, 800), parsed.value.img_size.w);
+    try std.testing.expectEqual(@as(i64, 600), parsed.value.img_size.h);
+}
+
+test "bizLicense errcode 非 0 返回 ApiError" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/bizlicense?img_url=https://example.com/c.jpg&access_token=token-abc", .{
+        .body = "{\"errcode\":47001,\"errmsg\":\"data format error\"}",
+    });
+
+    var ctx = makeCtx();
+    var o = OCR.init(&ctx, allocator);
+    o.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    try std.testing.expectError(util_error.WechatError.ApiError, o.bizLicense("https://example.com/c.jpg"));
+}
+
+test "img_url 含特殊字符时按 URI 规则转义" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/comm?img_url=https://example.com/a%20b?x=1&y=2&access_token=token-abc", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"items\":[],\"img_size\":{\"w\":100,\"h\":50}}",
+    });
+
+    var ctx = makeCtx();
+    var o = OCR.init(&ctx, allocator);
+    o.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try o.common("https://example.com/a b?x=1&y=2");
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 100), parsed.value.img_size.w);
+    try std.testing.expectEqual(@as(i64, 50), parsed.value.img_size.h);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
 }

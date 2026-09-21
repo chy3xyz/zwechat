@@ -214,7 +214,7 @@ pub const Tcb = struct {
 
     /// 上传文件。
     pub fn uploadFile(self: *Self, env: []const u8, path: []const u8) !std.json.Parsed(UploadFileRes) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"env\":\"{s}\",\"path\":\"{s}\"}}", .{ env, path });
+        const body = try jsonStringifyEnvPath(self.allocator, env, path);
         defer self.allocator.free(body);
         return self.postParsed("tcb/uploadfile", body, UploadFileRes);
     }
@@ -263,21 +263,21 @@ pub const Tcb = struct {
 
     /// 新增集合。
     pub fn databaseCollectionAdd(self: *Self, env: []const u8, collection_name: []const u8) !void {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"env\":\"{s}\",\"collection_name\":\"{s}\"}}", .{ env, collection_name });
+        const body = try jsonStringifyEnvCollection(self.allocator, env, collection_name);
         defer self.allocator.free(body);
         try self.postCommon("tcb/databasecollectionadd", body, "DatabaseCollectionAdd");
     }
 
     /// 删除集合。
     pub fn databaseCollectionDelete(self: *Self, env: []const u8, collection_name: []const u8) !void {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"env\":\"{s}\",\"collection_name\":\"{s}\"}}", .{ env, collection_name });
+        const body = try jsonStringifyEnvCollection(self.allocator, env, collection_name);
         defer self.allocator.free(body);
         try self.postCommon("tcb/databasecollectiondelete", body, "DatabaseCollectionDelete");
     }
 
     /// 获取特定云环境下集合信息。
     pub fn databaseCollectionGet(self: *Self, env: []const u8, limit: i64, offset: i64) !std.json.Parsed(DatabaseCollectionGetRes) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"env\":\"{s}\",\"limit\":{d},\"offset\":{d}}}", .{ env, limit, offset });
+        const body = try jsonStringifyEnvLimitOffset(self.allocator, env, limit, offset);
         defer self.allocator.free(body);
         return self.postParsed("tcb/databasecollectionget", body, DatabaseCollectionGetRes);
     }
@@ -307,13 +307,13 @@ pub const Tcb = struct {
         return self.databaseReq("tcb/databasecount", env, query, DatabaseCountRes);
     }
 
-    fn databaseReq(self: *Self, comptime T: type, endpoint: []const u8, env: []const u8, query: []const u8) !std.json.Parsed(T) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"env\":\"{s}\",\"query\":\"{s}\"}}", .{ env, query });
+    fn databaseReq(self: *Self, endpoint: []const u8, env: []const u8, query: []const u8, comptime T: type) !std.json.Parsed(T) {
+        const body = try jsonStringifyEnvQuery(self.allocator, env, query);
         defer self.allocator.free(body);
         return self.postParsed(endpoint, body, T);
     }
 
-    fn postParsed(self: *Self, comptime T: type, endpoint: []const u8, body: []const u8) !std.json.Parsed(T) {
+    fn postParsed(self: *Self, endpoint: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
         const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
@@ -470,6 +470,62 @@ fn jsonStringifyUpdateIndex(allocator: std.mem.Allocator, req: UpdateIndexReq) !
     return out.toOwnedSlice();
 }
 
+/// database* 系列接口的请求体：`env` 与 `query`（query 本身是一段 JSON 文本，
+/// 必须作为字符串字段整体转义，不能直接插值进 JSON 字符串）。
+fn jsonStringifyEnvQuery(allocator: std.mem.Allocator, env: []const u8, query: []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+    try s.beginObject();
+    try s.objectField("env");
+    try s.write(env);
+    try s.objectField("query");
+    try s.write(query);
+    try s.endObject();
+    return out.toOwnedSlice();
+}
+
+fn jsonStringifyEnvPath(allocator: std.mem.Allocator, env: []const u8, path: []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+    try s.beginObject();
+    try s.objectField("env");
+    try s.write(env);
+    try s.objectField("path");
+    try s.write(path);
+    try s.endObject();
+    return out.toOwnedSlice();
+}
+
+fn jsonStringifyEnvCollection(allocator: std.mem.Allocator, env: []const u8, collection_name: []const u8) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+    try s.beginObject();
+    try s.objectField("env");
+    try s.write(env);
+    try s.objectField("collection_name");
+    try s.write(collection_name);
+    try s.endObject();
+    return out.toOwnedSlice();
+}
+
+fn jsonStringifyEnvLimitOffset(allocator: std.mem.Allocator, env: []const u8, limit: i64, offset: i64) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+    try s.beginObject();
+    try s.objectField("env");
+    try s.write(env);
+    try s.objectField("limit");
+    try s.write(limit);
+    try s.objectField("offset");
+    try s.write(offset);
+    try s.endObject();
+    return out.toOwnedSlice();
+}
+
 test "Tcb.init 持有 ctx 与 allocator" {
     var ctx: Context = .{
         .config = .{ .app_id = "wx-tcb" },
@@ -482,4 +538,122 @@ test "Tcb.init 持有 ctx 与 allocator" {
 test "UploadFileRes 默认值" {
     const r = UploadFileRes{};
     try std.testing.expectEqualStrings("", r.url);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 测试辅助：假 AccessTokenHandle + capture transport。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const credential = @import("../../credential/mod.zig");
+
+fn testGetAccessToken(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+    _ = ctx;
+    return allocator.dupe(u8, "stub-ak");
+}
+
+const test_token_vtable = credential.AccessTokenHandle.VTable{
+    .getAccessToken = testGetAccessToken,
+};
+
+const TestCapture = struct {
+    allocator: std.mem.Allocator,
+    response: []const u8,
+    uri: []u8 = &.{},
+    payload: []u8 = &.{},
+
+    fn dispatch(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        method: std.http.Method,
+        payload: []const u8,
+        content_type: ?[]const u8,
+    ) anyerror![]u8 {
+        _ = method;
+        _ = content_type;
+        const self: *TestCapture = @ptrCast(@alignCast(ctx));
+        self.uri = try allocator.dupe(u8, uri);
+        self.payload = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, self.response);
+    }
+};
+
+fn setupTestClient(alloc: std.mem.Allocator, cap: *TestCapture) void {
+    const client = util_http.getDefaultClient(alloc);
+    client.setTransport(TestCapture.dispatch, @ptrCast(cap));
+}
+
+fn releaseTestClient() void {
+    const client = util_http.getDefaultClient(std.heap.page_allocator);
+    client.setTransport(null, null);
+    util_http.deinitDefaultClient();
+}
+
+test "databaseQuery 请求体为合法 JSON 且 query 含双引号可完整还原" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"pager\":{\"limit\":10,\"offset\":0,\"total\":1},\"data\":[\"{}\"]}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-tcb" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &test_token_vtable },
+    };
+    var t = Tcb.init(&ctx, alloc);
+    // query 本身是一段 JSON 文本，含双引号；旧实现直接插值会产生非法 JSON。
+    const query = "db.collection(\"test\").where({\"age\":18})";
+    var parsed = try t.databaseQuery("env-1", query);
+    defer parsed.deinit();
+
+    const body = try std.json.parseFromSlice(struct {
+        env: []const u8,
+        query: []const u8,
+    }, alloc, cap.payload, .{});
+    defer body.deinit();
+    try std.testing.expectEqualStrings("env-1", body.value.env);
+    try std.testing.expectEqualStrings(query, body.value.query);
+}
+
+test "uploadFile 与 databaseCollectionAdd 字符串字段经 JSON 转义" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-tcb" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &test_token_vtable },
+    };
+    var t = Tcb.init(&ctx, alloc);
+
+    var up = try t.uploadFile("env\"x", "p\"ath");
+    defer up.deinit();
+    const body1 = try std.json.parseFromSlice(struct {
+        env: []const u8,
+        path: []const u8,
+    }, alloc, cap.payload, .{});
+    defer body1.deinit();
+    try std.testing.expectEqualStrings("env\"x", body1.value.env);
+    try std.testing.expectEqualStrings("p\"ath", body1.value.path);
+
+    try t.databaseCollectionAdd("env-1", "col\"1");
+    const body2 = try std.json.parseFromSlice(struct {
+        env: []const u8,
+        collection_name: []const u8,
+    }, alloc, cap.payload, .{});
+    defer body2.deinit();
+    try std.testing.expectEqualStrings("env-1", body2.value.env);
+    try std.testing.expectEqualStrings("col\"1", body2.value.collection_name);
 }

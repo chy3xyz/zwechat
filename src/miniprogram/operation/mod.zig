@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
+const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 
@@ -228,10 +229,20 @@ pub const Operation = struct {
     ctx: *Context,
     allocator: std.mem.Allocator,
 
+    /// 可选的可注入 transport（测试用，注入 MockTransport 拦截 HTTP）。
+    transport: ?util_http.HttpClient.Transport = null,
+    transport_ctx: ?*anyopaque = null,
+
     const Self = @This();
 
     pub fn init(ctx: *Context, allocator: std.mem.Allocator) Self {
         return .{ .ctx = ctx, .allocator = allocator };
+    }
+
+    /// 注入自定义 transport（`null` 恢复真实 HTTP）。
+    pub fn setTransport(self: *Self, t: ?util_http.HttpClient.Transport, ctx: ?*anyopaque) void {
+        self.transport = t;
+        self.transport_ctx = ctx;
     }
 
     /// 查询域名配置。
@@ -309,19 +320,18 @@ pub const Operation = struct {
         return self.getParsed("wxa/getgrayreleaseplan", GetGrayReleasePlanResponse);
     }
 
-    fn postParsed(self: *Self, comptime T: type, endpoint: []const u8, body: []const u8) !std.json.Parsed(T) {
+    fn postParsed(self: *Self, endpoint: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
         const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
         defer self.allocator.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const resp = try self.postJSON(uri, body);
         defer self.allocator.free(resp);
-        return parseCommon(self.allocator, T, resp);
+        return parseCommon(self.allocator, resp, T);
     }
 
-    fn getParsed(self: *Self, comptime T: type, endpoint: []const u8) !std.json.Parsed(T) {
+    fn getParsed(self: *Self, endpoint: []const u8, comptime T: type) !std.json.Parsed(T) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
         const uri = try std.fmt.allocPrint(self.allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ endpoint, access_token });
@@ -329,16 +339,39 @@ pub const Operation = struct {
         return self.getParsedUri(uri, T);
     }
 
-    fn getParsedUri(self: *Self, comptime T: type, uri: []const u8) !std.json.Parsed(T) {
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.get(uri);
+    fn getParsedUri(self: *Self, uri: []const u8, comptime T: type) !std.json.Parsed(T) {
+        const resp = try self.httpGet(uri);
         defer self.allocator.free(resp);
-        return parseCommon(self.allocator, T, resp);
+        return parseCommon(self.allocator, resp, T);
+    }
+
+    /// POST JSON；注入 transport 时使用之，否则走线程默认 client。
+    fn postJSON(self: *Self, uri: []const u8, body: []const u8) ![]u8 {
+        if (self.transport) |t| {
+            var client = util_http.HttpClient.init(self.allocator);
+            defer client.deinit();
+            client.setTransport(t, self.transport_ctx);
+            return client.postJSON(uri, body);
+        }
+        const client = util_http.getDefaultClient(self.allocator);
+        return client.postJSON(uri, body);
+    }
+
+    /// GET；注入 transport 时使用之，否则走线程默认 client。
+    fn httpGet(self: *Self, uri: []const u8) ![]u8 {
+        if (self.transport) |t| {
+            var client = util_http.HttpClient.init(self.allocator);
+            defer client.deinit();
+            client.setTransport(t, self.transport_ctx);
+            return client.get(uri);
+        }
+        const client = util_http.getDefaultClient(self.allocator);
+        return client.get(uri);
     }
 };
 
-fn parseCommon(comptime T: type, allocator: std.mem.Allocator, resp: []const u8) !std.json.Parsed(T) {
-    var parsed = std.json.parseFromSlice(T, allocator, resp, .{ .allocate = .alloc_always }) catch {
+fn parseCommon(allocator: std.mem.Allocator, resp: []const u8, comptime T: type) !std.json.Parsed(T) {
+    var parsed = std.json.parseFromSlice(T, allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
         return util_error.WechatError.DecodeError;
     };
     errdefer parsed.deinit();
@@ -437,4 +470,79 @@ test "Operation.init 持有 ctx 与 allocator" {
 test "GetDomainInfoResponse 默认值" {
     const r = GetDomainInfoResponse{};
     try std.testing.expectEqual(@as(i64, 0), r.errcode);
+}
+
+// ── 可注入 transport 测试 ────────────────────────────────────────────────
+
+const StubToken = struct {
+    fn getToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        return allocator.dupe(u8, "token-abc");
+    }
+};
+const token_vtable = credential.AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+
+/// 记录 method / uri / payload 并返回预设响应的 transport。
+const CapturingTransport = struct {
+    method: std.http.Method = .GET,
+    uri: []const u8 = "",
+    payload: []const u8 = "",
+    response: []const u8 = "",
+
+    fn dispatch(ctx: *anyopaque, allocator: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = content_type;
+        const self: *CapturingTransport = @ptrCast(@alignCast(ctx));
+        self.method = method;
+        self.uri = try allocator.dupe(u8, uri);
+        self.payload = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, self.response);
+    }
+
+    fn deinit(self: *CapturingTransport, allocator: std.mem.Allocator) void {
+        allocator.free(self.uri);
+        allocator.free(self.payload);
+    }
+};
+
+fn makeCtx() Context {
+    return .{
+        .config = .{ .app_id = "wx-test" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+}
+
+test "getDomainInfo POST 域名配置并解析（回归：泛型 T 参数错位）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"requestdomain\":[\"https://a.com\"],\"wsrequestdomain\":[\"wss://b.com\"],\"uploaddomain\":[],\"downloaddomain\":[],\"udpdomain\":[],\"bizdomain\":[]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var o = Operation.init(&ctx, allocator);
+    o.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try o.getDomainInfo(.{ .action = "get" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/getwxadevinfo?access_token=token-abc", tt.uri);
+    try std.testing.expectEqualStrings("{\"action\":\"get\"}", tt.payload);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.requestdomain.len);
+    try std.testing.expectEqualStrings("https://a.com", parsed.value.requestdomain[0]);
+}
+
+test "getSceneList GET 访问来源并解析（回归：getParsed 泛型 T 参数错位）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"scene\":[{\"name\":\"扫码\",\"value\":\"1001\"}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var o = Operation.init(&ctx, allocator);
+    o.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try o.getSceneList();
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.GET, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxaapi/log/get_scene?access_token=token-abc", tt.uri);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.scene.len);
+    try std.testing.expectEqualStrings("扫码", parsed.value.scene[0].name);
 }

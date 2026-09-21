@@ -100,7 +100,7 @@ pub const URLLink = struct {
             errcode: i64 = 0,
             errmsg: []const u8 = "",
             url_link: []const u8 = "",
-        }, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        }, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         defer parsed.deinit();
@@ -133,7 +133,7 @@ pub const URLLink = struct {
         const resp = try client.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(ULQueryResult, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(ULQueryResult, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();

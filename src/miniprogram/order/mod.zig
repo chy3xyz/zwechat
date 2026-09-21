@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
+const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 
@@ -148,10 +149,20 @@ pub const Shipping = struct {
     ctx: *Context,
     allocator: std.mem.Allocator,
 
+    /// 可选的可注入 transport（测试用，注入 MockTransport 拦截 HTTP）。
+    transport: ?util_http.HttpClient.Transport = null,
+    transport_ctx: ?*anyopaque = null,
+
     const Self = @This();
 
     pub fn init(ctx: *Context, allocator: std.mem.Allocator) Self {
         return .{ .ctx = ctx, .allocator = allocator };
+    }
+
+    /// 注入自定义 transport（`null` 恢复真实 HTTP）。
+    pub fn setTransport(self: *Self, t: ?util_http.HttpClient.Transport, ctx: ?*anyopaque) void {
+        self.transport = t;
+        self.transport_ctx = ctx;
     }
 
     /// 发货信息录入。
@@ -193,8 +204,7 @@ pub const Shipping = struct {
         );
         defer self.allocator.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const resp = try self.postJSON(uri, body);
         defer self.allocator.free(resp);
 
         if (try util_error.decodeWithCommonError(self.allocator, resp, api_name)) |ce| {
@@ -203,7 +213,7 @@ pub const Shipping = struct {
         }
     }
 
-    fn postParsed(self: *Self, comptime T: type, path: []const u8, body: []const u8) !std.json.Parsed(T) {
+    fn postParsed(self: *Self, path: []const u8, body: []const u8, comptime T: type) !std.json.Parsed(T) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -214,16 +224,27 @@ pub const Shipping = struct {
         );
         defer self.allocator.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const resp = try self.postJSON(uri, body);
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(T, self.allocator, resp, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(T, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
         if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
         return parsed;
+    }
+
+    /// POST JSON；注入 transport 时使用之，否则走线程默认 client。
+    fn postJSON(self: *Self, uri: []const u8, body: []const u8) ![]u8 {
+        if (self.transport) |t| {
+            var client = util_http.HttpClient.init(self.allocator);
+            defer client.deinit();
+            client.setTransport(t, self.transport_ctx);
+            return client.postJSON(uri, body);
+        }
+        const client = util_http.getDefaultClient(self.allocator);
+        return client.postJSON(uri, body);
     }
 };
 
@@ -367,4 +388,84 @@ test "UploadShippingInfoRequest 序列化包含 order_key" {
     defer allocator.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"order_key\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"out_trade_no\":\"t1\"") != null);
+}
+
+// ── 可注入 transport 测试 ────────────────────────────────────────────────
+
+const StubToken = struct {
+    fn getToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        return allocator.dupe(u8, "token-abc");
+    }
+};
+const token_vtable = credential.AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+
+/// 记录 method / uri / payload 并返回预设响应的 transport。
+const CapturingTransport = struct {
+    method: std.http.Method = .GET,
+    uri: []const u8 = "",
+    payload: []const u8 = "",
+    response: []const u8 = "",
+
+    fn dispatch(ctx: *anyopaque, allocator: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = content_type;
+        const self: *CapturingTransport = @ptrCast(@alignCast(ctx));
+        self.method = method;
+        self.uri = try allocator.dupe(u8, uri);
+        self.payload = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, self.response);
+    }
+
+    fn deinit(self: *CapturingTransport, allocator: std.mem.Allocator) void {
+        allocator.free(self.uri);
+        allocator.free(self.payload);
+    }
+};
+
+fn makeCtx() Context {
+    return .{
+        .config = .{ .app_id = "wx-test" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+}
+
+test "getShippingOrder POST 查询发货状态并解析（回归：泛型 T 参数错位）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"order\":{\"transaction_id\":\"tx-1\",\"openid\":\"openid-1\",\"order_state\":2,\"shipping\":{\"delivery_mode\":1,\"logistics_type\":1,\"finish_shipping\":false,\"finish_shipping_count\":0,\"goods_desc\":\"\",\"shipping_list\":[]}}}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var sh = Shipping.init(&ctx, allocator);
+    sh.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try sh.getShippingOrder(.{ .transaction_id = "tx-1", .merchant_id = "m1" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/order/get_order?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"transaction_id\":\"tx-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"merchant_id\":\"m1\"") != null);
+    try std.testing.expectEqualStrings("tx-1", parsed.value.order.transaction_id);
+    try std.testing.expectEqual(State.shipped, parsed.value.order.order_state);
+}
+
+test "getShippingOrderList POST 查询订单列表并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"order_list\":[{\"transaction_id\":\"tx-2\",\"order_state\":1}],\"last_index\":\"idx-1\",\"has_more\":false}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var sh = Shipping.init(&ctx, allocator);
+    sh.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try sh.getShippingOrderList(.{
+        .pay_time_range = .{ .begin_time = 1727000000, .end_time = 1727600000 },
+        .page_size = 10,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/order/get_order_list?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"page_size\":10") != null);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.order_list.len);
+    try std.testing.expectEqualStrings("tx-2", parsed.value.order_list[0].transaction_id);
+    try std.testing.expectEqual(State.wait_shipment, parsed.value.order_list[0].order_state);
 }
