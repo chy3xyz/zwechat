@@ -20,7 +20,7 @@ const std = @import("std");
 ///
 /// 测试会从 `build.zig.zon` 重新读取版本号对账，任何单侧修改都会让
 /// `zig build test` 失败，防止再次漂移。
-pub const version = "0.4.4";
+pub const version = "0.4.5";
 
 /// 顶层 Wechat 入口。
 pub const wechat = @import("wechat.zig");

@@ -5,6 +5,31 @@ All notable changes to `zwechat` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] — 2026-09-21
+
+### Added
+
+- **errcode 详情通道**：`util_error.lastErrorDetail()` / `clearErrorDetail()`——`decodeWithCommonError`/`handleFileResponse` 在 errcode != 0 时把 `errcode`/`errmsg`/`api_name` 写入线程局部零分配缓冲，消费方终于能区分 40001（token 失效）/45009（超频）/40003（openid 非法）/48001（未授权），不再只有粗粒度的 `ApiError`。`WechatError` 错误集保持不变。
+- **token 失效自愈（全仓接线）**：`AccessTokenHandle`/`JsTicketHandle` 新增可选 `invalidate` 钩子（含 `DefaultAccessToken`/`WorkAccessToken`/`DefaultJsTicket`/`WorkJsTicket` 真实实现与 Context 转发），配合新增 `util/retry.zig` 的 `callApi`——取 token → 调用 → 命中 token 失效码（40001/40014/41001/42001）→ 作废缓存 → 取新 token → **只重试一次**。officialaccount / work / miniprogram 三个域的高频接口已全部接入。
+- **微信支付 v3 商家转账**（`pay/v3/transfer.zig`）：发起转账 / 查询转账单 / 撤销转账 / 结果通知解密（新版 `/v3/fund-app/mch-transfer/transfer-bills`，字段以官方文档为准；Go 参考无 v3 实现）。`pay/v3/config.zig` 新增 `wechatpay_serial` 以便传加密 `user_name`。
+- **媒体下载限额与落盘**：`util_http.getFollowRedirectLimited(uri, max_bytes)` / `getFollowRedirectToFile(uri, path, max_bytes)`（真流式：Content-Length 预判 + 16 KiB 分块累加，超限 `error.ResponseTooLarge`，落盘失败删除不完整文件）；`officialaccount/material` 与 `work/material` 的下载方法新增带限额与落盘变体（默认 100 MiB 安全网，图片/语音另有更严常量）。
+- **启动期 HTTP 客户端初始化**：`util_http.initDefaultClient(allocator)` 进入严格模式（allocator 不一致 → `error.AllocatorMismatch`；其后 `getDefaultClient` 传错 allocator 会 `@panic`），并提供 `defaultClientAllocatorMatches` 供自查。
+- **Redis 连接池**：`cache/redis.zig` 新增 `Options.max_connections`（默认 1，等价历史单连接语义）与 `pool_timeout_ms`；池锁只护空闲表、网络 I/O 全在锁外，坏连接丢弃不进池，等待有界（`error.PoolTimeout`），`redis.poolStats()` 可观测。
+- **编码收敛基础设施**：新增 `util/json.zig`（`appendEscapedString`/`stringFieldObject`/`stringLiteral`）与 `util/uri.zig`（`queryEscape`，Go `url.QueryEscape` 语义），分别成为全仓唯一的 JSON 转义与 query 转义实现——原先 11 份手写 JSON escaper 与 3 份手写 QueryEscape 已收敛。
+- **公开 API 面门禁**：`tools/api_surface_check.sh` + `api/surface.txt` 快照（CI 已接入）——删除/改名的公开符号必须在 CHANGELOG 里写明，否则 CI 失败。
+- **可选真实接口探针**：`zig build live-probe`（env `ZWECHAT_LIVE_PROBE=1` + 凭据才联网，默认只报告、`-Dstrict` 才以 FAIL 退非零），用于发现"上游改了字段名"这类 mock 测不出的漂移。
+- **文档**：新增 `docs/UPGRADING.md`（面向下游的升级速查，含 before/after 与 submodule bump 步骤）与 `docs/OPEN_ITEMS.md`（已知取舍与开放项）。
+
+### Fixed
+
+- **手写 JSON 拼接漏转义**（用户入参含 `"`/`\`/控制字符时产出非法 JSON）：`officialaccount` 的 menu/material/draft/freepublish/broadcast/basic/device、`work` 的 oauth/invoice/checkin/kf/msgaudit/appchat/message/robot、`miniprogram` 的 tcb/express/operation/auth/business 等站点统一改走 `util/json.zig` 或 `std.json.Stringify`；其中 `officialaccount/user.updateRemark`、`draft.update` 的 `media_id`、`invoice` 的 `card_id`/`encrypt_code`、`tcb.databaseMigrateQueryInfo` 的 `env` 属用户可控输入，修复前会直接产出非法 JSON。
+- **`miniprogram/ocr` 的 `img_url` 编码语义**：由 `std.Uri.Component.formatQuery`（保留 `&`/`=`/`?`，CDN 签名 URL 会被服务端截断参数）改为 Go `url.QueryEscape` 语义，与 Go 参考逐字一致。
+- **Redis 连接池超时用例的时序脆弱性**：并发负载下的线程调度延迟不再触发误报（放大 holder 命令耗时与断言的余量）。
+
+### Changed
+
+- **公开 API 新增**（非破坏）：`work/oauth` 等模块补齐 `setTransport`/`transport` 注入点；`pay/v3` 导出 `TransferV3` 等符号；各 Context 新增 `invalidateAccessToken`/`invalidateJsTicket`。`api/surface.txt` 基线已同步刷新。
+
 ## [0.4.4] — 2026-09-21
 
 ### Added
@@ -310,7 +335,8 @@ N/A。
 - **0.x**：初始开发版本，API 可能不兼容。
 - **1.0**：计划完成 RSA / PKCS#12 完整实现、work.jsapi 完整 wire 后发布。
 
-[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.5
 [0.4.4]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.4
 [0.4.3]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.3
 [0.4.2]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.2
