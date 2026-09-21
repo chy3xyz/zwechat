@@ -46,7 +46,7 @@ pub const Oauth = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(ResAccessToken, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(ResAccessToken, self.allocator, body, .{ .ignore_unknown_fields = true }) catch {
             return util_error.WechatError.DecodeError;
         };
 
@@ -71,7 +71,7 @@ pub const Oauth = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(ResAccessToken, self.allocator, body, .{ .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(ResAccessToken, self.allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -93,7 +93,7 @@ pub const Oauth = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(CommonError, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(CommonError, self.allocator, body, .{ .ignore_unknown_fields = true }) catch {
             return util_error.WechatError.DecodeError;
         };
         defer parsed.deinit();
@@ -117,7 +117,7 @@ pub const Oauth = struct {
         const body = try client.get(uri);
         defer self.allocator.free(body);
 
-        var parsed = std.json.parseFromSlice(UserInfo, self.allocator, body, .{}) catch {
+        var parsed = std.json.parseFromSlice(UserInfo, self.allocator, body, .{ .ignore_unknown_fields = true }) catch {
             return util_error.WechatError.DecodeError;
         };
 

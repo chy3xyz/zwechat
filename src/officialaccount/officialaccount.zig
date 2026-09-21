@@ -29,8 +29,14 @@ const user = @import("user/mod.zig");
 /// 微信公众号相关 API 聚合入口。
 ///
 /// 构造完成后可重复调用 `getAccessToken` 拿到当前可用的 token；
-/// 子模块（如 menu / material 等）将在后续阶段以 `?*Submodule = null`
-/// 懒加载字段 + `Get*` 方法的形式补齐。
+/// 各子模块（menu / material / oauth / js 等）通过 `getXxx` 懒加载工厂按需构造。
+///
+/// ⚠️ **地址稳定性警告**：`OfficialAccount` 实例一旦被 `getJs()` / 各 `getXxx()`
+/// 工厂使用，其内存地址就必须保持稳定——派生的子模块持有 `&self.ctx` 裸指针。
+/// **禁止把 `OfficialAccount` 按值拷贝 / 移动**（包括从函数按值返回后再取地址、
+/// 放入会搬迁的 ArrayList 等），否则已派生的子模块会悬垂。
+/// 需要传递时请使用 `*OfficialAccount` 指针，并把 `OfficialAccount` 放在
+/// `var` 局部变量 / 堆上固定位置。
 pub const OfficialAccount = struct {
     ctx: Context,
 

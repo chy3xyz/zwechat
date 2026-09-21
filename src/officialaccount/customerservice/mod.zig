@@ -6,14 +6,95 @@ const Context = @import("../context.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 
+/// 客服基本信息（对齐 Go manager.go KeFuInfo）。
+pub const KeFuInfo = struct {
+    kf_account: []const u8 = "",
+    nickname: []const u8 = "",
+    password: []const u8 = "",
+    headimgurl: []const u8 = "",
+};
+
+/// 客服列表响应。内嵌 errcode/errmsg 以便 SDK 自行检查失败响应。
+const KfListResponse = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    kf_list: []KeFuInfo = &.{},
+};
+
+/// 客服在线信息（对照 Go `KeFuOnlineInfo`）。
+pub const KeFuOnlineInfo = struct {
+    kf_account: []const u8 = "",
+    status: i64 = 0,
+    kf_id: i64 = 0,
+    accepted_case: i64 = 0,
+};
+
+/// 在线客服列表响应。内嵌 errcode/errmsg 以便 SDK 自行检查失败响应。
+const KfOnlineListResponse = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    kf_online_list: []KeFuOnlineInfo = &.{},
+};
+
+pub const customerServiceOnlineListURL = "https://api.weixin.qq.com/cgi-bin/customservice/getonlinekflist";
+pub const customerServiceUpdateURL = "https://api.weixin.qq.com/customservice/kfaccount/update";
+pub const customerServiceDeleteURL = "https://api.weixin.qq.com/customservice/kfaccount/del";
+pub const customerServiceInviteURL = "https://api.weixin.qq.com/customservice/kfaccount/inviteworker";
+pub const customerServiceUploadHeadImgURL = "https://api.weixin.qq.com/customservice/kfaccount/uploadheadimg";
+
 pub const CustomerService = struct {
     ctx: *Context,
     allocator: std.mem.Allocator,
+
+    /// 可选的可注入 transport（测试用，注入 MockTransport 拦截 HTTP）。
+    transport: ?util_http.HttpClient.Transport = null,
+    transport_ctx: ?*anyopaque = null,
 
     const Self = @This();
 
     pub fn init(ctx: *Context, allocator: std.mem.Allocator) Self {
         return .{ .ctx = ctx, .allocator = allocator };
+    }
+
+    /// 注入自定义 transport（`null` 恢复真实 HTTP）。
+    pub fn setTransport(self: *Self, t: ?util_http.HttpClient.Transport, ctx: ?*anyopaque) void {
+        self.transport = t;
+        self.transport_ctx = ctx;
+    }
+
+    fn get(self: *Self, uri: []const u8) ![]u8 {
+        if (self.transport) |t| {
+            var client = util_http.HttpClient.init(self.allocator);
+            defer client.deinit();
+            client.setTransport(t, self.transport_ctx);
+            return client.get(uri);
+        }
+        const client = util_http.getDefaultClient(self.allocator);
+        return client.get(uri);
+    }
+
+    /// 同 `get`，但走 POST JSON（注入 transport 优先）。
+    fn postJson(self: *Self, uri: []const u8, body: []const u8) ![]u8 {
+        if (self.transport) |t| {
+            var client = util_http.HttpClient.init(self.allocator);
+            defer client.deinit();
+            client.setTransport(t, self.transport_ctx);
+            return client.postJSON(uri, body);
+        }
+        const client = util_http.getDefaultClient(self.allocator);
+        return client.postJSON(uri, body);
+    }
+
+    /// 同 `get`，但走 POST multipart（注入 transport 优先）。
+    fn postMultipart(self: *Self, uri: []const u8, fields: []const util_http.MultipartField) ![]u8 {
+        if (self.transport) |t| {
+            var client = util_http.HttpClient.init(self.allocator);
+            defer client.deinit();
+            client.setTransport(t, self.transport_ctx);
+            return client.postMultipart(uri, fields);
+        }
+        const client = util_http.getDefaultClient(self.allocator);
+        return client.postMultipart(uri, fields);
     }
 
     /// 添加客服账号。
@@ -28,15 +109,10 @@ pub const CustomerService = struct {
         );
         defer self.allocator.free(uri);
 
-        const body = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"kf_account\":\"{s}\",\"nickname\":\"{s}\"}}",
-            .{ account, nickname },
-        );
+        const body = try encodeKfAccountBody(self.allocator, account, nickname, null);
         defer self.allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const resp = try self.postJson(uri, body);
         defer self.allocator.free(resp);
 
         if (try util_error.decodeWithCommonError(self.allocator, resp, "AddAccount")) |ce| {
@@ -45,8 +121,129 @@ pub const CustomerService = struct {
         }
     }
 
+    /// 修改客服账号（`kfaccount/update`）。
+    pub fn updateAccount(self: *Self, account: []const u8, nickname: []const u8) !void {
+        const access_token = try self.ctx.getAccessToken(self.allocator);
+        defer self.allocator.free(access_token);
+
+        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ customerServiceUpdateURL, access_token });
+        defer self.allocator.free(uri);
+
+        const body = try encodeKfAccountBody(self.allocator, account, nickname, null);
+        defer self.allocator.free(body);
+
+        const resp = try self.postJson(uri, body);
+        defer self.allocator.free(resp);
+
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "UpdateAccount")) |ce| {
+            defer ce.deinit();
+            return util_error.WechatError.ApiError;
+        }
+    }
+
+    /// 删除客服帐号（`kfaccount/del`）。
+    pub fn deleteAccount(self: *Self, account: []const u8) !void {
+        const access_token = try self.ctx.getAccessToken(self.allocator);
+        defer self.allocator.free(access_token);
+
+        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ customerServiceDeleteURL, access_token });
+        defer self.allocator.free(uri);
+
+        const body = try encodeKfAccountBody(self.allocator, account, "", null);
+        defer self.allocator.free(body);
+
+        const resp = try self.postJson(uri, body);
+        defer self.allocator.free(resp);
+
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "DeleteAccount")) |ce| {
+            defer ce.deinit();
+            return util_error.WechatError.ApiError;
+        }
+    }
+
+    /// 邀请绑定客服帐号和微信号（`kfaccount/inviteworker`）。
+    pub fn inviteBind(self: *Self, account: []const u8, invite_wx: []const u8) !void {
+        const access_token = try self.ctx.getAccessToken(self.allocator);
+        defer self.allocator.free(access_token);
+
+        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ customerServiceInviteURL, access_token });
+        defer self.allocator.free(uri);
+
+        const body = try encodeKfAccountBody(self.allocator, account, "", invite_wx);
+        defer self.allocator.free(body);
+
+        const resp = try self.postJson(uri, body);
+        defer self.allocator.free(resp);
+
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "InviteBind")) |ce| {
+            defer ce.deinit();
+            return util_error.WechatError.ApiError;
+        }
+    }
+
+    /// 获取在线客服列表（`getonlinekflist`）。
+    ///
+    /// 返回的 `std.json.Parsed(KfOnlineListResponse)` 由调用方持有并负责 `deinit`，
+    /// 在线客服列表在 `.value.kf_online_list`。响应 errcode 非 0 时返回 `WechatError.ApiError`。
+    pub fn onlineList(self: *Self) !std.json.Parsed(KfOnlineListResponse) {
+        const access_token = try self.ctx.getAccessToken(self.allocator);
+        defer self.allocator.free(access_token);
+
+        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ customerServiceOnlineListURL, access_token });
+        defer self.allocator.free(uri);
+
+        const body = try self.get(uri);
+        defer self.allocator.free(body);
+
+        var parsed = std.json.parseFromSlice(KfOnlineListResponse, self.allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
+            return util_error.WechatError.DecodeError;
+        };
+        errdefer parsed.deinit();
+
+        if (parsed.value.errcode != 0) {
+            return util_error.WechatError.ApiError;
+        }
+        return parsed;
+    }
+
+    /// 上传客服头像（`kfaccount/uploadheadimg`，multipart 单文件字段 `media`）。
+    ///
+    /// `file_path` 末段作为文件名；文件内容由 HTTP 层读取。
+    pub fn uploadHeadImg(self: *Self, account: []const u8, file_path: []const u8) !void {
+        const access_token = try self.ctx.getAccessToken(self.allocator);
+        defer self.allocator.free(access_token);
+
+        const uri = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}?access_token={s}&kf_account={s}",
+            .{ customerServiceUploadHeadImgURL, access_token, account },
+        );
+        defer self.allocator.free(uri);
+
+        const fields = [_]util_http.MultipartField{
+            .{
+                .is_file = true,
+                .field_name = "media",
+                .filename = std.fs.path.basename(file_path),
+                .value = "",
+                .file_path = file_path,
+            },
+        };
+
+        const resp = try self.postMultipart(uri, &fields);
+        defer self.allocator.free(resp);
+
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "UploadHeadImg")) |ce| {
+            defer ce.deinit();
+            return util_error.WechatError.ApiError;
+        }
+    }
+
     /// 获取所有客服账号列表。
-    pub fn listAccounts(self: *Self) ![]u8 {
+    ///
+    /// 返回的 `std.json.Parsed(KfListResponse)` 由调用方持有并负责 `deinit`，
+    /// 客服列表在 `.value.kf_list`。响应 errcode 非 0 时返回 `WechatError.ApiError`。
+    pub fn listAccounts(self: *Self) !std.json.Parsed(KfListResponse) {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -57,11 +254,46 @@ pub const CustomerService = struct {
         );
         defer self.allocator.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const body = try client.get(uri);
-        return body;
+        const body = try self.get(uri);
+        defer self.allocator.free(body);
+
+        var parsed = std.json.parseFromSlice(KfListResponse, self.allocator, body, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
+            return util_error.WechatError.DecodeError;
+        };
+        errdefer parsed.deinit();
+
+        if (parsed.value.errcode != 0) {
+            return util_error.WechatError.ApiError;
+        }
+        return parsed;
     }
 };
+
+/// 组装客服账号管理请求体：`{"kf_account":"...","nickname":"...","invite_wx":"..."}`。
+/// `nickname` 非空才输出，`invite_wx` 非 null 才输出；统一走 `std.json.Stringify` 转义。
+fn encodeKfAccountBody(
+    allocator: std.mem.Allocator,
+    account: []const u8,
+    nickname: []const u8,
+    invite_wx: ?[]const u8,
+) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+    try s.beginObject();
+    try s.objectField("kf_account");
+    try s.write(account);
+    if (nickname.len > 0) {
+        try s.objectField("nickname");
+        try s.write(nickname);
+    }
+    if (invite_wx) |wx| {
+        try s.objectField("invite_wx");
+        try s.write(wx);
+    }
+    try s.endObject();
+    return out.toOwnedSlice();
+}
 
 test "CustomerService.init 持有 ctx" {
     var ctx: Context = .{
@@ -70,4 +302,238 @@ test "CustomerService.init 持有 ctx" {
     };
     const cs = CustomerService.init(&ctx, std.heap.page_allocator);
     try std.testing.expectEqualStrings("wx-cs", cs.ctx.config.app_id);
+}
+
+// —— mock 测试 ——
+
+const credential = @import("../../credential/mod.zig");
+
+const StubToken = struct {
+    fn getToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        return allocator.dupe(u8, "token-abc");
+    }
+};
+const token_vtable = credential.AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+
+/// 返回预设响应的 transport。
+const StaticResp = struct {
+    response: []const u8,
+
+    fn dispatch(ctx: *anyopaque, allocator: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = uri;
+        _ = method;
+        _ = payload;
+        _ = content_type;
+        const self: *StaticResp = @ptrCast(@alignCast(ctx));
+        return allocator.dupe(u8, self.response);
+    }
+};
+
+test "listAccounts 正常响应解析 kf_list" {
+    const allocator = std.testing.allocator;
+    var stub = StaticResp{
+        .response =
+        \\{"kf_list":[{"kf_account":"kf1@test","nickname":"客服一","password":"pwd","headimgurl":"http://a/1.png"}]}
+        ,
+    };
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-cs" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var cs = CustomerService.init(&ctx, allocator);
+    cs.setTransport(StaticResp.dispatch, &stub);
+
+    const parsed = try cs.listAccounts();
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.kf_list.len);
+    const kf = parsed.value.kf_list[0];
+    try std.testing.expectEqualStrings("kf1@test", kf.kf_account);
+    try std.testing.expectEqualStrings("客服一", kf.nickname);
+    try std.testing.expectEqualStrings("pwd", kf.password);
+    try std.testing.expectEqualStrings("http://a/1.png", kf.headimgurl);
+}
+
+test "listAccounts errcode 非 0 返回 ApiError" {
+    const allocator = std.testing.allocator;
+    var stub = StaticResp{ .response = "{\"errcode\":48001,\"errmsg\":\"api unauthorized\"}" };
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-cs" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var cs = CustomerService.init(&ctx, allocator);
+    cs.setTransport(StaticResp.dispatch, &stub);
+
+    const result = cs.listAccounts();
+    try std.testing.expectError(util_error.WechatError.ApiError, result);
+}
+
+/// 记录请求 uri / payload / content_type 的 transport。
+const CaptureResp = struct {
+    allocator: std.mem.Allocator,
+    response: []const u8,
+    uri: []u8 = &.{},
+    payload: []u8 = &.{},
+    ctype: []const u8 = "",
+
+    fn dispatch(ctx: *anyopaque, allocator: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = method;
+        const self: *CaptureResp = @ptrCast(@alignCast(ctx));
+        self.uri = try allocator.dupe(u8, uri);
+        self.payload = try allocator.dupe(u8, payload);
+        self.ctype = try allocator.dupe(u8, content_type orelse "");
+        return allocator.dupe(u8, self.response);
+    }
+};
+
+test "updateAccount 请求 kfaccount/update 且 JSON 转义" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = CaptureResp{ .allocator = alloc, .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-cs" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var cs = CustomerService.init(&ctx, alloc);
+    cs.setTransport(CaptureResp.dispatch, &cap);
+
+    try cs.updateAccount("kf1@test", "新\"昵\n称");
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/customservice/kfaccount/update?access_token=token-abc",
+        cap.uri,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"kf_account\":\"kf1@test\",\"nickname\":\"新\\\"昵\\n称\"}",
+        cap.payload,
+    );
+}
+
+test "deleteAccount 请求 kfaccount/del 仅含 kf_account" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = CaptureResp{ .allocator = alloc, .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-cs" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var cs = CustomerService.init(&ctx, alloc);
+    cs.setTransport(CaptureResp.dispatch, &cap);
+
+    try cs.deleteAccount("kf1@test");
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/customservice/kfaccount/del?access_token=token-abc",
+        cap.uri,
+    );
+    try std.testing.expectEqualStrings("{\"kf_account\":\"kf1@test\"}", cap.payload);
+
+    cap.response = "{\"errcode\":65400,\"errmsg\":\"please delete the kf account\"}";
+    try std.testing.expectError(util_error.WechatError.ApiError, cs.deleteAccount("kf1@test"));
+}
+
+test "inviteBind 请求 kfaccount/inviteworker 含 invite_wx" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = CaptureResp{ .allocator = alloc, .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-cs" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var cs = CustomerService.init(&ctx, alloc);
+    cs.setTransport(CaptureResp.dispatch, &cap);
+
+    try cs.inviteBind("kf1@test", "oWx_widget");
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/customservice/kfaccount/inviteworker?access_token=token-abc",
+        cap.uri,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"kf_account\":\"kf1@test\",\"invite_wx\":\"oWx_widget\"}",
+        cap.payload,
+    );
+
+    cap.response = "{\"errcode\":65413,\"errmsg\":\"invitee is binded by other kf\"}";
+    try std.testing.expectError(util_error.WechatError.ApiError, cs.inviteBind("kf1@test", "wx2"));
+}
+
+test "onlineList 解析 kf_online_list" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = CaptureResp{
+        .allocator = alloc,
+        .response = "{\"kf_online_list\":[{\"kf_account\":\"kf1@test\",\"status\":1,\"kf_id\":100,\"accepted_case\":5}]}",
+    };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-cs" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var cs = CustomerService.init(&ctx, alloc);
+    cs.setTransport(CaptureResp.dispatch, &cap);
+
+    const parsed = try cs.onlineList();
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.kf_online_list.len);
+    const kf = parsed.value.kf_online_list[0];
+    try std.testing.expectEqualStrings("kf1@test", kf.kf_account);
+    try std.testing.expectEqual(@as(i64, 1), kf.status);
+    try std.testing.expectEqual(@as(i64, 100), kf.kf_id);
+    try std.testing.expectEqual(@as(i64, 5), kf.accepted_case);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/customservice/getonlinekflist?access_token=token-abc",
+        cap.uri,
+    );
+
+    cap.response = "{\"errcode\":48001,\"errmsg\":\"api unauthorized\"}";
+    try std.testing.expectError(util_error.WechatError.ApiError, cs.onlineList());
+}
+
+test "uploadHeadImg multipart 上传头像文件" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const tmp_path = "zwechat_oa_cs_headimg_test.png";
+    const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{});
+    defer {
+        file.close(io);
+        std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+    }
+    try file.writePositionalAll(io, "fake-headimg-bytes", 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = CaptureResp{ .allocator = alloc, .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-cs" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var cs = CustomerService.init(&ctx, alloc);
+    cs.setTransport(CaptureResp.dispatch, &cap);
+
+    try cs.uploadHeadImg("kf1@test", tmp_path);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/customservice/kfaccount/uploadheadimg?access_token=token-abc&kf_account=kf1@test",
+        cap.uri,
+    );
+    try std.testing.expect(std.mem.startsWith(u8, cap.ctype, "multipart/form-data; boundary="));
+    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "name=\"media\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "filename=\"zwechat_oa_cs_headimg_test.png\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "fake-headimg-bytes") != null);
+
+    cap.response = "{\"errcode\":40005,\"errmsg\":\"invalid file type\"}";
+    try std.testing.expectError(util_error.WechatError.ApiError, cs.uploadHeadImg("kf1@test", tmp_path));
+}
+
+test "encodeKfAccountBody 字段省略与转义" {
+    const allocator = std.testing.allocator;
+    const body = try encodeKfAccountBody(allocator, "kf\"1", "", null);
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("{\"kf_account\":\"kf\\\"1\"}", body);
 }

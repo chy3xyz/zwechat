@@ -160,6 +160,28 @@ pub const MiniprogramPageReply = struct {
     thumb_media_id: []const u8,
 };
 
+/// `TransInfo` — 转客服消息的目标客服（对应 Go `TransInfo`，XML `KfAccount`）。
+pub const TransInfo = struct {
+    kf_account: []const u8,
+};
+
+/// `TransferCustomer` — 被动回复转客服消息（对应 Go `TransferCustomer`）。
+/// `kf_account` 为空表示不指定客服，由微信随机分配。
+pub const TransferCustomer = struct {
+    kf_account: []const u8 = "",
+
+    /// 转为被动回复 `Reply`（供 `Server` 消息处理回调返回）。
+    pub fn toReply(self: TransferCustomer) Reply {
+        return .{
+            .msg_type = .transfer_customer_service,
+            .data = if (self.kf_account.len > 0)
+                .{ .transfer = .{ .kf_account = self.kf_account } }
+            else
+                .{ .transfer = null },
+        };
+    }
+};
+
 /// 被动回复的统一结构（与上游 Go `message.Reply` 对应）。
 pub const Reply = struct {
     msg_type: ReplyMsgType,
@@ -174,7 +196,8 @@ pub const Reply = struct {
         music: MusicReply,
         news: NewsReply,
         miniprogrampage: MiniprogramPageReply,
-        transfer: void,
+        /// 转客服消息；`null` 表示不指定客服（由微信随机分配）。
+        transfer: ?TransInfo,
         /// 用户自行构造好的完整 XML（最灵活 — 任何未实现的类型都可以走这里）。
         raw_xml: RawXmlPayload,
     };
@@ -192,7 +215,7 @@ pub const Reply = struct {
             .music => |m| formatMusic(allocator, to_user, from_user, m),
             .news => |n| formatNews(allocator, to_user, from_user, n.articles),
             .miniprogrampage => |mp| formatMiniprogramPage(allocator, to_user, from_user, mp),
-            .transfer => formatTransfer(allocator, to_user, from_user),
+            .transfer => |ti| formatTransfer(allocator, to_user, from_user, ti),
             .raw_xml => |r| allocator.dupe(u8, r.content) catch @as(anyerror![]u8, error.OutOfMemory),
         };
     }
@@ -225,16 +248,20 @@ fn formatImage(allocator: std.mem.Allocator, to: []const u8, from: []const u8, m
     return buf.toOwnedSlice(allocator);
 }
 
-fn formatTransfer(allocator: std.mem.Allocator, to: []const u8, from: []const u8) ![]u8 {
+fn formatTransfer(allocator: std.mem.Allocator, to: []const u8, from: []const u8, trans_info: ?TransInfo) ![]u8 {
     const ts_str = try std.fmt.allocPrint(allocator, "{d}", .{std.Io.Clock.now(.real, std.Options.debug_io).toSeconds()});
     defer allocator.free(ts_str);
-    const elements = [_]util_xml.XmlElement{
-        .{ .key = "ToUserName", .value = to },
-        .{ .key = "FromUserName", .value = from },
-        .{ .key = "CreateTime", .value = ts_str },
-        .{ .key = "MsgType", .value = "transfer_customer_service" },
-    };
-    return util_xml.serialize(allocator, "xml", &elements);
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.print(allocator, "<xml><ToUserName><![CDATA[{s}]]></ToUserName>", .{to});
+    try buf.print(allocator, "<FromUserName><![CDATA[{s}]]></FromUserName>", .{from});
+    try buf.print(allocator, "<CreateTime>{s}</CreateTime>", .{ts_str});
+    try buf.print(allocator, "<MsgType><![CDATA[transfer_customer_service]]></MsgType>", .{});
+    if (trans_info) |ti| {
+        try buf.print(allocator, "<TransInfo><KfAccount><![CDATA[{s}]]></KfAccount></TransInfo>", .{ti.kf_account});
+    }
+    try buf.appendSlice(allocator, "</xml>");
+    return buf.toOwnedSlice(allocator);
 }
 
 fn formatVoice(allocator: std.mem.Allocator, to: []const u8, from: []const u8, media_id: []const u8) ![]u8 {
@@ -333,20 +360,159 @@ pub const TemplateMessage = struct {
     };
 };
 
+/// 客服消息类型（对应 Go `CustomerMessage.Msgtype`，JSON `msgtype` 取枚举名）。
+pub const CustomerMsgType = enum {
+    text,
+    image,
+    voice,
+    video,
+    music,
+    news,
+    mpnews,
+    wxcard,
+    msgmenu,
+    miniprogrampage,
+    mpnewsarticle,
+};
+
 /// 客服消息 — 文本。
 pub const CustomerTextMessage = struct {
     touser: []const u8,
     content: []const u8,
 };
 
+/// `MediaText` — 文本消息负载（对应 Go `MediaText`）。
+pub const MediaText = struct {
+    content: []const u8,
+};
+
+/// `MediaResource` — 仅含永久素材 id 的负载（图片 / 语音 / mpnews，对应 Go `MediaResource`）。
+pub const MediaResource = struct {
+    media_id: []const u8,
+};
+
+/// `MediaVideo` — 视频消息负载（对应 Go `MediaVideo`）。
+pub const MediaVideo = struct {
+    media_id: []const u8,
+    thumb_media_id: []const u8 = "",
+    title: []const u8 = "",
+    description: []const u8 = "",
+};
+
+/// `MediaMusic` — 音乐消息负载（对应 Go `MediaMusic`，JSON key 为 `musicurl`/`hqmusicurl`）。
+pub const MediaMusic = struct {
+    title: []const u8 = "",
+    description: []const u8 = "",
+    musicurl: []const u8 = "",
+    hqmusicurl: []const u8 = "",
+    thumb_media_id: []const u8 = "",
+};
+
+/// `MediaArticles` — 客服图文单条（对应 Go `MediaArticles`，JSON key 为 `picurl`）。
+pub const MediaArticles = struct {
+    title: []const u8 = "",
+    description: []const u8 = "",
+    url: []const u8 = "",
+    picurl: []const u8 = "",
+};
+
+/// `MediaNews` — 客服图文消息负载（对应 Go `MediaNews`）。
+pub const MediaNews = struct {
+    articles: []const MediaArticles,
+};
+
+/// `MsgmenuItem` — 菜单消息的单个按钮（对应 Go `MsgmenuItem`）。
+pub const MsgmenuItem = struct {
+    id: []const u8,
+    content: []const u8,
+};
+
+/// `MediaMsgmenu` — 菜单消息负载（对应 Go `MediaMsgmenu`）。
+pub const MediaMsgmenu = struct {
+    head_content: []const u8 = "",
+    list: []const MsgmenuItem = &.{},
+    tail_content: []const u8 = "",
+};
+
+/// `MediaWxcard` — 卡券消息负载（对应 Go `MediaWxcard`）。
+pub const MediaWxcard = struct {
+    card_id: []const u8,
+};
+
+/// `MediaMiniprogrampage` — 小程序卡片消息负载（对应 Go `MediaMiniprogrampage`）。
+pub const MediaMiniprogrampage = struct {
+    title: []const u8 = "",
+    appid: []const u8 = "",
+    pagepath: []const u8 = "",
+    thumb_media_id: []const u8 = "",
+};
+
+/// `MediaArticle` — 已发布文章 id 负载（`mpnewsarticle`，对应 Go `MediaArticle`）。
+pub const MediaArticle = struct {
+    article_id: []const u8,
+};
+
+/// 客服消息统一载体（对应 Go `CustomerMessage`）。
+/// 按 `msgtype` 填充对应负载字段，未填充的字段不会出现在 JSON 中。
+pub const CustomerMessage = struct {
+    touser: []const u8,
+    msgtype: CustomerMsgType,
+    text: ?MediaText = null,
+    image: ?MediaResource = null,
+    voice: ?MediaResource = null,
+    video: ?MediaVideo = null,
+    music: ?MediaMusic = null,
+    news: ?MediaNews = null,
+    mpnews: ?MediaResource = null,
+    wxcard: ?MediaWxcard = null,
+    msgmenu: ?MediaMsgmenu = null,
+    miniprogrampage: ?MediaMiniprogrampage = null,
+    mpnewsarticle: ?MediaArticle = null,
+};
+
+/// 客服输入状态（对应 Go `customerservice.TypingStatus`）。
+pub const TypingStatus = enum {
+    typing,
+    cancel_typing,
+
+    /// 微信接口要求的 JSON 字符串值。
+    pub fn jsonValue(self: TypingStatus) []const u8 {
+        return switch (self) {
+            .typing => "Typing",
+            .cancel_typing => "CancelTyping",
+        };
+    }
+};
+
 pub const Message = struct {
     ctx: *Context,
     allocator: std.mem.Allocator,
+
+    /// 可选的可注入 transport（测试用，注入 MockTransport 拦截 HTTP）。
+    transport: ?util_http.HttpClient.Transport = null,
+    transport_ctx: ?*anyopaque = null,
 
     const Self = @This();
 
     pub fn init(ctx: *Context, allocator: std.mem.Allocator) Self {
         return .{ .ctx = ctx, .allocator = allocator };
+    }
+
+    /// 注入自定义 transport（`null` 恢复真实 HTTP）。
+    pub fn setTransport(self: *Self, t: ?util_http.HttpClient.Transport, ctx: ?*anyopaque) void {
+        self.transport = t;
+        self.transport_ctx = ctx;
+    }
+
+    fn post(self: *Self, uri: []const u8, body: []const u8) ![]u8 {
+        if (self.transport) |t| {
+            var client = util_http.HttpClient.init(self.allocator);
+            defer client.deinit();
+            client.setTransport(t, self.transport_ctx);
+            return client.postJSON(uri, body);
+        }
+        const client = util_http.getDefaultClient(self.allocator);
+        return client.postJSON(uri, body);
     }
 
     /// 发送模板消息。
@@ -364,15 +530,14 @@ pub const Message = struct {
         const body = try serializeTemplate(self.allocator, msg);
         defer self.allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const resp = try self.post(uri, body);
         defer self.allocator.free(resp);
 
         var parsed = std.json.parseFromSlice(struct {
             errcode: i64 = 0,
             errmsg: []const u8 = "",
             msgid: i64 = 0,
-        }, self.allocator, resp, .{}) catch {
+        }, self.allocator, resp, .{ .ignore_unknown_fields = true }) catch {
             return util_error.WechatError.DecodeError;
         };
         defer parsed.deinit();
@@ -383,6 +548,16 @@ pub const Message = struct {
 
     /// 发送客服文本消息。
     pub fn sendCustomerText(self: *Self, msg: CustomerTextMessage) !void {
+        return self.sendCustomer(.{
+            .touser = msg.touser,
+            .msgtype = .text,
+            .text = .{ .content = msg.content },
+        });
+    }
+
+    /// 发送客服消息（对应 Go `Manager.Send`，text/image/voice/video/music/news/mpnews/wxcard/msgmenu/miniprogrampage/mpnewsarticle 全类型通用）。
+    /// 响应 errcode 非 0 时返回 `WechatError.ApiError`。
+    pub fn sendCustomer(self: *Self, msg: CustomerMessage) !void {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
@@ -393,14 +568,38 @@ pub const Message = struct {
         );
         defer self.allocator.free(uri);
 
-        const body = try serializeCustomerText(self.allocator, msg);
+        const body = try serializeCustomer(self.allocator, msg);
         defer self.allocator.free(body);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const resp = try client.postJSON(uri, body);
+        const resp = try self.post(uri, body);
         defer self.allocator.free(resp);
 
-        if (try util_error.decodeWithCommonError(self.allocator, resp, "SendCustomerText")) |ce| {
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "SendCustomer")) |ce| {
+            defer ce.deinit();
+            return util_error.WechatError.ApiError;
+        }
+    }
+
+    /// 下发客服输入状态给用户（对应 Go `Manager.SendTypingStatus`）。
+    /// `command` 为 `.typing`（正在输入）或 `.cancel_typing`（取消输入）。
+    pub fn sendTypingStatus(self: *Self, openid: []const u8, command: TypingStatus) !void {
+        const access_token = try self.ctx.getAccessToken(self.allocator);
+        defer self.allocator.free(access_token);
+
+        const uri = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}?access_token={s}",
+            .{ customerTypingURL, access_token },
+        );
+        defer self.allocator.free(uri);
+
+        const body = try serializeTypingStatus(self.allocator, openid, command);
+        defer self.allocator.free(body);
+
+        const resp = try self.post(uri, body);
+        defer self.allocator.free(resp);
+
+        if (try util_error.decodeWithCommonError(self.allocator, resp, "SendTypingStatus")) |ce| {
             defer ce.deinit();
             return util_error.WechatError.ApiError;
         }
@@ -449,7 +648,7 @@ pub const Message = struct {
     }
 };
 
-fn serializeCustomerText(allocator: std.mem.Allocator, msg: CustomerTextMessage) ![]u8 {
+fn serializeCustomer(allocator: std.mem.Allocator, msg: CustomerMessage) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     var s: std.json.Stringify = .{ .writer = &out.writer };
@@ -458,12 +657,123 @@ fn serializeCustomerText(allocator: std.mem.Allocator, msg: CustomerTextMessage)
     try s.objectField("touser");
     try s.write(msg.touser);
     try s.objectField("msgtype");
-    try s.write("text");
-    try s.objectField("text");
-    try s.beginObject();
-    try s.objectField("content");
-    try s.write(msg.content);
+    try s.write(msg.msgtype);
+    if (msg.text) |t| {
+        try s.objectField("text");
+        try s.beginObject();
+        try s.objectField("content");
+        try s.write(t.content);
+        try s.endObject();
+    }
+    if (msg.image) |v| {
+        try s.objectField("image");
+        try s.beginObject();
+        try s.objectField("media_id");
+        try s.write(v.media_id);
+        try s.endObject();
+    }
+    if (msg.voice) |v| {
+        try s.objectField("voice");
+        try s.beginObject();
+        try s.objectField("media_id");
+        try s.write(v.media_id);
+        try s.endObject();
+    }
+    if (msg.video) |v| {
+        try s.objectField("video");
+        try s.beginObject();
+        try s.objectField("media_id");
+        try s.write(v.media_id);
+        try s.objectField("thumb_media_id");
+        try s.write(v.thumb_media_id);
+        try s.objectField("title");
+        try s.write(v.title);
+        try s.objectField("description");
+        try s.write(v.description);
+        try s.endObject();
+    }
+    if (msg.music) |m| {
+        try s.objectField("music");
+        try s.beginObject();
+        try s.objectField("title");
+        try s.write(m.title);
+        try s.objectField("description");
+        try s.write(m.description);
+        try s.objectField("musicurl");
+        try s.write(m.musicurl);
+        try s.objectField("hqmusicurl");
+        try s.write(m.hqmusicurl);
+        try s.objectField("thumb_media_id");
+        try s.write(m.thumb_media_id);
+        try s.endObject();
+    }
+    if (msg.news) |n| {
+        try s.objectField("news");
+        try s.beginObject();
+        try s.objectField("articles");
+        try s.write(n.articles);
+        try s.endObject();
+    }
+    if (msg.mpnews) |v| {
+        try s.objectField("mpnews");
+        try s.beginObject();
+        try s.objectField("media_id");
+        try s.write(v.media_id);
+        try s.endObject();
+    }
+    if (msg.wxcard) |w| {
+        try s.objectField("wxcard");
+        try s.beginObject();
+        try s.objectField("card_id");
+        try s.write(w.card_id);
+        try s.endObject();
+    }
+    if (msg.msgmenu) |m| {
+        try s.objectField("msgmenu");
+        try s.beginObject();
+        try s.objectField("head_content");
+        try s.write(m.head_content);
+        try s.objectField("list");
+        try s.write(m.list);
+        try s.objectField("tail_content");
+        try s.write(m.tail_content);
+        try s.endObject();
+    }
+    if (msg.miniprogrampage) |mp| {
+        try s.objectField("miniprogrampage");
+        try s.beginObject();
+        try s.objectField("title");
+        try s.write(mp.title);
+        try s.objectField("appid");
+        try s.write(mp.appid);
+        try s.objectField("pagepath");
+        try s.write(mp.pagepath);
+        try s.objectField("thumb_media_id");
+        try s.write(mp.thumb_media_id);
+        try s.endObject();
+    }
+    if (msg.mpnewsarticle) |a| {
+        try s.objectField("mpnewsarticle");
+        try s.beginObject();
+        try s.objectField("article_id");
+        try s.write(a.article_id);
+        try s.endObject();
+    }
     try s.endObject();
+
+    return out.toOwnedSlice();
+}
+
+fn serializeTypingStatus(allocator: std.mem.Allocator, openid: []const u8, command: TypingStatus) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var s: std.json.Stringify = .{ .writer = &out.writer };
+
+    try s.beginObject();
+    try s.objectField("touser");
+    try s.write(openid);
+    try s.objectField("command");
+    try s.write(command.jsonValue());
     try s.endObject();
 
     return out.toOwnedSlice();
@@ -471,6 +781,7 @@ fn serializeCustomerText(allocator: std.mem.Allocator, msg: CustomerTextMessage)
 
 pub const templateSendURL = "https://api.weixin.qq.com/cgi-bin/message/template/send";
 pub const customSendURL = "https://api.weixin.qq.com/cgi-bin/message/custom/send";
+pub const customerTypingURL = "https://api.weixin.qq.com/cgi-bin/message/custom/typing";
 
 test "MsgType 枚举值" {
     try std.testing.expectEqualStrings("text", @tagName(MsgType.text));
@@ -533,23 +844,353 @@ test "serializeTemplate produces valid JSON and escapes quotes" {
     try std.testing.expect(data.get("keyword1").?.object.get("color") == null);
 }
 
-test "serializeCustomerText produces valid JSON and escapes content" {
+// —— mock 测试 ——
+
+const credential = @import("../../credential/mod.zig");
+
+const StubToken = struct {
+    fn getToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        return allocator.dupe(u8, "token-abc");
+    }
+};
+const token_vtable = credential.AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+
+/// 捕获最后一次请求的 transport：记录 uri/method/payload 并返回预设响应。
+const CaptureResp = struct {
+    response: []const u8,
+    last_uri: [512]u8 = undefined,
+    last_uri_len: usize = 0,
+    last_payload: [2048]u8 = undefined,
+    last_payload_len: usize = 0,
+    last_method: std.http.Method = .GET,
+
+    fn dispatch(ctx: *anyopaque, allocator: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = content_type;
+        const self: *CaptureResp = @ptrCast(@alignCast(ctx));
+        const ulen = @min(uri.len, self.last_uri.len);
+        @memcpy(self.last_uri[0..ulen], uri[0..ulen]);
+        self.last_uri_len = ulen;
+        const plen = @min(payload.len, self.last_payload.len);
+        @memcpy(self.last_payload[0..plen], payload[0..plen]);
+        self.last_payload_len = plen;
+        self.last_method = method;
+        return allocator.dupe(u8, self.response);
+    }
+
+    fn lastUri(self: *const CaptureResp) []const u8 {
+        return self.last_uri[0..self.last_uri_len];
+    }
+
+    fn lastPayload(self: *const CaptureResp) []const u8 {
+        return self.last_payload[0..self.last_payload_len];
+    }
+};
+
+fn newTestMessage(ctx: *Context, alloc: std.mem.Allocator, stub: *CaptureResp) Message {
+    var m = Message.init(ctx, alloc);
+    m.setTransport(CaptureResp.dispatch, stub);
+    return m;
+}
+
+test "sendCustomerText 走 transport 并序列化 text" {
     const allocator = std.testing.allocator;
-    const msg = CustomerTextMessage{
-        .touser = "user\"test",
-        .content = "say \"hi\"",
+    var stub = CaptureResp{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
     };
-    const body = try serializeCustomerText(allocator, msg);
-    defer allocator.free(body);
+    var m = newTestMessage(&ctx, allocator, &stub);
 
-    try std.testing.expect(std.mem.indexOf(u8, body, "user\\\"test") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "say \\\"hi\\\"") != null);
+    try m.sendCustomerText(.{ .touser = "oA\"x", .content = "说 \"hi\"" });
 
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
-    defer parsed.deinit();
-    try std.testing.expectEqualStrings("user\"test", parsed.value.object.get("touser").?.string);
-    try std.testing.expectEqualStrings("text", parsed.value.object.get("msgtype").?.string);
-    try std.testing.expectEqualStrings("say \"hi\"", parsed.value.object.get("text").?.object.get("content").?.string);
+    try std.testing.expectEqual(std.http.Method.POST, stub.last_method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=token-abc", stub.lastUri());
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"text\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "说 \\\"hi\\\"") != null);
+}
+
+test "sendCustomer 图片消息 body 含 image.media_id" {
+    const allocator = std.testing.allocator;
+    var stub = CaptureResp{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var m = newTestMessage(&ctx, allocator, &stub);
+
+    try m.sendCustomer(.{
+        .touser = "oA",
+        .msgtype = .image,
+        .image = .{ .media_id = "media_img" },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"image\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"image\":{\"media_id\":\"media_img\"}") != null);
+}
+
+test "sendCustomer 语音消息 body 含 voice.media_id" {
+    const allocator = std.testing.allocator;
+    var stub = CaptureResp{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var m = newTestMessage(&ctx, allocator, &stub);
+
+    try m.sendCustomer(.{
+        .touser = "oA",
+        .msgtype = .voice,
+        .voice = .{ .media_id = "media_voice" },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"voice\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"voice\":{\"media_id\":\"media_voice\"}") != null);
+}
+
+test "sendCustomer 视频消息 body 含 video 四字段" {
+    const allocator = std.testing.allocator;
+    var stub = CaptureResp{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var m = newTestMessage(&ctx, allocator, &stub);
+
+    try m.sendCustomer(.{
+        .touser = "oA",
+        .msgtype = .video,
+        .video = .{
+            .media_id = "m_video",
+            .thumb_media_id = "m_thumb",
+            .title = "标题",
+            .description = "描述",
+        },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"video\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"media_id\":\"m_video\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"thumb_media_id\":\"m_thumb\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"title\":\"标题\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"description\":\"描述\"") != null);
+}
+
+test "sendCustomer 音乐消息 body 含 music 五字段" {
+    const allocator = std.testing.allocator;
+    var stub = CaptureResp{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var m = newTestMessage(&ctx, allocator, &stub);
+
+    try m.sendCustomer(.{
+        .touser = "oA",
+        .msgtype = .music,
+        .music = .{
+            .title = "歌名",
+            .description = "歌手",
+            .musicurl = "https://a/1.mp3",
+            .hqmusicurl = "https://a/1hq.mp3",
+            .thumb_media_id = "m_thumb",
+        },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"music\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"musicurl\":\"https://a/1.mp3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"hqmusicurl\":\"https://a/1hq.mp3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"thumb_media_id\":\"m_thumb\"") != null);
+}
+
+test "sendCustomer 图文 news 消息 body 含 articles 数组" {
+    const allocator = std.testing.allocator;
+    var stub = CaptureResp{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var m = newTestMessage(&ctx, allocator, &stub);
+
+    const articles = [_]MediaArticles{
+        .{ .title = "t1", .description = "d1", .url = "https://u/1", .picurl = "https://p/1.png" },
+        .{ .title = "t2", .description = "", .url = "", .picurl = "" },
+    };
+    try m.sendCustomer(.{
+        .touser = "oA",
+        .msgtype = .news,
+        .news = .{ .articles = &articles },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"news\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"articles\":[{\"title\":\"t1\",\"description\":\"d1\",\"url\":\"https://u/1\",\"picurl\":\"https://p/1.png\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "{\"title\":\"t2\",\"description\":\"\",\"url\":\"\",\"picurl\":\"\"}") != null);
+}
+
+test "sendCustomer mpnews 消息 body 含 mpnews.media_id" {
+    const allocator = std.testing.allocator;
+    var stub = CaptureResp{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var m = newTestMessage(&ctx, allocator, &stub);
+
+    try m.sendCustomer(.{
+        .touser = "oA",
+        .msgtype = .mpnews,
+        .mpnews = .{ .media_id = "media_mpnews" },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"mpnews\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"mpnews\":{\"media_id\":\"media_mpnews\"}") != null);
+}
+
+test "sendCustomer wxcard 消息 body 含 wxcard.card_id" {
+    const allocator = std.testing.allocator;
+    var stub = CaptureResp{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var m = newTestMessage(&ctx, allocator, &stub);
+
+    try m.sendCustomer(.{
+        .touser = "oA",
+        .msgtype = .wxcard,
+        .wxcard = .{ .card_id = "card_123" },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"wxcard\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"wxcard\":{\"card_id\":\"card_123\"}") != null);
+}
+
+test "sendCustomer 小程序卡片 body 含 miniprogrampage 四字段" {
+    const allocator = std.testing.allocator;
+    var stub = CaptureResp{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var m = newTestMessage(&ctx, allocator, &stub);
+
+    try m.sendCustomer(.{
+        .touser = "oA",
+        .msgtype = .miniprogrampage,
+        .miniprogrampage = .{
+            .title = "卡片标题",
+            .appid = "wx_appid",
+            .pagepath = "pages/index",
+            .thumb_media_id = "m_thumb",
+        },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"miniprogrampage\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"appid\":\"wx_appid\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"pagepath\":\"pages/index\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"thumb_media_id\":\"m_thumb\"") != null);
+}
+
+test "sendCustomer 菜单消息 body 含 msgmenu 且转义用户文本" {
+    const allocator = std.testing.allocator;
+    var stub = CaptureResp{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var m = newTestMessage(&ctx, allocator, &stub);
+
+    const items = [_]MsgmenuItem{
+        .{ .id = "101", .content = "满意\"非常满意\"" },
+        .{ .id = "102", .content = "不满意" },
+    };
+    try m.sendCustomer(.{
+        .touser = "oA",
+        .msgtype = .msgmenu,
+        .msgmenu = .{
+            .head_content = "您对本次服务是否满意呢？",
+            .list = &items,
+            .tail_content = "欢迎再次光临",
+        },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"msgmenu\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"head_content\":\"您对本次服务是否满意呢？\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "满意\\\"非常满意\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "{\"id\":\"102\",\"content\":\"不满意\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"tail_content\":\"欢迎再次光临\"") != null);
+}
+
+test "sendCustomer mpnewsarticle 消息 body 含 article_id" {
+    const allocator = std.testing.allocator;
+    var stub = CaptureResp{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var m = newTestMessage(&ctx, allocator, &stub);
+
+    try m.sendCustomer(.{
+        .touser = "oA",
+        .msgtype = .mpnewsarticle,
+        .mpnewsarticle = .{ .article_id = "art_123" },
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"mpnewsarticle\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"mpnewsarticle\":{\"article_id\":\"art_123\"}") != null);
+}
+
+test "sendCustomer errcode 非 0 返回 ApiError" {
+    const allocator = std.testing.allocator;
+    var stub = CaptureResp{ .response = "{\"errcode\":45047,\"errmsg\":\"out of response count limit\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var m = newTestMessage(&ctx, allocator, &stub);
+
+    const result = m.sendCustomer(.{
+        .touser = "oA",
+        .msgtype = .text,
+        .text = .{ .content = "hi" },
+    });
+    try std.testing.expectError(util_error.WechatError.ApiError, result);
+}
+
+test "sendTypingStatus 请求端点与 body" {
+    const allocator = std.testing.allocator;
+    var stub = CaptureResp{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var m = newTestMessage(&ctx, allocator, &stub);
+
+    try m.sendTypingStatus("oA", .typing);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/message/custom/typing?access_token=token-abc", stub.lastUri());
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"touser\":\"oA\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"command\":\"Typing\"") != null);
+
+    try m.sendTypingStatus("oA", .cancel_typing);
+    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"command\":\"CancelTyping\"") != null);
+}
+
+test "TransferCustomer 带 KfAccount 的被动回复 XML" {
+    const allocator = std.testing.allocator;
+    const tc = TransferCustomer{ .kf_account = "kf1@test" };
+    const reply = tc.toReply();
+    const xml = try reply.format(allocator, "toUser", "fromUser");
+    defer allocator.free(xml);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<MsgType><![CDATA[transfer_customer_service]]></MsgType>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<TransInfo><KfAccount><![CDATA[kf1@test]]></KfAccount></TransInfo>") != null);
+}
+
+test "TransferCustomer 不指定客服时 XML 无 TransInfo" {
+    const allocator = std.testing.allocator;
+    const tc = TransferCustomer{};
+    const reply = tc.toReply();
+    const xml = try reply.format(allocator, "toUser", "fromUser");
+    defer allocator.free(xml);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<MsgType><![CDATA[transfer_customer_service]]></MsgType>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "TransInfo") == null);
 }
 
 test "Reply.format image produces nested XML" {
