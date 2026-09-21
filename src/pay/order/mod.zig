@@ -12,6 +12,7 @@ const util_crypto = @import("../../util/crypto.zig");
 const util_util = @import("../../util/util.zig");
 const util_xml = @import("../../util/xml.zig");
 const util_time = @import("../../util/time.zig");
+const WechatError = @import("../../util/error.zig").WechatError;
 
 /// 下单参数。
 pub const Params = struct {
@@ -150,22 +151,28 @@ pub const Order = struct {
         const nonce_str = try util_util.randomStr(allocator, 32);
         defer allocator.free(nonce_str);
 
-        // 构造签名（MD5 over all params except `sign` itself）
+        // 构造签名：参与签名的参数必须与 XML 请求体完全一致
+        //（含 detail/attach/goods_tag/time_expire，空值由 orderParam 跳过），
+        // 否则微信会返回「签名错误」。算法由 p.sign_type 决定（MD5 / HMAC-SHA256）。
         const param_array = [_]util_param.Param{
             .{ .key = "appid", .value = self.cfg.app_id },
+            .{ .key = "attach", .value = p.attach },
+            .{ .key = "body", .value = p.body },
+            .{ .key = "detail", .value = p.detail },
+            .{ .key = "goods_tag", .value = p.goods_tag },
             .{ .key = "mch_id", .value = self.cfg.mch_id },
             .{ .key = "nonce_str", .value = nonce_str },
-            .{ .key = "body", .value = p.body },
-            .{ .key = "out_trade_no", .value = p.out_trade_no },
-            .{ .key = "total_fee", .value = p.total_fee },
-            .{ .key = "spbill_create_ip", .value = p.create_ip },
             .{ .key = "notify_url", .value = p.notify_url },
-            .{ .key = "trade_type", .value = p.trade_type },
             .{ .key = "openid", .value = p.open_id },
+            .{ .key = "out_trade_no", .value = p.out_trade_no },
             .{ .key = "sign_type", .value = p.sign_type },
+            .{ .key = "spbill_create_ip", .value = p.create_ip },
+            .{ .key = "time_expire", .value = p.time_expire },
+            .{ .key = "total_fee", .value = p.total_fee },
+            .{ .key = "trade_type", .value = p.trade_type },
         };
 
-        const sign = try signMd5(allocator, &param_array, self.cfg.key);
+        const sign = try signParams(allocator, &param_array, self.cfg.key, p.sign_type);
         defer allocator.free(sign);
 
         // 构造 XML 请求体
@@ -211,7 +218,7 @@ pub const Order = struct {
             .{ .key = "out_trade_no", .value = out_trade_no },
             .{ .key = "nonce_str", .value = nonce_str },
         };
-        const sign = try signMd5(allocator, &params, self.cfg.key);
+        const sign = try signParams(allocator, &params, self.cfg.key, util_crypto.SignTypeMD5);
         defer allocator.free(sign);
 
         const xml_body = try buildSimpleXml(allocator, "xml", &[_]util_xml.XmlElement{
@@ -257,7 +264,7 @@ pub const Order = struct {
             .{ .key = "out_trade_no", .value = out_trade_no },
             .{ .key = "nonce_str", .value = nonce_str },
         };
-        const sign = try signMd5(allocator, &params, self.cfg.key);
+        const sign = try signParams(allocator, &params, self.cfg.key, util_crypto.SignTypeMD5);
         defer allocator.free(sign);
 
         const xml_body = try buildSimpleXml(allocator, "xml", &[_]util_xml.XmlElement{
@@ -326,26 +333,24 @@ pub const Order = struct {
     }
 
     /// 构造 JS SDK 拉起支付参数。
+    ///
+    /// 签名算法由 `p.sign_type` 决定（与上游 Go 版一致，修复前恒为 MD5）。
     pub fn bridgeConfig(self: *Self, allocator: std.mem.Allocator, p: Params, pre_order: PreOrder) !BridgeConfig {
-        _ = p;
         const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{util_time.getCurrTS()});
         defer allocator.free(timestamp);
 
         const nonce_str = try util_util.randomStr(allocator, 32);
         defer allocator.free(nonce_str);
 
-        // 签名串：appId=...&nonceStr=...&package=prepay_id=...&signType=...&timeStamp=...&key=...
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        defer buf.deinit(allocator);
-        try buf.print(allocator, "appId={s}&nonceStr={s}&package=prepay_id={s}&signType=MD5&timeStamp={s}&key={s}", .{
+        const sign_md5 = try bridgeJsPaySign(
+            allocator,
             self.cfg.app_id,
             nonce_str,
             pre_order.prepay_id,
             timestamp,
+            p.sign_type,
             self.cfg.key,
-        });
-        const raw = buf.items;
-        const sign_md5 = try util_crypto.calculateSign(allocator, raw, util_crypto.SignTypeMD5, "");
+        );
         defer allocator.free(sign_md5);
 
         // package 字段值是 "prepay_id=xxx"
@@ -356,22 +361,60 @@ pub const Order = struct {
             .timestamp = try allocator.dupe(u8, timestamp),
             .nonce_str = try allocator.dupe(u8, nonce_str),
             .package = try allocator.dupe(u8, package_val),
-            .sign_type = "MD5",
+            .sign_type = p.sign_type,
             .pay_sign = try allocator.dupe(u8, sign_md5),
         };
     }
 };
 
+/// 计算 JS SDK 拉起支付的 paySign（纯函数，便于离线回归测试）。
+///
+/// 签名串：`appId=...&nonceStr=...&package=prepay_id=...&signType=...&timeStamp=...&key=...`，
+/// 算法由 `sign_type` 决定（MD5 / HMAC-SHA256；HMAC 的 key 为商户 key，与上游 Go 一致）。
+/// 返回的切片由调用方负责 `free`。
+pub fn bridgeJsPaySign(
+    allocator: std.mem.Allocator,
+    app_id: []const u8,
+    nonce_str: []const u8,
+    prepay_id: []const u8,
+    timestamp: []const u8,
+    sign_type: []const u8,
+    key: []const u8,
+) ![]u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.print(allocator, "appId={s}&nonceStr={s}&package=prepay_id={s}&signType={s}&timeStamp={s}&key={s}", .{
+        app_id,
+        nonce_str,
+        prepay_id,
+        sign_type,
+        timestamp,
+        key,
+    });
+    return util_crypto.calculateSign(allocator, buf.items, sign_type, key);
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // 内部辅助
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn signMd5(allocator: std.mem.Allocator, params: []const util_param.Param, key: []const u8) ![]u8 {
+/// 按 `sign_type` 计算参数签名（MD5 / HMAC-SHA256，与上游 Go `util.ParamSign` 对齐）。
+///
+/// 非法 `sign_type` 返回 `WechatError.InvalidArgument`。返回的大写 hex 切片由调用方 `free`。
+fn signParams(
+    allocator: std.mem.Allocator,
+    params: []const util_param.Param,
+    key: []const u8,
+    sign_type: []const u8,
+) ![]u8 {
+    if (!std.mem.eql(u8, sign_type, util_crypto.SignTypeMD5) and
+        !std.mem.eql(u8, sign_type, util_crypto.SignTypeHMACSHA256))
+        return WechatError.InvalidArgument;
     const biz = try std.fmt.allocPrint(allocator, "&key={s}", .{key});
     defer allocator.free(biz);
     const ordered = try util_param.orderParam(allocator, params, biz);
     defer allocator.free(ordered);
-    return util_crypto.calculateSign(allocator, ordered, util_crypto.SignTypeMD5, "");
+    return util_crypto.calculateSign(allocator, ordered, sign_type, key);
 }
 
 fn buildUnifiedOrderXml(allocator: std.mem.Allocator, cfg: Config, p: Params, nonce_str: []const u8, sign: []const u8) ![]u8 {
@@ -478,4 +521,180 @@ test "prePayOrder 返回值字段指向内部缓冲区（UAF 回归）" {
     try std.testing.expectEqualStrings("OK", result.return_msg);
     try std.testing.expectEqualStrings("SUCCESS", result.result_code);
     try std.testing.expectEqualStrings("wx_prepay_123", result.prepay_id);
+}
+
+// 捕获最近一次请求 payload 的 transport，用于「签名 vs 实际发送 XML」一致性断言。
+const CaptureTransport = struct {
+    payload: ?[]u8 = null,
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *CaptureTransport) void {
+        if (self.payload) |p| self.allocator.free(p);
+    }
+
+    fn dispatch(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        method: std.http.Method,
+        payload: []const u8,
+        content_type: ?[]const u8,
+    ) anyerror![]u8 {
+        _ = uri;
+        _ = method;
+        _ = content_type;
+        const self: *CaptureTransport = @ptrCast(@alignCast(ctx));
+        if (self.payload) |p| self.allocator.free(p);
+        self.payload = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, "<xml><return_code>SUCCESS</return_code><result_code>SUCCESS</result_code><prepay_id>p1</prepay_id></xml>") catch return error.OutOfMemory;
+    }
+};
+
+/// 从实际发送的 XML 重新计算 MD5 签名，验证与 `<sign>` 字段一致
+/// （签名参数集合必须与实际发送字段完全一致）。
+fn expectXmlSignConsistent(allocator: std.mem.Allocator, key: []const u8, xml_body: []const u8) !void {
+    var doc = try util_xml.parse(allocator, xml_body);
+    defer doc.deinit();
+
+    var params: std.ArrayList(util_param.Param) = .empty;
+    defer params.deinit(allocator);
+    for (doc.elements) |el| {
+        if (std.mem.eql(u8, el.key, "sign")) continue;
+        if (el.value.len == 0) continue;
+        try params.append(allocator, .{ .key = el.key, .value = el.value });
+    }
+    const biz = try std.fmt.allocPrint(allocator, "&key={s}", .{key});
+    defer allocator.free(biz);
+    const ordered = try util_param.orderParam(allocator, params.items, biz);
+    defer allocator.free(ordered);
+    const expected = try util_crypto.calculateSign(allocator, ordered, util_crypto.SignTypeMD5, "");
+    defer allocator.free(expected);
+
+    const given = doc.get("sign") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, expected, given);
+}
+
+test "prePayOrder 签名与实际发送 XML 一致（含可选字段，签名错误回归）" {
+    const allocator = std.testing.allocator;
+    var cap = CaptureTransport{ .allocator = allocator };
+    defer cap.deinit();
+
+    var o = Order.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "test_key" });
+    o.setTransport(CaptureTransport.dispatch, &cap);
+
+    var result = try o.prePayOrder(allocator, .{
+        .total_fee = "100",
+        .create_ip = "127.0.0.1",
+        .body = "test",
+        .out_trade_no = "t-1",
+        .open_id = "ox",
+        .trade_type = "JSAPI",
+        .notify_url = "https://example.com/cb",
+        .detail = "{\"goods_detail\":[]}",
+        .attach = "metadata",
+        .goods_tag = "TAG",
+        .time_expire = "20260919120000",
+    });
+    defer result.deinit();
+
+    try std.testing.expect(cap.payload != null);
+    try expectXmlSignConsistent(allocator, "test_key", cap.payload.?);
+}
+
+test "prePayOrder 非法 sign_type 返回 InvalidArgument" {
+    const allocator = std.testing.allocator;
+    var cap = CaptureTransport{ .allocator = allocator };
+    defer cap.deinit();
+
+    var o = Order.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "test_key" });
+    o.setTransport(CaptureTransport.dispatch, &cap);
+
+    const r = o.prePayOrder(allocator, .{
+        .total_fee = "100",
+        .create_ip = "127.0.0.1",
+        .body = "test",
+        .out_trade_no = "t-1",
+        .open_id = "ox",
+        .trade_type = "JSAPI",
+        .notify_url = "https://example.com/cb",
+        .sign_type = "SHA1",
+    });
+    try std.testing.expectError(WechatError.InvalidArgument, r);
+}
+
+test "prePayOrder HMAC-SHA256 sign_type 签名与 XML 一致" {
+    const allocator = std.testing.allocator;
+    var cap = CaptureTransport{ .allocator = allocator };
+    defer cap.deinit();
+
+    var o = Order.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "test_key" });
+    o.setTransport(CaptureTransport.dispatch, &cap);
+
+    var result = try o.prePayOrder(allocator, .{
+        .total_fee = "100",
+        .create_ip = "127.0.0.1",
+        .body = "test",
+        .out_trade_no = "t-1",
+        .open_id = "ox",
+        .trade_type = "JSAPI",
+        .notify_url = "https://example.com/cb",
+        .sign_type = "HMAC-SHA256",
+    });
+    defer result.deinit();
+
+    // 从发送的 XML 重算 HMAC-SHA256 签名（orderParam + "&key=" + key），与 <sign> 比对。
+    var doc = try util_xml.parse(allocator, cap.payload.?);
+    defer doc.deinit();
+    var params: std.ArrayList(util_param.Param) = .empty;
+    defer params.deinit(allocator);
+    for (doc.elements) |el| {
+        if (std.mem.eql(u8, el.key, "sign")) continue;
+        if (el.value.len == 0) continue;
+        try params.append(allocator, .{ .key = el.key, .value = el.value });
+    }
+    const biz = try std.fmt.allocPrint(allocator, "&key={s}", .{"test_key"});
+    defer allocator.free(biz);
+    const ordered = try util_param.orderParam(allocator, params.items, biz);
+    defer allocator.free(ordered);
+    const expected = try util_crypto.calculateSign(allocator, ordered, util_crypto.SignTypeHMACSHA256, "test_key");
+    defer allocator.free(expected);
+    try std.testing.expectEqualSlices(u8, expected, doc.get("sign").?);
+}
+
+test "bridgeJsPaySign 固定向量（HMAC-SHA256 / MD5）" {
+    const allocator = std.testing.allocator;
+    // 向量由外部独立计算（Python hmac/hashlib）：
+    //   串 = "appId=wx123&nonceStr=nonce123&package=prepay_id=prep_456&signType=HMAC-SHA256&timeStamp=1700000000&key=secret_key"
+    const h = try bridgeJsPaySign(allocator, "wx123", "nonce123", "prep_456", "1700000000", "HMAC-SHA256", "secret_key");
+    defer allocator.free(h);
+    try std.testing.expectEqualStrings("D013C2C7C7B96BDF9096D459F2527DFCCA073427B72713169F6A1F58B885D542", h);
+
+    const m = try bridgeJsPaySign(allocator, "wx123", "nonce123", "prep_456", "1700000000", "MD5", "secret_key");
+    defer allocator.free(m);
+    try std.testing.expectEqualStrings("27798197AF1D9AF19B7288EF35525735", m);
+}
+
+test "bridgeConfig 透传 sign_type（修复前恒为 MD5）" {
+    const allocator = std.testing.allocator;
+    var o = Order.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "key" });
+    var pre: PreOrder = .{ .prepay_id = "p1" };
+    defer pre.deinit();
+    const cfg = try o.bridgeConfig(allocator, .{
+        .total_fee = "100",
+        .create_ip = "127.0.0.1",
+        .body = "test",
+        .out_trade_no = "t-1",
+        .open_id = "ox",
+        .trade_type = "JSAPI",
+        .notify_url = "https://example.com/cb",
+        .sign_type = "HMAC-SHA256",
+    }, pre);
+    // BridgeConfig 各字段为独立分配的切片，逐一释放。
+    defer {
+        allocator.free(@constCast(cfg.timestamp));
+        allocator.free(@constCast(cfg.nonce_str));
+        allocator.free(@constCast(cfg.package));
+        allocator.free(@constCast(cfg.pay_sign));
+    }
+    try std.testing.expectEqualStrings("HMAC-SHA256", cfg.sign_type);
 }

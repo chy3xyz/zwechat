@@ -74,6 +74,9 @@ pub const Transfer = struct {
             .{ .key = "amount", .value = amount_str },
             .{ .key = "desc", .value = p.desc },
             .{ .key = "check_name", .value = p.check_name },
+            // 与上游 Go 版一致：re_user_name 必须在 FORCE_CHECK 时参与签名，
+            // 否则签名与实际发送字段不一致，微信返回「签名错误」。
+            .{ .key = "re_user_name", .value = p.re_user_name },
         };
 
         const biz = try std.fmt.allocPrint(allocator, "&key={s}", .{self.cfg.key});
@@ -169,4 +172,73 @@ test "toWallet 返回值字段指向内部缓冲区（UAF 回归）" {
     try std.testing.expectEqualStrings("SUCCESS", result.result_code);
     try std.testing.expectEqualStrings("pay-123", result.payment_no);
     try std.testing.expectEqualStrings("2026-01-01 00:00:00", result.payment_time);
+}
+
+// 捕获最近一次请求 payload 的 transport（与 pay/order 回归测试同款）。
+const CaptureTransport = struct {
+    payload: ?[]u8 = null,
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *CaptureTransport) void {
+        if (self.payload) |p| self.allocator.free(p);
+    }
+
+    fn dispatch(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        method: std.http.Method,
+        payload: []const u8,
+        content_type: ?[]const u8,
+    ) anyerror![]u8 {
+        _ = uri;
+        _ = method;
+        _ = content_type;
+        const self: *CaptureTransport = @ptrCast(@alignCast(ctx));
+        if (self.payload) |p| self.allocator.free(p);
+        self.payload = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, "<xml><return_code>SUCCESS</return_code><result_code>SUCCESS</result_code></xml>") catch return error.OutOfMemory;
+    }
+};
+
+test "toWallet FORCE_CHECK 时 re_user_name 参与签名（签名错误回归）" {
+    const allocator = std.testing.allocator;
+    var cap = CaptureTransport{ .allocator = allocator };
+    defer cap.deinit();
+
+    var t = Transfer.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "test_key" });
+    t.setTransport(CaptureTransport.dispatch, &cap);
+
+    var result = try t.toWallet(allocator, .{
+        .open_id = "ox",
+        .amount = 100,
+        .desc = "报销",
+        .partner_trade_no = "tn-1",
+        .check_name = "FORCE_CHECK",
+        .re_user_name = "张三",
+    });
+    defer result.deinit();
+
+    try std.testing.expect(cap.payload != null);
+
+    // 从实际发送的 XML 重算签名（含 re_user_name），必须与 <sign> 一致。
+    var doc = try util_xml.parse(allocator, cap.payload.?);
+    defer doc.deinit();
+    var params: std.ArrayList(util_param.Param) = .empty;
+    defer params.deinit(allocator);
+    for (doc.elements) |el| {
+        if (std.mem.eql(u8, el.key, "sign")) continue;
+        if (el.value.len == 0) continue;
+        try params.append(allocator, .{ .key = el.key, .value = el.value });
+    }
+    const biz = try std.fmt.allocPrint(allocator, "&key={s}", .{"test_key"});
+    defer allocator.free(biz);
+    const ordered = try util_param.orderParam(allocator, params.items, biz);
+    defer allocator.free(ordered);
+    const expected = try util_crypto.calculateSign(allocator, ordered, util_crypto.SignTypeMD5, "");
+    defer allocator.free(expected);
+    const given = doc.get("sign") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, expected, given);
+    // re_user_name 确实被发送。
+    try std.testing.expectEqualStrings("张三", doc.get("re_user_name").?);
 }

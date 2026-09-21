@@ -26,6 +26,9 @@ pub const SignResult = struct {
 /// `method`: HTTP 方法字符串（大写，如 "POST" / "GET"）。
 /// `canonical_url`: 请求 URI 相对路径及 query（如 "/v3/pay/transactions/jsapi"）。
 /// `body`: HTTP 请求体（GET 时传 ""）。
+///
+/// `cfg.private_key_pem` 为空时返回 `error.MissingPrivateKey`
+/// （修复前会静默生成伪签名，导致线上请求被微信拒收且难以排查）。
 pub fn buildAuthorizationHeader(
     allocator: std.mem.Allocator,
     cfg: Config,
@@ -33,6 +36,8 @@ pub fn buildAuthorizationHeader(
     canonical_url: []const u8,
     body: []const u8,
 ) !SignResult {
+    if (cfg.private_key_pem.len == 0) return error.MissingPrivateKey;
+
     const timestamp = time.getCurrTS();
     const nonce_str = try util.randomStr(allocator, 32);
     errdefer allocator.free(nonce_str);
@@ -46,19 +51,8 @@ pub fn buildAuthorizationHeader(
     defer allocator.free(message);
 
     // RSA-SHA256 签名（支持私钥 PEM）
-    var raw_sig: []u8 = undefined;
-    var is_heap = false;
-    defer if (is_heap) allocator.free(raw_sig);
-
-    if (cfg.private_key_pem.len > 0) {
-        raw_sig = try rsa.rsaSign(allocator, message, cfg.private_key_pem);
-        is_heap = true;
-    } else {
-        const dummy = try allocator.alloc(u8, 256);
-        @memset(dummy, 0xAA);
-        raw_sig = dummy;
-        is_heap = true;
-    }
+    const raw_sig = try rsa.rsaSign(allocator, message, cfg.private_key_pem);
+    defer allocator.free(raw_sig);
 
     const base64_sig = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(raw_sig.len));
     defer allocator.free(base64_sig);
@@ -77,7 +71,7 @@ pub fn buildAuthorizationHeader(
     };
 }
 
-test "buildAuthorizationHeader 输出符合 WECHATPAY2 结构" {
+test "buildAuthorizationHeader 缺私钥返回 MissingPrivateKey（不再静默伪签名）" {
     const allocator = std.testing.allocator;
     const cfg = Config{
         .app_id = "wx12345",
@@ -85,16 +79,12 @@ test "buildAuthorizationHeader 输出符合 WECHATPAY2 结构" {
         .serial_no = "1DDE557876238",
     };
 
-    var result = try buildAuthorizationHeader(
+    const r = buildAuthorizationHeader(
         allocator,
         cfg,
         "POST",
         "/v3/pay/transactions/jsapi",
         "{\"amount\":{\"total\":100}}",
     );
-    defer result.deinit(allocator);
-
-    try std.testing.expect(std.mem.indexOf(u8, result.authorization, "WECHATPAY2-SHA256-RSA2048") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.authorization, "mchid=\"1900000109\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.authorization, "serial_no=\"1DDE557876238\"") != null);
+    try std.testing.expectError(error.MissingPrivateKey, r);
 }

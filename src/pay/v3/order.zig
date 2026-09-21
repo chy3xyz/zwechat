@@ -52,12 +52,17 @@ pub const OrderV3 = struct {
         return .{ .cfg = cfg };
     }
 
-    /// 生成前端调起微信支付的支付参数 (JSAPI / 小程序)
+    /// 生成前端调起微信支付的支付参数 (JSAPI / 小程序)。
+    ///
+    /// `cfg.private_key_pem` 为空时返回 `error.MissingPrivateKey`
+    /// （修复前会静默生成伪签名，导致调起支付失败且难以排查）。
     pub fn getJsPayParams(
         self: OrderV3,
         allocator: std.mem.Allocator,
         prepay_id: []const u8,
     ) !JsapiPayParams {
+        if (self.cfg.private_key_pem.len == 0) return error.MissingPrivateKey;
+
         const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{time.getCurrTS()});
         errdefer allocator.free(timestamp);
 
@@ -75,19 +80,8 @@ pub const OrderV3 = struct {
         );
         defer allocator.free(message);
 
-        var raw_sig: []u8 = undefined;
-        var is_heap = false;
-        defer if (is_heap) allocator.free(raw_sig);
-
-        if (self.cfg.private_key_pem.len > 0) {
-            raw_sig = try rsa.rsaSign(allocator, message, self.cfg.private_key_pem);
-            is_heap = true;
-        } else {
-            const dummy = try allocator.alloc(u8, 256);
-            @memset(dummy, 0xBB);
-            raw_sig = dummy;
-            is_heap = true;
-        }
+        const raw_sig = try rsa.rsaSign(allocator, message, self.cfg.private_key_pem);
+        defer allocator.free(raw_sig);
 
         const base64_sig = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(raw_sig.len));
         _ = std.base64.standard.Encoder.encode(base64_sig, raw_sig);
@@ -103,18 +97,13 @@ pub const OrderV3 = struct {
     }
 };
 
-test "OrderV3.getJsPayParams 输出符合 RSA 签名结构" {
+test "OrderV3.getJsPayParams 缺私钥返回 MissingPrivateKey（不再静默伪签名）" {
     const allocator = std.testing.allocator;
     const cfg = Config{
         .app_id = "wx_v3_appid",
         .mch_id = "1900000109",
     };
     const order_v3 = OrderV3.init(cfg);
-    var params = try order_v3.getJsPayParams(allocator, "wx201411101639507cbf6ffd8b0779950800");
-    defer params.deinit(allocator);
-
-    try std.testing.expectEqualStrings("wx_v3_appid", params.app_id);
-    try std.testing.expectEqualStrings("RSA", params.sign_type);
-    try std.testing.expect(params.package.len > 10);
-    try std.testing.expect(params.pay_sign.len > 0);
+    const r = order_v3.getJsPayParams(allocator, "wx201411101639507cbf6ffd8b0779950800");
+    try std.testing.expectError(error.MissingPrivateKey, r);
 }
