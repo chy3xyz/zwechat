@@ -5,6 +5,39 @@ All notable changes to `zwechat` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] — 2026-09-21
+
+### Added
+
+- **企业微信 API 覆盖补齐**：`work/addresslist` 33/33（部门/成员/标签 CRUD、userid↔openid 互转、batch_invite、互联企业）；`work/externalcontact` 78/79（contact_way 全套、groupchat、离职/在职继承、企业群发、朋友圈、客户规则、标签、获客助手）；`work/kf` 31 个服务端 API（syncMsg 游标拉取、升级服务、知识库、统计）与富媒体消息收发强类型（发送 9 类 / 接收 9 类消息 + 4 类事件），并提供 `OriginData` 原始 JSON 回捕（`getOriginData`/`originAs`/`originPayloadAs`，基于 `std.json` 的 `jsonParse` 钩子 + Value 树）。
+- **公众号补齐**：客服消息全类型（text/image/voice/video/music/news/mpnews/wxcard/菜单/小程序）+ 转客服被动回复 + typing 状态；用户标签全套 / 黑名单 / `batchGetUserInfo` / `listAllUserOpenIDs` / `getAllBlackList` 分页封装；`datacube` 21/21；`broadcast` 18 个方法（含全员群发 `sendXxxToAll` 六组与 `previewToUser`）；`material` AddVideo/AddMaterial；`customerservice` 账号管理 7 个。
+- **小程序补齐**：推送事件解析 **15/15 全覆盖**（交易管理、内容安全、物流、短视频、虚拟支付各类，JSON + XML 双路径，未知事件回退 raw）；`mediaCheckAsync`、`getPaidUnionID`、`queryScheme`、`uniformSend`。
+- **开放平台补齐**：首次授权链路（`api_query_auth` 换 token 三元组并回写双缓存、`pre_auth_code`、`api_get_authorizer_info`、扫码授权链接 `getComponentLoginPage`/`getBindComponentURL(V2)`）；`authorizer_access_token` 获取与刷新（`api_authorizer_token`）；FastRegisterWeapp（注册小程序 + 状态查询）；代运营 7 接口（账号信息/昵称/签名/头像/搜索状态）。
+- **微信支付 v3 退款**：`pay/v3/refund.zig`（申请退款 / 查询退款 / 退款通知解密；Go 参考无 v3 实现，字段以官方文档为准）。
+- **`util_http.getFollowRedirect`**：GET 手动 302 跟随（≤2 跳，仅 http/https，防开放重定向），并接入媒体下载（`officialaccount/material.getMedia`、`work/material.getTempFile`）。
+- **`util/sync.zig`**：统一 `SpinMutex` 入口（原 cache/credential 各处内联副本收敛）。
+
+### Fixed
+
+- **懒分析陷阱：40 个方法首次调用即编译失败**（`analysis`/`operation`/`minidrama`/`express`/`order`/`subscribe` 私有泛型 helper 的 `comptime T` 声明位与调用点错位）——统一为「类型参数在末位」，并为每个模块补真实 mock-transport 调用测试。
+- **响应解析契约（std.json 严格模式）**：全仓 41 个解析站点统一 `.ignore_unknown_fields = true`；字段名逐字对齐微信返回（`vaild`、`exteranalopenid` 等官方笔误，camelCase `phoneNumber`，`w`/`h`，`chatid`）。
+- **miniprogram**：`auth`（vaild/phoneNumber/watermark、checkEncryptedData 请求体改 JSON）、`ocr`（`type`、img_size `w/h`、img_url 转义、`fetch` 泛型参数序）、`tcb`（数据库 5 接口非法 JSON：query 未转义）、`virtualpayment`（`env` 序列化为数字 0/1）、`security`/`content`/`qrcode`/`message`（JSON 转义与 errcode 检查）、`riskcontrol`（双收 `unoin_id` 官方笔误 + `union_id` 兜底）。
+- **work**：`appchat`（`chat_info` 包装层 + `chatid`）、`material`（`created_at` 为字符串；删除不存在的 `getMediaList` 端点）、`msgaudit`（`getRoomInfo`/`getAgreeInfo` 重写为真实端点）、`invoice`/`oauth`/`message`/`server` 契约与转义修复、手写 JSON 编码器补控制字符 `\u00XX` 转义。
+- **officialaccount**：`user` 的 errcode 漏检与 `OpenidList` 嵌套结构、`customerservice` errcode 漏检、`server` 验签与安全模式、`js` JSSDK 签名、`ocr` 端点、`draft`/`freepublish` URL。
+- **openplatform**：`account` 四方法缺少 `access_token` query 且误用 component token（改为 authorizer token）；authorizer 刷新链路的借用切片 UAF 与 OOM 路径泄漏。
+- **pay**：v3 签名漏字段与伪签名校验、`decryptRefund` 密钥大写 hex、`aesECBDecrypt` 缩短切片。
+- **并发安全**：`cache/memcache`、`cache/redis` 单连接加锁串行化往返（此前并发即协议损坏）；`credential` 四个获取器改 singleflight（锁只护缓存读写，HTTP 回源移出锁外）；openplatform token 链路加锁（防 refresh_token 轮换丢失）；`middleware` 32 字节 AES key 校验。
+
+### Changed
+
+- **公开 API 变更**：`miniprogram/content.checkText` 增加 `openid`/`scene` 必填参数；`officialaccount/customerservice.listAccounts` 返回类型化 `Parsed(KfListResponse)`；`officialaccount/user.OpenidList.openids` → `.data.openid`；`openplatform/account` 四方法改为接收 `authorizer_access_token` 并以 `?access_token=` 注入；`middleware.handleServerMessage` 新增 `expected_app_id` 参数；删除 `work/material.getMediaList`（端点不存在）；`work/msgaudit.getRoomInfo`/`getAgreeInfo` 签名与响应结构重写。
+- **弃用标注**（不删方法）：`MiniProgram.getMessage`/`getContent`/`getBusiness.getPhoneNumber` 在顶层文档标注弃用与推荐入口。
+- **文档**：`doc/api_guide.md` 235 → 620 行（新增开放平台授权全链路时序与缓存凭据配置章节，补齐 work/miniprogram/officialaccount 高频场景与各章「常见坑」）。
+
+### Tests
+
+- 内联单元测试 **449 → 827**（+378），零内存泄漏；每个新增公开方法均有 mock-transport 真实调用测试。
+
 ## [0.4.3] — 2026-08-13
 
 ### Fixed
@@ -277,7 +310,8 @@ N/A。
 - **0.x**：初始开发版本，API 可能不兼容。
 - **1.0**：计划完成 RSA / PKCS#12 完整实现、work.jsapi 完整 wire 后发布。
 
-[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/chy3xyz/zwechat/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.4
 [0.4.3]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.3
 [0.4.2]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.2
 [0.4.1]: https://github.com/chy3xyz/zwechat/releases/tag/v0.4.1
