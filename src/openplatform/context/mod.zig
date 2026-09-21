@@ -19,8 +19,8 @@ const Config = @import("../config.zig").Config;
 /// - 持有不可变 `Config`（调用方持有原 slice 的所有权）。
 /// - `access_token` 字段是"component_access_token"，用于开放平台内部接口
 ///   （`/cgi-bin/component/*`），与"authorizer_access_token"（被授权方的 token）
-///   不是一回事。后者由 `openplatform/miniprogram` 或 `openplatform/officialaccount`
-///   模块单独管理。
+///   不是一回事。后者由 `getAuthrAccessToken` / `refreshAuthrAccessToken`
+///   按 `authorizer_appid` 单独管理。
 /// - `setAccessToken` / `getAccessToken` 是最小可用的存取接口，调用方负责
 ///   在拉取新 token 后调用 `setAccessToken` 回填。
 pub const Context = struct {
@@ -28,6 +28,20 @@ pub const Context = struct {
     config: Config,
     /// 当前的 component_access_token（`null` 表示尚未获取）。
     access_token: ?[]const u8 = null,
+
+    /// 可选的可注入 transport（测试用，注入 MockTransport 拦截 HTTP；
+    /// 与 `officialaccount/menu` 等模块的惯例一致，生产环境保持 `null`）。
+    transport: ?@import("../../util/http.zig").HttpClient.Transport = null,
+    /// `transport` 被调用时透传的不透明上下文。
+    transport_ctx: ?*anyopaque = null,
+
+    /// token 获取互斥锁：串行化 component / authorizer token 的「缓存 miss →
+    /// 回源 → 回写」链路（锁内双检，持锁回源）。
+    ///
+    /// **刻意持锁跨 HTTP**：authorizer 刷新会轮换 `refresh_token`（新值回存缓存），
+    /// 并发刷新互相覆盖会永久丢失凭据；单实例回源串行化是刻意的取舍。
+    /// 自旋锁不适合长临界区，但 token 回源频率极低（小时级），可接受。
+    token_mutex: @import("../../util/sync.zig").SpinMutex = .{},
 
     /// 写入新的 component_access_token。
     ///
@@ -56,7 +70,136 @@ pub const Context = struct {
     ) ![]u8 {
         return @import("access_token.zig").getComponentAccessToken(self, allocator, verify_ticket);
     }
+
+    /// 获取被授权方（公众号 / 小程序）的 `authorizer_access_token`。
+    ///
+    /// 对照 Go 端 `GetAuthrAccessTokenContext`：
+    /// 1. 以 `authorizer_access_token_{appid}` 为 key 查缓存，命中直接返回；
+    /// 2. 未命中时从缓存读 `authorizer_refresh_token_{appid}`（首次授权由
+    ///    `QueryAuthCode` 写入），再用 `refreshAuthrAccessToken` 刷新。
+    ///
+    /// 返回的 token 由调用方负责 `allocator.free`。
+    pub fn getAuthrAccessToken(
+        self: *Context,
+        allocator: std.mem.Allocator,
+        authorizer_appid: []const u8,
+    ) @import("access_token.zig").Error![]u8 {
+        return @import("access_token.zig").getAuthrAccessToken(self, allocator, authorizer_appid);
+    }
+
+    /// 用 `authorizer_refresh_token` 刷新被授权方的接口调用凭据。
+    ///
+    /// 对照 Go 端 `RefreshAuthrTokenContext`：
+    /// - URL：`POST /cgi-bin/component/api_authorizer_token?component_access_token={s}`
+    /// - 新 access_token 按 `authorizer_access_token_{appid}` 缓存（TTL 钳制），
+    ///   新 refresh_token 按 `authorizer_refresh_token_{appid}` 缓存 10 年并回存。
+    ///
+    /// `verify_ticket` 仅在 component token 缓存未命中时用于回源换取；
+    /// 缓存命中时该参数不参与网络请求。
+    ///
+    /// 返回结构体内字段由 `AuthrAccessToken.deinit` 释放。
+    pub fn refreshAuthrAccessToken(
+        self: *Context,
+        allocator: std.mem.Allocator,
+        verify_ticket: []const u8,
+        authorizer_appid: []const u8,
+        authorizer_refresh_token: []const u8,
+    ) @import("access_token.zig").Error!@import("access_token.zig").AuthrAccessToken {
+        return @import("access_token.zig").refreshAuthrAccessToken(
+            self,
+            allocator,
+            verify_ticket,
+            authorizer_appid,
+            authorizer_refresh_token,
+        );
+    }
+
+    /// 获取预授权码 `pre_auth_code`（Go `GetPreCode`）。
+    ///
+    /// component_access_token 仅读缓存；未命中返回 `error.VerifyTicketRequired`，
+    /// 调用方应先带 `verify_ticket` 调 `getComponentAccessToken` 回源。
+    /// 返回的字符串由调用方负责 `allocator.free`。
+    pub fn getPreCode(
+        self: *Context,
+        allocator: std.mem.Allocator,
+    ) @import("auth.zig").Error![]u8 {
+        return @import("auth.zig").getPreCode(self, allocator);
+    }
+
+    /// 用授权码换取授权方的接口调用凭据和授权信息（Go `QueryAuthCode`）。
+    ///
+    /// 成功后按 `authorizer_appid` 回写 `authorizer_access_token_{appid}` /
+    /// `authorizer_refresh_token_{appid}` 两个缓存 key（锁内串行），
+    /// 后续可直接用 `getAuthrAccessToken` 消费。返回结构体由 `deinit` 释放。
+    pub fn queryAuthCode(
+        self: *Context,
+        allocator: std.mem.Allocator,
+        authorization_code: []const u8,
+    ) @import("auth.zig").Error!@import("auth.zig").AuthBaseInfo {
+        return @import("auth.zig").queryAuthCode(self, allocator, authorization_code);
+    }
+
+    /// 获取授权方的帐号基本信息（Go `GetAuthrInfo`）。
+    ///
+    /// 返回 `std.json.Parsed(AuthrInfoResponse)`：`.value` 内全部切片借用其
+    /// 所有权域，调用方读完之后 `deinit` 即可。
+    pub fn getAuthrInfo(
+        self: *Context,
+        allocator: std.mem.Allocator,
+        authorizer_appid: []const u8,
+    ) @import("auth.zig").Error!std.json.Parsed(@import("auth.zig").AuthrInfoResponse) {
+        return @import("auth.zig").getAuthrInfo(self, allocator, authorizer_appid);
+    }
+
+    /// 构造第三方平台扫码授权链接（Go `GetComponentLoginPage`）。
+    ///
+    /// 内部先取 `pre_auth_code`（一次 HTTP），再纯本地拼链接；
+    /// `redirect_uri` 按 URI query 规则转义。返回的链接由调用方 `allocator.free`。
+    pub fn getComponentLoginPage(
+        self: *Context,
+        allocator: std.mem.Allocator,
+        redirect_uri: []const u8,
+        auth_type: i64,
+        biz_app_id: []const u8,
+    ) @import("auth.zig").Error![]u8 {
+        return @import("auth.zig").getComponentLoginPage(self, allocator, redirect_uri, auth_type, biz_app_id);
+    }
+
+    /// 构造链接跳转授权链接（移动端，Go `GetBindComponentURL`）。
+    pub fn getBindComponentURL(
+        self: *Context,
+        allocator: std.mem.Allocator,
+        redirect_uri: []const u8,
+        auth_type: i64,
+        biz_app_id: []const u8,
+    ) @import("auth.zig").Error![]u8 {
+        return @import("auth.zig").getBindComponentURL(self, allocator, redirect_uri, auth_type, biz_app_id);
+    }
+
+    /// 构造新版链接跳转授权链接（移动端，Go `GetBindComponentURLV2`）。
+    pub fn getBindComponentURLV2(
+        self: *Context,
+        allocator: std.mem.Allocator,
+        redirect_uri: []const u8,
+        auth_type: i64,
+        biz_app_id: []const u8,
+    ) @import("auth.zig").Error![]u8 {
+        return @import("auth.zig").getBindComponentURLV2(self, allocator, redirect_uri, auth_type, biz_app_id);
+    }
 };
+
+// 编译门：确保 auth.zig（首次授权链路）被分析，其 inline test 被发现。
+test "auth 模块导出（编译门）" {
+    const auth = @import("auth.zig");
+    try std.testing.expect(@hasDecl(auth, "getPreCode"));
+    try std.testing.expect(@hasDecl(auth, "queryAuthCode"));
+    try std.testing.expect(@hasDecl(auth, "getAuthrInfo"));
+    try std.testing.expect(@hasDecl(auth, "getComponentLoginPage"));
+    try std.testing.expect(@hasDecl(auth, "getBindComponentURL"));
+    try std.testing.expect(@hasDecl(auth, "getBindComponentURLV2"));
+    try std.testing.expect(@hasDecl(auth, "AuthBaseInfo"));
+    try std.testing.expect(@hasDecl(auth, "AuthorizerInfo"));
+}
 
 test "Context 默认值" {
     const ctx = Context{ .config = .{} };
