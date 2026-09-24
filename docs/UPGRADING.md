@@ -10,8 +10,8 @@
 接口的当前形状见 [`api-reference.md`](api-reference.md)、[`../doc/api_guide.md`](../doc/api_guide.md)
 与源码（本文每条都给出 `src/...:行号`，源码是唯一权威）。
 
-> **版本锚点**：本文的"当前"= **v0.4.4**（`build.zig.zon` 的 `.version = "0.4.4"`，
-> 发版提交 `4640e65`）。所有 `after` 代码块都已逐个 `grep` 比对源码签名，
+> **版本锚点**：本文的"当前"= **v0.4.5**（`build.zig.zon` 的 `.version = "0.4.5"`，
+> 对应 `CHANGELOG.md` 的 `[0.4.5] — 2026-09-21`）。所有 `after` 代码块都已逐个 `grep` 比对源码签名，
 > 并标出 `src/...:行号`。
 >
 > ⚠️ **行号会随并行改动漂移**：撰写期间仓库里正有若干重构落地
@@ -27,6 +27,7 @@
 
 | 升级路径 | 是否必须改调用方代码 | 说明 |
 |---|---|---|
+| v0.4.5 → **下一版**（未发布） | 通常否；**仅 v2 mTLS 用户是** | 只动构建与依赖：mTLS 改 `-Dmtls` 可选（默认关闭）。不用 v2 客户端证书则一行代码都不改，见 §1.0 |
 | v0.4.3 → **v0.4.4** | **是**（约 6~8 处调用点） | 见 §1.1，12 条变更中有 9 条会编译失败 |
 | v0.3.0 → v0.4.4 | 是（在上一行基础上叠加） | 另需处理 v0.4.0 之后新增的 `Parsed(T)` 迁移，见 §1.4 |
 | v0.4.2 → v0.4.3 | 否 | v0.4.3 只修了库内部的编译错误 |
@@ -39,6 +40,131 @@ Zig 是编译期检查语言，**签名变更全部会变成编译错误**，编
 ---
 
 ## 1. 版本升级速查
+
+### 1.0 v0.4.5 → 下一版（未发布）：默认零依赖，mTLS 改为 `-Dmtls` 可选
+
+这一版**只动构建与依赖**，不改任何业务 API 签名。影响面只有一类人：
+**用微信支付 v2 + 客户端证书（mTLS）的下游**。其余项目大概率一行代码都不用改。
+
+#### ① 构建依赖变化：不再需要 OpenSSL / 不再取 zhttp
+
+- **变更**：移除第三方 Zig 依赖 `httpz`（zhttp）。此前它只为微信支付 **v2** 的 mTLS 服务，
+  却把 OpenSSL + libc 链接到**所有**构建目标（lib / exe / test / bench / examples）。
+  现在 `build.zig.zon` 的 `.dependencies` 为**空**。
+- **后果**：
+  - `zig build` **不再需要** `libssl-dev`（Linux）/ `openssl@3`（macOS Homebrew）/ `pkg-config`；
+  - 构建期**不再从 GitHub 拉取 zhttp**（离线 / 受限网络、CI 依赖缓存都会更简单）；
+  - 默认产物**不链接 OpenSSL、不链接 libc**。
+
+```bash
+# ❌ 之前（Linux CI 需装 C 依赖）
+sudo apt-get install -y libssl-dev pkg-config
+zig build
+
+# ✅ 之后（默认零依赖）
+zig build
+```
+
+#### ② 行为变化（破坏性）：v2 mTLS 需显式 `-Dmtls=true`
+
+- **变更**：mTLS 改为仓库内自建（新增 `src/util/mtls.zig`，运行时用 `std.DynLib`
+  加载 `libssl`/`libcrypto`），由构建选项 **`-Dmtls`（默认 `false`）** 控制。
+- **不迁移的后果**：如果你的代码会用 `pay.Config.root_ca`（商户 P12 路径）
+  调 **v2** 的退款 / 转账 / 红包，那么：
+  - **编译仍然通过**（这是静默的破坏性变更，不报错）；
+  - 首次调用 `util.http.postXMLWithTLS`（`src/util/http.zig`）时返回 **`error.MtlsNotEnabled`**。
+  未配 `root_ca` 的路径不受影响（仍走普通 HTTPS）。
+
+```zig
+// v2：root_ca 非空时会走 postXMLWithTLS
+const cfg = zwechat.pay.Config{
+    .app_id = "wx1234567890abcdef",
+    .mch_id = "1900000109",
+    .key = "...",                                   // 商户支付密钥（V2）
+    .root_ca = "/etc/certs/apiclient_cert.p12",    // ← 非空即需要 -Dmtls=true
+};
+// 默认构建下：try refund.refund(...)  →  error.MtlsNotEnabled
+```
+
+- **迁移做法**（只加一个构建开关，**不用改代码**）：
+
+```bash
+# 直接在 zwechat checkout 里构建
+zig build -Dmtls=true
+```
+
+```zig
+// submodule / path 型消费者：在你自己的 build.zig 里把选项透传给依赖
+const dep = b.dependency("zwechat", .{
+    .target = target,
+    .optimize = optimize,
+    .mtls = true,           // 透传 -Dmtls
+});
+exe.root_module.addImport("zwechat", dep.module("zwechat"));
+```
+
+> **注意（submodule 型消费者，如 `heysen_saas` 的 `api/zwechat`）**：`-Dmtls` 是
+> **消费方构建图**的选项——只在 submodule 内部执行 `zig build` 不改变你产物的链接结果。
+> 务必在你自己的 `build.zig`（或 CI 命令）里统一带上，避免"本地能跑、CI 里
+> `error.MtlsNotEnabled`"。开启后**运行**环境需能加载 `libssl` / `libcrypto` 动态库；
+> 缺失时错误是 `error.OpenSslNotAvailable`（构建期仍**不需要**头文件）。
+
+#### ③ 推荐迁移：v2 退款 / 转账 → v3（不需要客户端证书）
+
+如果你的动机是"不想引入 mTLS"，可直接改用 **v3**——它用 RSA 签名 + 普通 HTTPS，
+**不需要客户端证书，也不需要 `-Dmtls`**：
+
+| 你现在用的（v2） | 建议迁移到（v3） | 位置 |
+|---|---|---|
+| `pay/refund` 退款 | `v3.RefundV3`（`refund(allocator, RefundParams)`） | `src/pay/v3/refund.zig` |
+| `pay/transfer` 企业付款到零钱 | `v3.TransferV3`（`transfer(allocator, TransferParams)`） | `src/pay/v3/transfer.zig` |
+| `pay/redpacket` 现金红包 | **暂无 v3 等价物** | — |
+
+```zig
+const v3 = zwechat.pay.v3;
+
+// v3 需要商户私钥 + 商户证书序列号；通知解密另需 32 字节 api_v3_key
+const v3_cfg = v3.Config{
+    .app_id = "wx12345",
+    .mch_id = "1900000109",
+    .api_v3_key = "12345678901234567890123456789012",
+    .serial_no = "1DDE557876238...",
+    .private_key_pem = "-----BEGIN PRIVATE KEY-----\n...",
+    .notify_url = "https://merchant.example.com/wxpay/notify",
+};
+
+var refund = v3.RefundV3.init(v3_cfg);
+var res = try refund.refund(allocator, .{
+    .transaction_id = "4200000119202504081234567890",
+    .out_refund_no = "R20260722001",
+    .reason = "商品已售完",
+    .amount = .{ .refund = 100, .total = 100 },
+});
+defer res.deinit();
+```
+
+- **v3 需要的配置**：商户私钥（`private_key_pem`）+ 商户 API 证书序列号（`serial_no`），
+  通知解密另需 `api_v3_key`；转账要传加密 `user_name` 时还需 `wechatpay_serial`。
+  完整说明见 [`../doc/api_guide.md`](../doc/api_guide.md) 支付章节的
+  「v2 mTLS 与 v3 的选择」。
+- **v2 红包**：目前没有 v3 等价物，是**唯一**仍刚需 `-Dmtls=true` 的场景。
+
+#### ④ 如何验证自己不受影响（一行命令）
+
+默认构建的产物里**不该**出现 `libssl` / `libcrypto`：
+
+```bash
+# macOS
+otool -L zig-out/bin/zwechat | grep -i ssl     # 期望：无输出
+# Linux
+ldd zig-out/bin/zwechat | grep -i ssl          # 期望：无输出
+```
+
+> 若你有意开了 `-Dmtls=true` 且做了静态链接，这里应能看到 libssl 依赖；
+> 但自建桥是**运行时 `dlopen`**，通常构建产物仍不静态链接它——以你实际产物为准。
+> CI 里也有同名的"产物未链接 OpenSSL"回归检查。
+
+---
 
 ### 1.1 v0.4.3 → v0.4.4：破坏性 / 必须改的变更
 
@@ -438,7 +564,7 @@ bump 指针 = 在子模块里 checkout 新 tag，然后在父仓库提交一次�
 cd api/zwechat
 git fetch --tags
 git checkout v0.4.4
-git submodule update --init --recursive   # 拉齐 zwechat 自己的依赖声明
+git submodule update --init --recursive   # zwechat 现零 Zig 依赖；此步仅为兼容旧 checkout / 未来依赖
 
 # 2) 回到父仓库，查看指针变化
 cd ../..
@@ -475,8 +601,9 @@ git commit -m "bump zwechat to v0.4.4"
 zig fetch --save=zwechat "git+https://github.com/<your-org>/zwechat?ref=v0.4.4"
 ```
 
-参考：`zwechat` 自己就是这样引 httpz 的（`build.zig.zon` 的 `.dependencies.httpz`，
-`git+https://github.com/chy3xyz/zhttp?ref=v0.6.1#60a0212...`）。
+> **注意**：从下一版起 `zwechat` 自身**没有任何三方依赖**（`build.zig.zon` 的
+> `.dependencies` 为空），因此没有可照抄的"引 git 依赖"例子——上面的 URL / `zig fetch`
+> 是通用写法，换成你要引的任意包即可。
 
 ### 2.3 依赖 path 的消费者（同 workspace / monorepo）
 
@@ -495,8 +622,9 @@ zig fetch --save=zwechat "git+https://github.com/<your-org>/zwechat?ref=v0.4.4"
 # 1) 先格式化门禁：CI 里 zig build fmt 是绿灯前提（等价 zig fmt --check）
 zig build fmt
 
-# 2) 全量单元测试（827 个内联测试，零内存泄漏）
+# 2) 全量单元测试（1004 个内联测试，零内存泄漏）
 #    在 zwechat 自己的 checkout 里跑；它同时是"编译门"，会实例化绝大多数公开 API
+#    若你用 v2 mTLS，记得带上 -Dmtls=true，否则 mTLS 用例覆盖不到
 cd path/to/zwechat && zig build test
 
 # 3) 你自己的项目构建（签名变更会在这里全部暴露）
@@ -534,34 +662,34 @@ zig build test
 
 ### 3.2 用 API 面门禁自查你的用法
 
-本仓库正在引入一个 API 面检查脚本（外部评审建议，用于把"公开签名快照"固化下来），
-预期路径：
+本仓库在 **v0.4.5** 引入了 API 面门禁（外部评审建议，把"公开签名快照"固化下来）：
 
 ```
-tools/api_surface_check.sh
+tools/api_surface_check.sh        # 检查脚本（对外接口稳定）
+tools/api_surface.zig             # 解析器（基于 std.zig.Ast；tools/api_surface.awk 保留作交叉校验参考）
+api/surface.txt                   # 公开 API 面快照基线
 ```
 
-用法预期：对当前 checkout 生成/比对公开 API 面，**你可以在升级前先跑一次、
-在升级后再跑一次，diff 出"我要动的行"**。
+用法：对当前 checkout 生成 / 比对公开 API 面，**你可以在升级前先跑一次、
+在升级后再跑一次，diff 出"我要动的行"**：
 
-> **⚠️ 在 v0.4.4 的 tag 上它还不存在**：`ls tools/` 目前只有
-> `tools/_probe.zig`（一个用 comptime 反射枚举公开 API 面的临时探针），
-> **没有** `api_surface_check.sh`。若你的 checkout 里也没有，说明该门禁尚未合入，
-> 请用下面的兜底自查：
+```bash
+bash tools/api_surface_check.sh
+```
+
+> **规则**（也是本仓库自己的 CI 门禁，见 `.github/workflows/ci.yml` 的
+> "Check Public API Surface" 步骤）：**删除 / 改名公开符号必须在 `CHANGELOG.md`
+> 的最新段落或 `[Unreleased]` 里写明**（`容器.旧名` 或 `容器.字段.子字段`，
+> **只写裸叶名不认**），否则 CI 失败；`--update` 用于刷新 `api/surface.txt` 基线。
+> 每个 `pub fn` 除了 `pub fn` 行还会生成一行 `sig`（参数类型 + 返回类型），
+> **改参数 / 返回类型同样会触发门禁**。已知漏报：类型文本里的字符串字面量会归成
+> `""`（改 `@import` 路径不触发）、内联匿名类型的类型文本截到 `{`。
 >
-> ```bash
-> # 你实际调用到的符号，逐个 grep 是否存在（示例）
-> grep -rn "pub fn checkText"                src/miniprogram/content/mod.zig
-> grep -rn "pub fn listAccounts"             src/officialaccount/customerservice/mod.zig
-> grep -rn "pub fn handleServerMessage"      src/middleware/wechat_handler.zig
-> grep -rn "pub fn getMediaList"             src/work/material/mod.zig   # 期望：无匹配
-> ```
->
-> 更省事的办法：直接 `zig build`，让编译器把缺失/变形的符号一次性列出来。
+> 更省事的兜底：直接 `zig build`，让编译器把缺失 / 变形的符号一次性列出来。
 
 ### 3.3 测试与格式化门禁
 
-- **`zig build test`**：在 zwechat checkout 里是"827 个内联测试 + 零泄漏"的完整回归；
+- **`zig build test`**：在 zwechat checkout 里是"1004 个内联测试 + 零泄漏"的完整回归；
   在**你的项目**里跑则只覆盖你的调用点。CI 同时跑两者才有意义。
   （`zig build` 里的 `src/test_runner.zig` 是编译门，强制 `@import` 每个子文件——
   否则 Zig 的 dead-strip 会静默跳过带 inline test 的文件，报出 "All 1 tests passed" 的假绿。）
@@ -575,6 +703,7 @@ tools/api_surface_check.sh
 
 - [ ] `git diff --submodule=log`（或 `zig fetch --save` 后的 `git diff build.zig.zon`）确认落到目标 tag
 - [ ] 读新版本 CHANGELOG 的 `### Changed`（"公开 API 变更"）
+- [ ] 升级到 v0.4.5 之后：**若你用微信支付 v2 的 `root_ca`（mTLS），确认构建带上 `-Dmtls=true`**（见 §1.0），并处理新增的 `error.MtlsNotEnabled` / `error.OpenSslNotAvailable`
 - [ ] 逐个对照 §1.1 的 9 条，特别检查 §1.2 那几条**不会编译失败**的静默变更
 - [ ] `zig build` → 修完所有编译错误
 - [ ] `zig build test`（自己 + 若 vendored 则连同 zwechat）

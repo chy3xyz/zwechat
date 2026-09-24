@@ -5,6 +5,54 @@ All notable changes to `zwechat` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **移除第三方 Zig 依赖 `httpz`（zhttp）**：该依赖只为微信支付 **v2** 的 mTLS（客户端证书）服务，却把 OpenSSL + libc 链接到**所有**构建目标（lib / exe / test / bench / examples），使每个消费者都被迫背 C 依赖；现改为仓库内自建、按构建开关启用。
+- **mTLS 改为 `-Dmtls` 可选，默认关闭（默认 `false`）——破坏性变更**：默认构建**零 Zig 包依赖、零 C 依赖**（不链 OpenSSL、不链 libc、构建期不联网取依赖）。默认（`-Dmtls=false`）下调用 `util.http.postXMLWithTLS` 返回 `error.MtlsNotEnabled`。**使用微信支付 v2 且配置了 `root_ca`（mTLS）的下游必须显式加 `-Dmtls=true`**（`zig build -Dmtls=true`），迁移步骤见 `docs/UPGRADING.md`。
+
+### Added
+
+- **`src/util/mtls.zig`**：仓库内自建的 OpenSSL 桥——运行时用 `std.DynLib` 加载 `libssl`/`libcrypto`，手写 extern 函数指针，**不需要头文件 / `translateC` / `linkSystemLibrary`**；`-Dmtls=true` 时 `postXMLWithTLS` 走该实现，用商户 PKCS#12 证书完成 mTLS POST。
+- **CI**：新增"默认产物未链接 OpenSSL"的回归检查（防止 C 依赖悄然回归），并新增一个 `-Dmtls=true` 的编译 job。
+- **响应体硬上限**：`util/http.zig` 的 `HttpClient.max_response_bytes`（默认 `default_max_response_bytes` = 16 MiB，`0` = 不限量），覆盖 `get`/`post`/`postJSON`/`postXML`/`postMultipart` 与 mock transport 路径；先按 `Content-Length` 预判（声明超限则一个字都不读），再边读边判，超限 `error.ResponseTooLarge`。
+- **带头请求的传输入口**：`HeaderTransport` / `HttpResponse` / `HttpClient.requestWithHeaders` / `sendWithHeaders` / `postWithHeaders` / `setHeaderTransport`——`pay/v3/refund.zig` 与 `pay/v3/transfer.zig` 改用它（签名仍走 `pay/v3/signer.zig`），全仓对 `std.http.Client` 的直接构造收敛到 `util/http.zig` 一处。
+- **fuzz 测试（5 个）**：`util/xml.zig`、`util/asn1.zig`、`util/pkcs12.zig`、`util/json.zig`、`util/uri.zig` 各一个 `std.testing.fuzz` 用例（`zig build test --fuzz=<N>`；普通测试下只做零输入冒烟）。**首次引入即发现 3 个真实缺陷，见 Fixed。**
+- **`util/sync.zig` 的 `defaultIo`**、**`cache/memory.zig` 的 `Memory.io` 字段与 `createWithIo()`**、**`util/mtls.zig` 的 `max_head_bytes`**（64 KiB）。
+
+- **`Options.connect_timeout_ms`（redis / memcache，默认 `0` = 不超时）**：补上"建连超时"这一缺口——`recv_timeout_ms` 只约束单次读取，对端黑洞时 TCP 握手仍可能阻塞到内核上限；配置后超时会放弃本次操作且**不创建/不池化连接**。
+- **Io 注入补全（生产路径不再取全局单例）**：`officialaccount/message.Reply`、`officialaccount/js.Js`、`pay/{order,transfer,refund,redpacket}`、`work/jsapi.Js` 新增可注入的 `io` 字段；`pay/v3/signer.buildAuthorizationHeaderWithIo` 供签名链路注入 io。至此**生产代码里已无 `getCurrTS()` / `randomStr()` / `std.Options.debug_io` 的直接调用**（残余仅在测试块内）。
+
+### Fixed
+
+- **`util/uri.queryEscape` 堆越界写（fuzz 发现，内存安全）**：容量按 1 倍预留却用 `appendAssumeCapacity` 写入最多 3 倍字节——Debug/ReleaseSafe 下 panic、ReleaseFast 下堆溢出；受影响面包括 OCR 的 `img_url`、网页授权 / 开放平台 / work 的 `redirect_uri`、datacube 查询串。已改为按 `3 *| s.len` 预留并换用自动扩容的 `append`，并补"最坏情况输入"回归测试。
+- **cache TTL 取时改用 `Clock.boot`（计入系统休眠）**：`cache/memory.zig` 原先用 `Clock.awake`，它**排除**系统休眠时间——笔记本合盖/容器冻结数小时再唤醒后 `expire_at_ns` 不前进，缓存里会继续用微信侧**已过期**的 access_token。纯耗时测量（连接池等待、测试计时）仍保持 `.awake`。
+- **PKCS#12 的 PBKDF2 迭代次数加上限（DoS 面）**：`iteration_count` 完全取自文件内容，此前一个畸形/恶意 P12 只要把它写成大值就能让解析长时间占用 CPU；现 `> 5_000_000` 直接 `error.UnsupportedPbe`（并覆盖长度 0/超 4 字节的畸形 INTEGER）。
+- **`util/xml.parse` 接受空标签名（fuzz 发现）**：`<>` / `<></>` 曾被"解析成功"并返回空 `root_name`；现 root 与子元素标签名为空一律 `MalformedXml`。
+- **`util/json.appendEscapedString` 对非法 UTF-8 产出非法 JSON（fuzz 发现）**：合法 UTF-8 仍逐字节透传；非法字节改为 `\ufffd`（与 Go `encoding/json` 一致），保证 `'"' ++ escaped ++ '"'` 必能被 `std.json` 读回。
+- **`util/crypto.pkcs5Pad` 错误集不一致**（编译门升级后暴露）：声明 `Allocator.Error![]u8` 却调用了可能返回 `InvalidArgument` 的 `pkcs7Pad`；抽出无校验内核后两个公开函数签名与错误集保持不变。
+- **multipart 与请求头注入面**：`postMultipart` 的字段名/文件名按 RFC 9110 quoted-string 转义，控制字符（含 CR/LF）与空名/含冒号的头名一律 `error.InvalidArgument`（ReleaseFast 下 std 不做该断言）。
+- **cache 主机解析**：`redis`/`memcache` 各自手写的 IPv4 解析（两份重复、不支持 IPv6）换成 `std.Io.net.IpAddress.parse`（IPv4/IPv6 字面量，含 `[v6]:port`），域名走 `net.HostName.lookup`；非法输入仍 `InvalidAddress`。注意实测结论：**`IpAddress.resolve` 不是 DNS**（它只多支持 IPv6 作用域后缀），DNS 必须用 `HostName.lookup`。
+
+### Changed
+
+- **Io 注入（继续收敛全局单例）**：`util/time.getCurrTSWithIo`、`util/util.randomStrWithIo`、`util/rsa.ed25519GenerateKeyPairWithIo` 新增（旧函数保留并委托，标注 deprecated，便于分批迁移）；`officialaccount/material.Material`、`officialaccount/server.Server`、`work/material.Material`、`pay/v3/order.OrderV3` 新增可注入的 `io: std.Io` 字段（默认 `std.Io.Threaded.global_single_threaded.io()`，既有结构体字面量与 `init()` 调用点无需改动）；`util/benchmark.zig`、`live_probe.zig`、`examples/*.zig` 改用 `std.process.Init` 的 `io`/`arena`（取代 `std.Options.debug_io` 与手搭 arena）。
+- **cache 读路径**：`redis`/`memcache` 的逐字节 `readLine` 换成 `Io.Reader.takeDelimiterExclusive`（协议帧逐字节一致）；新增 **opt-in** 的 `Options.recv_timeout_ms`（默认 `0` = 不超时，保持现状），超时会让连接被丢弃、不进池（复用既有坏连接逻辑），避免"服务端半死导致永久阻塞并占死池连接"。
+- **API 面门禁升级为 AST 解析**：`tools/api_surface.zig`（基于 `std.zig.Ast`）取代 `tools/api_surface.awk` 作为快照生成器（awk 保留作交叉校验参考），新增 `zig build api-surface` 步骤；快照新增 **`sig` 行**（函数签名：参数类型 + 返回类型），补上了此前"只记函数名、改参数/返回类型不触发门禁"的漏报面（实测：改参数类型旧工具无差异、新工具判红）。快照条目 6464 → **7418**（+944 条 `sig`），**无条目丢失**（与 awk 输出逐行 diff 为零差异）。
+
+### Notes
+
+- **`SpinMutex` → `std.Io.Mutex`（真阻塞的 futex 实现，不再自旋烧 CPU）——公开字段类型变更**：`SpinMutex.state`、`Memory.mutex`、`Memcache.mutex`、`Redis.pool_mutex`、`DefaultAccessToken.lock`、`DefaultJsTicket.lock`、`WorkAccessToken.lock`、`WorkJsTicket.lock`、`Context.token_mutex` 的锁字段类型均由 `SpinMutex` 改为 `std.Io.Mutex`（相关结构体新增可注入的 `io` 字段）。`util/sync.zig` 的 `SpinMutex` **保留为兼容层**（零参数 `lock()`/`unlock()`/`tryLock()` 语义不变，内部走 `lockUncancelable`），未迁移的调用点不受影响。
+- **测试编译门升级为声明级**：`src/test_runner.zig` 的 `_ = mod;` 全部改为 `std.testing.refAllDecls(mod)`——从"文件级可达"提升到"每个顶层声明都被语义分析"，用于提前暴露"懒分析陷阱"类问题（已借此修掉上一条 Fixed）。
+- **hex 编码统一到 `std.fmt.bytesToHex`**：`util/crypto.zig`、`util/signature.zig`、`officialaccount/js/mod.zig`、`miniprogram/virtualpayment/mod.zig`、`util/http.zig` 的 `generateBoundary` 共 5 处手写字符表/循环删除（公开签名与输出大小写逐处核对未变）。
+- **重定向全量改走 `std.http.Client` 原生能力**：删除约 134 行手写（`ManualGetResult`、自写跳数循环、`isRedirectStatus`、`resolveRedirectUri`、sink 的 `accepts`），改由 `RedirectBehavior.init(n)` + `receiveHead` 处理（RFC 3986 解析、跨域换连、303/301+POST 改写 GET 均由 std 完成）；对外错误名经 `mapRedirectError` **保持兼容**（`TooManyRedirects` / `HttpStatusNotOk` / `InvalidRedirectLocation`）。行为变化：协议相对 `Location`（`//host/path`）现在会被跟随；`ws`/`wss` 目标在连接建立后才被拒绝。
+- **`util/mtls.zig` 的响应解析改走 std 公开解析器**（`Response.Head.parse` + `http.Reader.bodyReader`）：删除 73 行手写的 status/header/chunked 解析；`buildRequest` **保留**（std 无自定义 TLS 后端入口，客户端证书场景必须自写请求字节）。行为收紧：超过 64 KiB 的 head、冲突的 `Content-Length`、obs-fold 续行、畸形/溢出 chunk 一律拒绝。
+
+### Notes
+
+- **建议迁移**：v2 退款 → `pay/v3/refund.zig`，v2 转账 → `pay/v3/transfer.zig`——v3 用 RSA 签名 + 普通 HTTPS，**不需要客户端证书**，因此不需要 `-Dmtls`；v2 现金红包（`src/pay/redpacket`）暂无 v3 等价物，仍刚需 mTLS（须 `-Dmtls=true`）。
+
 ## [0.4.5] — 2026-09-21
 
 ### Added

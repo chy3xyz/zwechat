@@ -2,11 +2,12 @@
 
 > Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付 v2/v3、开放平台、企业微信、智能对话等能力的 Zig 原生实现。
 
-**当前版本：v0.1.0（高级生产级增强版）**
+**当前版本：v0.4.5**
 
 | | |
 |---|---|
 | **Zig 版本** | ≥ `0.17.0-dev` |
+| **外部依赖** | 默认**零依赖**：无 Zig 包依赖、无 C 依赖（不链 OpenSSL / libc、构建期不联网取依赖） |
 | **测试覆盖** | 1004 个内联测试，**0 内存泄漏** |
 | **基准性能** | SHA1 签名 ~274ns/op, AES 解密 ~107ns/op, XML 解析 ~148ns/op |
 | **命令行工具** | `zig build run` (CLI 开发者诊断工具) |
@@ -59,7 +60,15 @@ zig build run
 zig build run-oa-server   # 运行公众号 Webhook 验签解密示例
 zig build run-pay-order   # 运行微信支付下单与 JSAPI 调起示例
 zig build run-work-robot  # 运行企业微信机器人与 JSAPI 示例
+
+# 5. 需要微信支付 v2 mTLS 时（默认关闭）
+zig build -Dmtls=true
 ```
+
+> **依赖要求**：默认构建**零依赖**——不需要 `libssl-dev` / `openssl@3`（也不缺 C 头文件），不从 GitHub 取任何 Zig 包。
+> 只有当你要走微信支付 **v2** 的客户端证书路径（`pay.Config.root_ca` 非空 → `postXMLWithTLS`）时才需要 `-Dmtls=true`，
+> 且**运行时有 `libssl` / `libcrypto` 动态库**即可（构建期不需要头文件）。未开启时调用 `postXMLWithTLS` 会返回 `error.MtlsNotEnabled`。
+> 微信支付 v3（含退款 / 商家转账）不需要客户端证书，无需该开关。
 
 ---
 

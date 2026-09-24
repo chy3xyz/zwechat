@@ -36,6 +36,9 @@
 }
 ```
 
+> `zwechat` 自身**默认零依赖**（无 Zig 包依赖、无 C 依赖），上游拉取时不会给 `zig build` 引入 OpenSSL / libc。
+> 唯一例外：微信支付 **v2** 的 mTLS（客户端证书）需构建时加 `-Dmtls=true`，见 [§3「v2 mTLS 与 v3 的选择」](#3-微信支付-v2v3-pay-v2--v3)。
+
 ### 构造业务实例的通用骨架
 
 公众号 / 小程序需要调用方提供 access_token 工厂（企业微信、支付、开放平台不需要）：
@@ -348,6 +351,34 @@ defer parsed.deinit();
 > - 转账传入 `user_name` 时必须是**密文**（微信支付公钥 RSA-OAEP 加密，SDK 不做加密），并设置 `Config.wechatpay_serial`（微信支付公钥 ID 如 `PUB_KEY_ID_3000000001`，或平台证书序列号），SDK 会自动附带 `Wechatpay-Serial` 请求头。
 > - HTTP 200 不代表转账成功：以应答 `state` 判断单据状态（`WAIT_USER_CONFIRM` 可引导确认收款；`SUCCESS` / `FAIL` / `CANCELLED` 为终态）。发起转账报错时**不要换单号重试**，先查单确认原单结果，否则有重复转账的资金风险。
 > - 转账单的微信侧单号字段名是 `transfer_bill_no`（官方契约），不是 `bill_id`。
+
+### v2 mTLS 与 v3 的选择
+
+微信支付有两条互不相同的链路，**是否需要客户端证书**是选择的首要依据：
+
+| | v3（推荐） | v2 |
+|---|---|---|
+| 认证方式 | RSA 私钥签名（`Authorization: WECHATPAY2-SHA256-RSA2048`）+ **普通 HTTPS** | 证书 + 密钥的 **mTLS 双向认证**（部分接口） |
+| 是否需要客户端证书 | **不需要** | 退款 / 转账 / 现金红包在 `pay.Config.root_ca` 非空时需要 |
+| 需要 `-Dmtls=true` | 不需要 | **需要**（否则 `postXMLWithTLS` 直接报错） |
+| 需要的凭据 | `pay.v3.Config.private_key_pem` + `serial_no`（通知解密另需 `api_v3_key`） | PKCS#12 证书（`root_ca`）+ 商户号 |
+
+- **v3（推荐）**：退款用 `zwechat.pay.v3.RefundV3`（`src/pay/v3/refund.zig`），转账用 `zwechat.pay.v3.TransferV3`（`src/pay/v3/transfer.zig`），都是 RSA 签名 + 普通 HTTPS，**无需任何 OpenSSL / 客户端证书**。配置见上文 v3 速查（私钥 `private_key_pem`、序列号 `serial_no`）。
+- **v2**：`pay/refund`、`pay/transfer`、`pay/redpacket` 在 `root_ca` 非空时走 `util.http.postXMLWithTLS`。该能力受构建开关控制，必须显式开启：
+
+```bash
+# 你自己的项目（含把 zwechat 作为 path / submodule 依赖时）
+zig build -Dmtls=true
+```
+
+- 开启后**只需要运行时有 `libssl` / `libcrypto` 动态库**（构建期不要求头文件）；未开启时调用会得到：
+
+```
+error.MtlsNotEnabled
+```
+
+> **建议**：新业务优先用 v3（退款 / 转账已有 v3 实现），可以完全绕开 mTLS 与 `-Dmtls` 开关。
+> 目前**只有 v2 现金红包没有 v3 等价物**，是唯一仍刚需 `-Dmtls=true` 的场景。
 
 ---
 

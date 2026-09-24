@@ -578,6 +578,131 @@ mock server 绑定失败 → 测试失败。（`findFreePort` 的 20 次重试�
 
 ---
 
+## 12. mTLS（微信支付 v2 客户端证书）改用运行时 dlopen，构建默认零依赖
+
+**决策**
+仓库内不再依赖第三方 Zig 包 `httpz`（zhttp）——它只为微信支付 v2 的 mTLS 服务，
+却把 OpenSSL + libc 链接到**所有**构建目标（lib / exe / test / bench / examples），
+让每个消费者都背 C 依赖。改为：
+
+- 新增 `src/util/mtls.zig`：**运行时**用 `std.DynLib` 加载 `libssl` / `libcrypto`，
+  **手写 extern 函数指针**（不需要头文件 / `translateC` / `linkSystemLibrary`）；
+- 由构建选项 **`-Dmtls`（默认 `false`）** 门控：默认构建**零 Zig 包依赖、零 C 依赖**
+  （不链 OpenSSL、不链 libc、构建期不联网取依赖）；
+- 关闭时 `util.http.postXMLWithTLS` 返回 `error.MtlsNotEnabled`。
+
+**影响**
+- 默认（`-Dmtls=false`）下**没有** mTLS 能力：微信支付 v2 中 `root_ca` 非空
+  （退款 / 转账 / 现金红包）的路径不可用，报 `error.MtlsNotEnabled`；
+  未配 `root_ca` 的路径仍走普通 HTTPS，不受影响。**这是破坏性变更**。
+- 开启（`-Dmtls=true`）后仍**不需要构建期头文件**，但**运行时要能加载到
+  `libssl` / `libcrypto` 动态库**；缺失时错误边界是 `error.OpenSslNotAvailable`。
+- 失败模式是**运行期**而非编译期（`dlopen` 在首次调用时发生），拿不到库/符号
+  只会在第一次 `postXMLWithTLS` 时暴露——部署前必须自测。
+- 自建 OpenSSL 桥是**安全敏感面**：手写 extern 一旦少校验一步（SNI、证书链、
+  TLS 版本），可能静默降级到不安全的连接。
+
+**缓解（自建桥的硬边界）**
+- **边界刻意收窄**：`mtls.zig` 只做**一条窄路径**——POST XML + 客户端证书，
+  不实现通用 TLS 客户端（因此不需要 HTTP/2、重定向、连接池等）。
+- **强制校验 `SSL_get_verify_result`**：握手后必须确认返回 `X509_V_OK`，
+  否则拒绝继续，避免"连上了但证书链没验"的静默信任。
+- **TLS 1.2 下限**：通过 `SSL_CTX_ctrl(123)`（`SSL_CTRL_SET_MIN_PROTO_VERSION`）设置，
+  不接受更老协议。
+- **设置 SNI**：通过 `SSL_ctrl(55)`（`SSL_CTRL_SET_TLSEXT_HOSTNAME`）设置——
+  宏在 Zig extern 桥里不可用，必须走 ctrl 变体。
+- **不复用会话**：每次请求新建 SSL 上下文 / 连接，不复用会话票据。
+- 需要 mTLS 的下游也可评估**迁移到 v3**：v3 的退款 / 转账用 RSA 签名 + 普通
+  HTTPS，根本不需要客户端证书（见「触发再评估」）。
+
+**代码位置**
+- `src/util/mtls.zig`（自建 OpenSSL 桥：`std.DynLib` + 手写 extern）；
+- `src/util/http.zig`（`postXMLWithTLS`：`-Dmtls` 关闭时返回 `error.MtlsNotEnabled`）；
+- `build.zig`（`-Dmtls` 选项与链接开关）；
+- v3 替代路径：`src/pay/v3/refund.zig`、`src/pay/v3/transfer.zig`。
+
+**触发再评估的条件**
+- 只有 **v2 现金红包**（`src/pay/redpacket`）仍无 v3 等价物、刚需 mTLS；
+  若微信下线 v2 接口，可整体删除 `mtls.zig` 与 `-Dmtls`；
+- 上游出现可直接依赖、且**不污染所有构建目标**的 mTLS 库时，可评估换回依赖；
+- `dlopen` 方案在目标平台（静态链接 / musl / 受限容器）上无法加载动态库时，
+  需为该平台提供静态链接变体。
+
+---
+
+## 13. `zig build test` 打印 `failed command: …--listen=-`（但构建仍然成功）
+
+**决策（现状）**
+**已定性为 Zig 0.17-dev 构建运行器的"上报不一致"，非本仓缺陷**；按 CI 判据（退出码）无影响，暂不修。
+
+**现象**
+- `zig build test`（只要测试步骤真的执行、非缓存命中）会打印一行
+  `failed command: ./.zig-cache/o/<hash>/test --cache-dir=./.zig-cache --seed=… --listen=-`，
+  并且**在它之前会把测试进程的 stderr 整段转储**（本仓里就是 redis/memcache 的 `std.log.warn` 若干行）。
+- 同一份输出里同时有 `Build Summary: N/N steps succeeded; 1087/1087 tests passed` 与 `test success`，
+  且 **`zig build test` 自身退出码为 0**。
+
+**已实测确认（本轮新增，逐一可复核）**
+1. **测试进程是以状态 0 退出的**：用 lldb 附加到子进程并 `continue` 到结束，输出 `Process … exited with status = 0`；
+   在 `abort` / `debug.defaultPanic` / SIGABRT 上设断点**均未命中** ⇒ 既没有崩溃也没有 panic。
+   （本文件早先记录的 `test-*.ips` SIGABRT 与"偶发 abort"是**早前阶段**的观测，当前已不复现。）
+2. **一次 `zig build test` 只启动一次测试二进制**（`--verbose` 实测 spawn 计数 = 1），构建系统没有重试机制
+   （`compiler/Maker/Step/Run.zig` 里只有目录重命名的 retry）。此前观测到的"多个测试进程"是**并发的其它构建调用**的残留。
+3. **不是缓存陈旧**：把源码 rsync 到 `/tmp` 的干净副本（无 `.zig-cache`）后依旧复现。
+4. **不是日志噪声**：把 cache 里的 `std.log.warn` 全降为 `debug` 后**仍复现**。
+5. **不是 fuzz 测试引起**：给最小项目加一个 `std.testing.fuzz` 用例后**不出现**该行。
+6. **最小项目不复现**（单测试 + 官方默认 test runner + 同样的 `addTest`/`addRunArtifact` 写法）。
+
+**机制分析（读工具链源码）**
+该行由 `lib/compiler/Maker.zig:3198` 打印，所在函数接收 `failing_step_index`，且同一函数内
+`Maker.zig:3094-3096` 对 `.success` / `.failure` / `.skipped` 三种状态写作 `unreachable`
+——即**该上报路径按设计只对"失败步骤"可达**。所以当前状态是：**运行器认定某步骤失败并打印了失败上报，
+最终却把整次构建判为成功**（这是工具链内部的不一致）。
+
+**最可能的触发条件（未最终证实）**
+`test_runner.zig:23` 用 `Io.Threaded.global_single_threaded.io()` 承载**运行器的 stdio 协议**；
+而本仓大量生产路径（`cache.*`、`credential.*`、`officialaccount.*`、`pay.*` 的 `io` 字段默认值）
+在**测试进程内也从同一个全局单例取 io**，且部分用例会在**派生线程**里用它做 IO。
+`global_single_threaded` 并非线程安全 —— 并发使用可能让运行器的协议流出现一次异常，
+从而走一次失败上报（而测试结果本身都已经如实上报，故汇总仍是全通过）。
+这与"终端模式直接跑测试二进制稳定通过（非 0 次失败）"一致。
+
+**影响**
+- CI 按退出码判定 → **不受影响**；本地看到该行时也不必惊慌，判断真结论看
+  `--summary all` 里的 `N/N tests passed` 与 `test success`。
+- 唯一实质影响：日志噪声 + 容易被误读为"测试失败"。
+
+**缓解**
+- 需要干净输出时直接运行测试二进制：
+  `BIN=$(ls -t .zig-cache/o/*/test | head -1) && "$BIN"`（终端模式无协议，实测稳定）。
+- 长期缓解路径（若将来要彻底消掉）：把**测试进程内**的 Io 使用全部收敛到每实例私有实例
+  （即让除运行器之外没有任何代码从 `global_single_threaded` 取 io），或等工具链修好该上报路径。
+
+**触发再评估的条件**
+Zig 工具链升级后；或该行**伴随** `zig build test` 退出码非 0（那才代表真实失败）。
+
+## 14. Io 注入尚未全量覆盖 + 读超时是 opt-in
+
+**决策（现状）**
+库代码的 Io 来源已从"直接取全局单例"改为**可注入字段 + `*WithIo` 变体**，但**尚未全量覆盖**，且网络超时默认关闭。
+
+**影响**
+- 生产代码**已全部迁完**（`getCurrTS()` / `randomStr()` / `std.Options.debug_io` 仅剩测试块内使用），
+  因此"把本库嵌入自定义 Io 宿主"已不再被取时/取随机挡住；剩下的边界见下。
+- 网络超时仍是 **opt-in**：`Options.recv_timeout_ms`（单次读取）与 `Options.connect_timeout_ms`（TCP 握手）
+  **默认都是 0 = 不超时**，即默认配置下"服务端半死/黑洞"仍会阻塞到内核上限。
+
+**缓解**
+- 新代码一律用注入的 `io` 字段或 `*WithIo` 变体；迁移清单见 `AGENTS.md`「移植备注 · Io 注入惯例」。
+- 需要"客户端超时兜底"的场景显式设 `recv_timeout_ms` 与 `connect_timeout_ms`（超时会丢弃连接、不建连、不进池，避免协议失步）。
+
+**触发再评估的条件**
+需要把本库嵌入 evented/协程运行时；或因"服务端半死"出现过线上挂起事故。
+
+---
+
+---
+
 ## 复核方法
 
 本文所有位置均可就地验证，例如：
@@ -619,6 +744,16 @@ grep -rn "parseFromSlice" src/ --include=*.zig | wc -l
 grep -n "个内联测试\|个单元测试" README.md
 grep -n "ZIG_VERSION=" .github/workflows/ci.yml
 grep -n "0.17.0-dev" AGENTS.md | head -3
+
+# 零依赖 / mTLS（第 12 条）
+#   build.zig.zon 不再有 httpz 依赖（期望：无输出）
+grep -n "httpz\|zhttp" build.zig.zon
+#   mtls 开关与自建桥
+grep -rn "mtls" build.zig
+ls src/util/mtls.zig
+#   默认产物未链接 OpenSSL（CI 回归检查同款）：
+#   macOS: otool -L zig-out/bin/zwechat | grep -i ssl   （期望：无输出）
+#   Linux: ldd zig-out/lib/libzwechat.a 2>/dev/null; ldd zig-out/bin/zwechat | grep -i ssl
 ```
 
 ---
