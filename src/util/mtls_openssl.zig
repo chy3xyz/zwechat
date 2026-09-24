@@ -17,6 +17,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
 
+/// 本文件的日志 scope：宿主可用 `std_options.log_scope_levels` 单独静音 mTLS
+/// 后端（OpenSSL 桥）的告警，而不必整体降低 `log.level`。
+const log = std.log.scoped(.zwechat_mtls);
+
 /// OpenSSL 的 `long`：LP64 上 8 字节，Windows LLP64 上 4 字节。
 const Clong = if (builtin.os.tag == .windows) i32 else if (@sizeOf(usize) == 8) i64 else i32;
 
@@ -185,7 +189,7 @@ const PosixImpl = struct {
         var buf: [256]u8 = undefined;
         c.ERR_error_string_n(code, &buf, buf.len);
         const len = std.mem.indexOfScalar(u8, &buf, 0) orelse buf.len;
-        std.log.warn("mtls: OpenSSL 失败: {s}", .{buf[0..len]});
+        log.warn("mtls: OpenSSL 失败: {s}", .{buf[0..len]});
         code = c.ERR_get_error();
         while (code != 0) code = c.ERR_get_error();
         c.ERR_clear_error();
@@ -321,7 +325,7 @@ const PosixImpl = struct {
         if (s.SSL_set1_host) |set1_host| {
             if (set1_host(ssl, host_z.ptr) != 1) return error.OpenSslError;
         } else {
-            std.log.warn("mtls: 当前 OpenSSL 无 SSL_set1_host，仅校验证书链，不做主机名匹配", .{});
+            log.warn("mtls: 当前 OpenSSL 无 SSL_set1_host，仅校验证书链，不做主机名匹配", .{});
         }
 
         if (s.SSL_connect(ssl) != 1) {

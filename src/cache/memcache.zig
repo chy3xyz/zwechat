@@ -21,12 +21,21 @@
 //!   / `writer` 全为 null），下一次操作重新建连。
 //! - 服务器地址支持 IPv4 / `[IPv6]` 字面量与域名（std 的 `IpAddress` 与
 //!   `HostName.lookup`），不再只认 IPv4。
+//! - 网络层与 `redis.zig` 共用：读超时读取器与主机解析实现在 `net.zig`（设计
+//!   说明也只有一处）；日志统一走本文件的 `std.log.scoped(.zwechat_memcache)`，
+//!   宿主可用 `std_options.log_scope_levels` 单独静音 memcache 的告警。
 //! - 不支持 TLS；如需 TLS，可外部用 stunnel / memcache+tls 代理，或后续扩展。
 
 const std = @import("std");
 const posix = std.posix;
 const Cache = @import("mod.zig").Cache;
 const CacheError = @import("mod.zig").CacheError;
+/// 与 `redis.zig` 共享的网络层（带读超时的 socket 读取器 + 主机解析）。
+const net = @import("net.zig");
+
+/// 本文件的日志 scope：宿主可用 `std_options.log_scope_levels` 单独静音 memcache
+/// 的告警，而不必整体降低 `log.level`（redis / mtls 同理，各用自己的 scope）。
+const log = std.log.scoped(.zwechat_memcache);
 
 /// 建连超时路径只在 POSIX 上实现（Windows / WASI 退化为阻塞 connect）。
 const native_os = @import("builtin").os.tag;
@@ -73,70 +82,6 @@ pub const Options = struct {
     connect_timeout_ms: u64 = 0,
 };
 
-/// 带可选读超时的 socket 读取器。
-///
-/// 与 `std.Io.net.Stream.Reader` 同形（父结构的 `interface` 字段 + `stream`），
-/// 唯一区别是底层读取走 `Io.operateTimeout`：`recv_timeout_ms > 0` 时服务端
-/// accept 之后不回包也不会让调用线程永久阻塞。
-///
-/// 与 `redis.zig` 里的同名结构是刻意重复的：两者只差日志文案，而 `cache/` 各实现
-/// 之间不互相 import（也刻意不在这一批改动里新增共享文件）。
-const SocketReader = struct {
-    io: std.Io,
-    stream: std.Io.net.Stream,
-    interface: std.Io.Reader,
-    /// 单次读取的超时毫秒数；`0` = 不超时（此时不使用本结构）。
-    recv_timeout_ms: u64 = 0,
-
-    fn init(io: std.Io, stream: std.Io.net.Stream, buffer: []u8, recv_timeout_ms: u64) SocketReader {
-        return .{
-            .io = io,
-            .stream = stream,
-            .recv_timeout_ms = recv_timeout_ms,
-            .interface = .{
-                .vtable = &vtable,
-                .buffer = buffer,
-                .seek = 0,
-                .end = 0,
-            },
-        };
-    }
-
-    const vtable: std.Io.Reader.VTable = .{ .stream = streamImpl };
-
-    fn streamImpl(io_r: *std.Io.Reader, io_w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        const r: *SocketReader = @alignCast(@fieldParentPtr("interface", io_r));
-        const dest = limit.slice(try io_w.writableSliceGreedy(1));
-        var data = [1][]u8{dest};
-        const result = r.io.operateTimeout(.{ .net_read = .{
-            .socket_handle = r.stream.socket.handle,
-            .data = &data,
-        } }, r.timeout()) catch |err| switch (err) {
-            error.Timeout => {
-                std.log.warn("memcache socket 读超时（recv_timeout_ms={d}）：断开连接", .{r.recv_timeout_ms});
-                return error.ReadFailed;
-            },
-            else => return error.ReadFailed,
-        };
-        const n = result.net_read catch return error.ReadFailed;
-        if (n == 0) return error.EndOfStream; // 对端已关闭，等同于 std 的读取器
-        io_w.advance(n);
-        return n;
-    }
-
-    /// `recv_timeout_ms` → `Io.Timeout`（`awake` 时钟：量的是「最长阻塞多久」，
-    /// 与 memory.zig 里 TTL 的 `boot` 语义相反）。
-    fn timeout(self: *const SocketReader) std.Io.Timeout {
-        if (self.recv_timeout_ms == 0) return .none;
-        // 配置值来自外部，先钳到 i64 上限再交给 std（`fromMilliseconds` 要求 i64）。
-        const ms: i64 = @intCast(@min(self.recv_timeout_ms, std.math.maxInt(i64)));
-        return .{ .duration = .{
-            .raw = .fromMilliseconds(ms),
-            .clock = .awake,
-        } };
-    }
-};
-
 /// Memcache 缓存实现。
 ///
 /// 调用方通过 `create(allocator, opts)` 构造，使用 `asCache()` 获得 vtable 句柄，
@@ -154,9 +99,9 @@ pub const Memcache = struct {
     /// 默认（`recv_timeout_ms == 0`）路径的读取器：直接用 std 的实现。
     reader: ?std.Io.net.Stream.Reader = null,
     /// 配置了 `recv_timeout_ms` 时改用它（同一 socket、同一 `read_buffer`，
-    /// 读取走 `Io.operateTimeout`）。与 `reader` **二选一**，同一时刻最多一个非 null，
-    /// 避免两个读取器各自缓冲同一 socket 的数据。
-    timeout_reader: ?SocketReader = null,
+    /// 读取走 `Io.operateTimeout`；共享实现见 `net.zig`）。与 `reader` **二选一**，
+    /// 同一时刻最多一个非 null，避免两个读取器各自缓冲同一 socket 的数据。
+    timeout_reader: ?net.SocketReader(.memcache) = null,
     writer: ?std.Io.net.Stream.Writer = null,
     /// `get` 返回的切片借用自此缓冲区；下一次操作前有效。
     last_value: ?[]u8 = null,
@@ -310,7 +255,7 @@ pub const Memcache = struct {
         const addr = try resolveServer(self.io, self.opts.server);
         const stream = connectStream(self.io, addr, self.opts.connect_timeout_ms) catch |err| switch (err) {
             error.ConnectTimeout => {
-                std.log.warn(
+                log.warn(
                     "memcache 建连超时（connect_timeout_ms={d}）：放弃本次操作，连接状态保持干净",
                     .{self.opts.connect_timeout_ms},
                 );
@@ -319,13 +264,13 @@ pub const Memcache = struct {
                 return error.StorageError;
             },
             else => {
-                std.log.warn("memcache connect failed: {s}", .{@errorName(err)});
+                log.warn("memcache connect failed: {s}", .{@errorName(err)});
                 return error.StorageError;
             },
         };
         self.stream = stream;
         if (self.opts.recv_timeout_ms > 0) {
-            self.timeout_reader = SocketReader.init(self.io, stream, &self.read_buffer, self.opts.recv_timeout_ms);
+            self.timeout_reader = net.SocketReader(.memcache).init(self.io, stream, &self.read_buffer, self.opts.recv_timeout_ms);
             self.reader = null;
         } else {
             self.reader = stream.reader(self.io, &self.read_buffer);
@@ -426,7 +371,8 @@ pub const Memcache = struct {
 ///
 /// - IPv4 / 带方括号的 IPv6 字面量走 `std.Io.net.IpAddress.parseLiteral`
 ///   （RFC 3986 的 IP literal 语法，`[::1]:11211` 一次解析出地址与端口）；
-/// - 其余按域名走 `resolveHost`（DNS / `/etc/hosts` / `localhost`）；
+/// - 其余按域名走 `net.resolveHost`（DNS / `/etc/hosts` / `localhost`；实现与
+///   设计说明都在 `net.zig`，与 `redis.zig` 共用一份）；
 /// - 端口必填：`parseLiteral` 对缺端口的字面量给出 0，这里直接判为配置错误
 ///   （与改动前「没有冒号即非法」的行为一致）。
 fn resolveServer(io: std.Io, server: []const u8) !std.Io.net.IpAddress {
@@ -438,47 +384,11 @@ fn resolveServer(io: std.Io, server: []const u8) !std.Io.net.IpAddress {
     // 域名不含 ':'，所以最后一段冒号必定是端口分隔符。
     const colon = std.mem.lastIndexOfScalar(u8, server, ':') orelse return error.InvalidAddress;
     const port = std.fmt.parseInt(u16, server[colon + 1 ..], 10) catch return error.InvalidAddress;
-    return resolveHost(io, server[0..colon], port);
+    return net.resolveHost(io, server[0..colon], port);
 }
 
-/// 把主机名或字面量解析成可连接的地址。
-///
-/// - 字面量（`"127.0.0.1"` / `"::1"`）走 `std.Io.net.IpAddress.parse`：纯函数，
-///   IPv4 与 IPv6 通吃（旧的手写实现只认 IPv4 字面量）；
-/// - 其余按域名走 `std.Io.net.HostName.lookup`（DNS + `/etc/hosts` + RFC 6761
-///   的 `localhost`）。注意 `IpAddress.resolve` **不是** DNS —— 它只是在 `parse`
-///   之上多支持 IPv6 作用域后缀（`fe80::1%en0`），对域名同样报
-///   `error.ParseFailed`，所以这里没有用它；
-/// - 域名路径依赖宿主 `Io` 的 `netLookup`；未实现时 std 的默认实现返回
-///   `error.NetworkDown`（不 panic），字面量路径完全不触达它；
-/// - 双栈主机上优先取 A 记录（IPv4），与改动前的纯 IPv4 行为最接近。
-///
-/// 与 `redis.zig` 里的同名函数是刻意重复的（同 `SocketReader` 的理由）。
-fn resolveHost(io: std.Io, host: []const u8, port: u16) !std.Io.net.IpAddress {
-    if (std.Io.net.IpAddress.parse(host, port)) |addr| return addr else |_| {}
-
-    const name = std.Io.net.HostName.init(host) catch return error.InvalidAddress;
-    // 容量 ≥ 16 时 `HostName.lookup` 保证不阻塞（见 std 文档）。
-    var results_buf: [16]std.Io.net.HostName.LookupResult = undefined;
-    var results: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&results_buf);
-    try std.Io.net.HostName.lookup(name, io, &results, .{ .port = port });
-
-    var fallback: ?std.Io.net.IpAddress = null;
-    while (results.getOneUncancelable(io)) |result| {
-        switch (result) {
-            .address => |addr| switch (addr) {
-                .ip4 => return addr,
-                .ip6 => if (fallback == null) {
-                    fallback = addr;
-                },
-            },
-            .canonical_name => {},
-        }
-    } else |err| switch (err) {
-        error.Closed => {}, // 结果产出完毕时 lookup 关闭队列，属正常收尾
-    }
-    return fallback orelse error.InvalidAddress;
-}
+// 主机名/字面量解析已收敛到 `net.resolveHost`（`net.zig`），
+// 与 `redis.zig` 共用一份实现与一处设计说明。
 
 // ============================================================================
 // 建连（含可选超时）
@@ -486,8 +396,9 @@ fn resolveHost(io: std.Io, host: []const u8, port: u16) !std.Io.net.IpAddress {
 
 /// 建连失败的错误集（`connectStream` 及其超时路径共用）。
 ///
-/// 与 `redis.zig` 里的同名声明是刻意重复的（同 `SocketReader` / `resolveHost` 的
-/// 理由：`cache/` 各实现之间不互相 import）。
+/// 与 `redis.zig` 里的同名声明仍是两份：建连路径（`ConnectError` /
+/// `connectStream` 及其 POSIX 实现）本轮未并入 `net.zig`，两个后端的版本行为
+/// 一致、各自独立演进。`SocketReader` 与主机解析已收敛到 `net.zig`。
 const ConnectError = error{
     /// 到点仍未建连（我们自己设的 deadline，来自 `Options.connect_timeout_ms`）。
     ConnectTimeout,
@@ -860,7 +771,7 @@ fn findFreePort() !u16 {
 
 /// 有界等待 mock 服务器就绪（最多 2 秒，避免服务器起不来时测试无限挂住）。
 ///
-/// 与 `redis.zig` 里的同名函数是刻意重复的（同 `SocketReader` 的理由）。
+/// 与 `redis.zig` 里的同名函数仍是两份（纯测试夹具，暂不共享）。
 fn waitReady(ready: *std.atomic.Value(bool)) void {
     var i: usize = 0;
     while (!ready.load(.acquire)) : (i += 1) {
@@ -881,7 +792,7 @@ fn waitReady(ready: *std.atomic.Value(bool)) void {
 /// 容器里对它的 connect 都能在 0~8ms 内「成功」（本地代理 / NAT 应答），它既不是
 /// 黑洞也不确定，写进用例只会是假绿或假红。
 ///
-/// 与 `redis.zig` 里的同名结构是刻意重复的（同 `SocketReader` 的理由）。
+/// 与 `redis.zig` 里的同名结构仍是两份（纯测试夹具，暂不共享）。
 const StalledTarget = struct {
     /// 填充连接各自的 deadline（毫秒）。只要远小于内核的 SYN 重传上限即可。
     const fill_timeout_ms: u64 = 150;

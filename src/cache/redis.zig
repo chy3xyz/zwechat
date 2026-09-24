@@ -33,6 +33,10 @@
 //!   connect 超时能力，只能用「非阻塞 connect + poll(deadline)」自己实现。
 //! - **主机解析交给 std**：`IpAddress.parse` 认 IPv4 / IPv6 字面量，
 //!   `HostName.lookup` 认域名；不再有只支持 IPv4 的手写解析。
+//! - **网络层与 memcache 共用**：读超时读取器与主机解析实现在 `net.zig`（两处
+//!   设计说明也就只有一处，不会再各自漂移）；日志统一走本文件的
+//!   `std.log.scoped(.zwechat_redis)`，宿主可用 `std_options.log_scope_levels`
+//!   单独静音 redis 的告警。
 //! - `get` 返回的切片借用自**当前连接的复用值缓冲**：任何后续 `get`（含其它线程的
 //!   `get`）之后都不保证仍有效，跨操作持有必须 `allocator.dupe`。
 //! - 不支持 TLS；如需 TLS，可外部用 stunnel / redis+tls 代理，或后续扩展。
@@ -41,6 +45,12 @@ const std = @import("std");
 const posix = std.posix;
 const Cache = @import("mod.zig").Cache;
 const CacheError = @import("mod.zig").CacheError;
+/// 与 `memcache.zig` 共享的网络层（带读超时的 socket 读取器 + 主机解析）。
+const net = @import("net.zig");
+
+/// 本文件的日志 scope：宿主可用 `std_options.log_scope_levels` 单独静音 redis
+/// 的告警，而不必整体降低 `log.level`（memcache / mtls 同理，各用自己的 scope）。
+const log = std.log.scoped(.zwechat_redis);
 
 /// 建连超时路径只在 POSIX 上实现（Windows / WASI 退化为阻塞 connect）。
 const native_os = @import("builtin").os.tag;
@@ -140,75 +150,6 @@ const Reply = union(enum) {
     null_bulk: void,
 };
 
-/// 带可选读超时的 socket 读取器。
-///
-/// 与 `std.Io.net.Stream.Reader` 同形（父结构里的 `interface` 字段 + `stream`），
-/// 唯一区别是底层读取走 `Io.operateTimeout`：`recv_timeout_ms > 0` 时服务端
-/// accept 之后不回包也不会让调用线程永久阻塞（否则池连接会被占死）。
-/// 超时与其它读取失败都表现为 `error.ReadFailed`，调用方一律丢弃连接 ——
-/// 半条回复留在连接上会让后续请求协议失步。
-///
-/// 读缓冲由调用方提供（与 std 的读取器一致），因此这里只覆盖 vtable 的 `stream`
-/// 一项；`readVec` / `discard` / `rebase` 沿用 std 默认实现，缓冲语义不变。
-const SocketReader = struct {
-    io: std.Io,
-    stream: std.Io.net.Stream,
-    interface: std.Io.Reader,
-    /// 单次读取的超时毫秒数；`0` = 不超时（阻塞读，`Io.operateTimeout` 直接
-    /// 退化为 `Io.operate`，与 `std.Io.net.Stream.Reader` 完全同路）。
-    recv_timeout_ms: u64 = 0,
-
-    fn init(io: std.Io, stream: std.Io.net.Stream, buffer: []u8, recv_timeout_ms: u64) SocketReader {
-        return .{
-            .io = io,
-            .stream = stream,
-            .recv_timeout_ms = recv_timeout_ms,
-            .interface = .{
-                .vtable = &vtable,
-                .buffer = buffer,
-                .seek = 0,
-                .end = 0,
-            },
-        };
-    }
-
-    const vtable: std.Io.Reader.VTable = .{ .stream = streamImpl };
-
-    fn streamImpl(io_r: *std.Io.Reader, io_w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        const r: *SocketReader = @alignCast(@fieldParentPtr("interface", io_r));
-        const dest = limit.slice(try io_w.writableSliceGreedy(1));
-        var data = [1][]u8{dest};
-        const result = r.io.operateTimeout(.{ .net_read = .{
-            .socket_handle = r.stream.socket.handle,
-            .data = &data,
-        } }, r.timeout()) catch |err| switch (err) {
-            error.Timeout => {
-                std.log.warn("redis socket 读超时（recv_timeout_ms={d}）：丢弃该连接", .{r.recv_timeout_ms});
-                return error.ReadFailed;
-            },
-            else => return error.ReadFailed,
-        };
-        const n = result.net_read catch return error.ReadFailed;
-        if (n == 0) return error.EndOfStream; // 对端已关闭，等同于 std 的读取器
-        io_w.advance(n);
-        return n;
-    }
-
-    /// `recv_timeout_ms` → `Io.Timeout`。
-    ///
-    /// 用 `awake` 时钟：这是一段「最长阻塞多久」的进程内耗时，休眠期间进程本就不跑，
-    /// 唤醒后继续用完剩下的额度才是语义正确的（与 memory.zig 里 TTL 的 `boot` 相反）。
-    fn timeout(self: *const SocketReader) std.Io.Timeout {
-        if (self.recv_timeout_ms == 0) return .none;
-        // 配置值来自外部，先钳到 i64 上限再交给 std（`fromMilliseconds` 要求 i64）。
-        const ms: i64 = @intCast(@min(self.recv_timeout_ms, std.math.maxInt(i64)));
-        return .{ .duration = .{
-            .raw = .fromMilliseconds(ms),
-            .clock = .awake,
-        } };
-    }
-};
-
 /// 单条 RESP 连接：独占一条 TCP 流、一对读写缓冲区与一个值缓冲。
 ///
 /// 任意时刻至多被一个调用方持有（借出期间不持有池锁），因此连接内部状态无需再加锁，
@@ -219,7 +160,9 @@ const Conn = struct {
     stream: std.Io.net.Stream,
     read_buffer: [4096]u8 = undefined,
     write_buffer: [4096]u8 = undefined,
-    reader: SocketReader,
+    /// 带可选读超时的读取器（共享实现见 `net.zig`；日志归属 redis 的 scope）。
+    /// redis 始终用它：`recv_timeout_ms == 0` 时与 std 的读取器完全同路。
+    reader: net.SocketReader(.redis),
     writer: std.Io.net.Stream.Writer,
     /// 读取 RESP 简单字符串/整数字行时的临时缓冲区（每条连接独立）。
     line_buffer: [512]u8 = undefined,
@@ -532,20 +475,20 @@ pub const Redis = struct {
 
     /// 建立一条新连接（TCP + 可选 AUTH / SELECT）。**不得**在持有 `pool_mutex` 时调用。
     fn createConn(self: *Redis) PoolError!*Conn {
-        const addr = resolveHost(self.io, self.opts.host, self.opts.port) catch |err| {
-            std.log.warn("redis 主机解析失败：host={s} err={s}", .{ self.opts.host, @errorName(err) });
+        const addr = net.resolveHost(self.io, self.opts.host, self.opts.port) catch |err| {
+            log.warn("redis 主机解析失败：host={s} err={s}", .{ self.opts.host, @errorName(err) });
             return error.StorageError;
         };
         const stream = connectStream(self.io, addr, self.opts.connect_timeout_ms) catch |err| switch (err) {
             error.ConnectTimeout => {
-                std.log.warn(
+                log.warn(
                     "redis 建连超时（connect_timeout_ms={d}）：放弃本次操作，不创建连接",
                     .{self.opts.connect_timeout_ms},
                 );
                 return error.StorageError;
             },
             else => {
-                std.log.warn("redis connect failed: {s}", .{@errorName(err)});
+                log.warn("redis connect failed: {s}", .{@errorName(err)});
                 return error.StorageError;
             },
         };
@@ -561,7 +504,7 @@ pub const Redis = struct {
             .reader = undefined,
             .writer = undefined,
         };
-        conn.reader = SocketReader.init(self.io, stream, &conn.read_buffer, self.opts.recv_timeout_ms);
+        conn.reader = net.SocketReader(.redis).init(self.io, stream, &conn.read_buffer, self.opts.recv_timeout_ms);
         conn.writer = stream.writer(self.io, &conn.write_buffer);
 
         if (self.opts.password) |pwd| {
@@ -580,7 +523,7 @@ pub const Redis = struct {
         return self.acquire() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.PoolTimeout => {
-                std.log.warn(
+                log.warn(
                     "redis 连接池等待超时：max_connections={d}, pool_timeout_ms={d}，放弃本次操作",
                     .{ self.max_connections, self.opts.pool_timeout_ms },
                 );
@@ -621,7 +564,7 @@ pub const Redis = struct {
             .null_bulk => return null,
             .bulk_string => |bs| return bs,
             .error_msg => |e| {
-                std.log.warn("redis GET failed: {s}", .{e});
+                log.warn("redis GET failed: {s}", .{e});
                 return error.StorageError;
             },
             else => {
@@ -657,11 +600,11 @@ pub const Redis = struct {
         };
         switch (reply) {
             .simple_string => |s| if (!std.mem.eql(u8, s, "OK")) {
-                std.log.warn("redis SET 返回非 OK：{s}", .{s});
+                log.warn("redis SET 返回非 OK：{s}", .{s});
                 return error.StorageError;
             },
             .error_msg => |e| {
-                std.log.warn("redis SET failed: {s}", .{e});
+                log.warn("redis SET failed: {s}", .{e});
                 return error.StorageError;
             },
             else => {
@@ -688,7 +631,7 @@ pub const Redis = struct {
         switch (reply) {
             .integer => |n| return n > 0,
             .error_msg => |e| {
-                std.log.warn("redis EXISTS failed: {s}", .{e});
+                log.warn("redis EXISTS failed: {s}", .{e});
                 return error.StorageError;
             },
             else => {
@@ -730,42 +673,8 @@ fn nowNanoseconds() i64 {
     return @intCast(ts.nanoseconds);
 }
 
-/// 把 `Options.host` 解析成可连接的地址。
-///
-/// - 字面量（`"127.0.0.1"` / `"::1"`）走 `std.Io.net.IpAddress.parse`：纯函数、
-///   IPv4 与 IPv6 通吃（旧的手写实现只认 IPv4 字面量）；
-/// - 其余按域名走 `std.Io.net.HostName.lookup`：DNS + `/etc/hosts` + RFC 6761 的
-///   `localhost` 全都覆盖。注意 `IpAddress.resolve` **不是** DNS —— 它只是在
-///   `parse` 之上多支持 IPv6 的作用域后缀（`fe80::1%en0`），对域名同样报
-///   `error.ParseFailed`，所以这里没有用它；
-/// - 域名路径依赖宿主 `Io` 的 `netLookup`；未实现时 std 的默认实现返回
-///   `error.NetworkDown`（不 panic），字面量路径完全不触达它；
-/// - 双栈主机上优先取 A 记录（IPv4），与改动前的纯 IPv4 行为最接近。
-fn resolveHost(io: std.Io, host: []const u8, port: u16) !std.Io.net.IpAddress {
-    if (std.Io.net.IpAddress.parse(host, port)) |addr| return addr else |_| {}
-
-    const name = std.Io.net.HostName.init(host) catch return error.InvalidAddress;
-    // 容量 ≥ 16 时 `HostName.lookup` 保证不阻塞（见 std 文档）。
-    var results_buf: [16]std.Io.net.HostName.LookupResult = undefined;
-    var results: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&results_buf);
-    try std.Io.net.HostName.lookup(name, io, &results, .{ .port = port });
-
-    var fallback: ?std.Io.net.IpAddress = null;
-    while (results.getOneUncancelable(io)) |result| {
-        switch (result) {
-            .address => |addr| switch (addr) {
-                .ip4 => return addr,
-                .ip6 => if (fallback == null) {
-                    fallback = addr;
-                },
-            },
-            .canonical_name => {},
-        }
-    } else |err| switch (err) {
-        error.Closed => {}, // 结果产出完毕时 lookup 关闭队列，属正常收尾
-    }
-    return fallback orelse error.InvalidAddress;
-}
+// 主机解析（`Options.host` → 可连接地址）已收敛到 `net.resolveHost`（`net.zig`），
+// 与 `memcache.zig` 共用一份实现与一处设计说明。
 
 // ============================================================================
 // 建连（含可选超时）
@@ -1805,28 +1714,31 @@ test "redis 连接池：池满等待超时返回 PoolTimeout 而非挂死" {
 test "redis 主机解析：IPv4/IPv6 字面量、域名与非法输入" {
     const io = std.Io.Threaded.global_single_threaded.io();
 
+    // 走的是与 memcache 共用的 `net.resolveHost`（`net.zig` 另有直接单测）；
+    // 这里额外证明本后端的接线（`Options.host` 这条路径用的就是它）。
+    //
     // IPv4 字面量（改动前的唯一支持项，语义必须原样保留）。
-    const v4 = try resolveHost(io, "127.0.0.1", 6379);
+    const v4 = try net.resolveHost(io, "127.0.0.1", 6379);
     try std.testing.expect(v4 == .ip4);
     try std.testing.expectEqual(@as(u16, 6379), v4.getPort());
     try std.testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &v4.ip4.bytes);
 
     // IPv6 字面量：手写实现完全做不到，现在由 std 一步解析。
-    const v6 = try resolveHost(io, "::1", 6379);
+    const v6 = try net.resolveHost(io, "::1", 6379);
     try std.testing.expect(v6 == .ip6);
     try std.testing.expectEqual(@as(u16, 6379), v6.getPort());
-    const v6_full = try resolveHost(io, "2001:db8::1", 6380);
+    const v6_full = try net.resolveHost(io, "2001:db8::1", 6380);
     try std.testing.expect(v6_full == .ip6);
     try std.testing.expectEqual(@as(u16, 6380), v6_full.getPort());
 
     // 非法输入（含空格 / 下划线 → 连主机名都不合法）必须是明确的配置错误，
     // 而不是被当成地址或域名拿去做解析。
-    try std.testing.expectError(error.InvalidAddress, resolveHost(io, "not a host", 6379));
-    try std.testing.expectError(error.InvalidAddress, resolveHost(io, "bad_host", 6379));
+    try std.testing.expectError(error.InvalidAddress, net.resolveHost(io, "not a host", 6379));
+    try std.testing.expectError(error.InvalidAddress, net.resolveHost(io, "bad_host", 6379));
 
     // 域名：走 std 的 HostName.lookup（DNS + /etc/hosts + RFC 6761 的 localhost）。
     // 名字解析依赖运行环境，离线容器里跳过，不让环境噪声污染用例。
-    const by_name = resolveHost(io, "localhost", 6379) catch |err| switch (err) {
+    const by_name = net.resolveHost(io, "localhost", 6379) catch |err| switch (err) {
         error.UnknownHostName,
         error.NameServerFailure,
         error.NoAddressReturned,
