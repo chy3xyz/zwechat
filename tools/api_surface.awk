@@ -1,5 +1,14 @@
 # tools/api_surface.awk — 从 src/ 源码文本提取 zwechat 的公开 API 面
 #
+# ⚠ 已被 tools/api_surface.zig（基于 std.zig.Ast 的真实语法树）取代：
+#   tools/api_surface_check.sh 现在调用的是那个 Zig 工具，本文件**不再进入门禁路径**。
+#   保留它是因为它是「独立的第二实现」，可用来交叉校验新工具的旧口径行有没有漂移：
+#     cd <仓库根> && diff \
+#       <(awk -f tools/api_surface.awk $(find src -type f -name '*.zig' | sort) | sort -u) \
+#       <(zig run tools/api_surface.zig | grep -v ': sig ' | sort -u)
+#   两条命令的输出必须逐行相同（移植当时实测 6472 行零差异）。
+#   注意：`sig` 行（函数签名）只有新工具会输出，交叉校验时必须过滤掉。
+#
 # 用法（在仓库根目录）：
 #   awk -f tools/api_surface.awk $(find src -type f -name '*.zig' | LC_ALL=C sort)
 #

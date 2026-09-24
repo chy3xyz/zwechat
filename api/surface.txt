@@ -1,37 +1,55 @@
 # api/surface.txt — zwechat 公开 API 面快照（发版纪律门禁，不要手改）
 # 生成 / 校验：tools/api_surface_check.sh（--update 刷新；判定语义见脚本顶部注释）
-# 格式：<文件>: pub fn|const|var <容器>.<名称>  |  <文件>: field <容器>.<字段>: <类型>
+# 提取器：tools/api_surface.zig（基于 std.zig.Ast 的真实语法树；旧 awk 版只记函数名）
+# 格式：<文件>: pub fn|const|var <容器>.<名称>
+#       <文件>: sig <容器>.<名称>(参数类型, ...) <返回类型>
+#       <文件>: field <容器>.<字段>: <类型>
 # 口径：src/ 下所有「被 pub 标注的声明」，以及 pub 类型（含其内联匿名子类型）的字段；
 #       函数体 / test 块 / 私有类型内部一律不计。字段行不带 pub 前缀是因为 Zig 无私有字段。
+# `sig` 行只记参数类型与返回类型（不记参数名）：改参数类型、增删参数、改返回类型都会让
+#       下游编译失败，必须有自己的行才拦得住（旧 awk 只记名字，这类变更全漏）。
 src/aispeech/mod.zig: field AiSpeech._placeholder: u8
 src/aispeech/mod.zig: pub const AiSpeech
 src/aispeech/mod.zig: pub fn AiSpeech.init
+src/aispeech/mod.zig: sig AiSpeech.init() Self
 src/cache/memcache.zig: field Memcache.allocator: std.mem.Allocator
 src/cache/memcache.zig: field Memcache.io: std.Io
 src/cache/memcache.zig: field Memcache.last_value: ?[]u8
 src/cache/memcache.zig: field Memcache.line_buffer: [1024]u8
-src/cache/memcache.zig: field Memcache.mutex: SpinMutex
+src/cache/memcache.zig: field Memcache.mutex: std.Io.Mutex
 src/cache/memcache.zig: field Memcache.opts: Options
 src/cache/memcache.zig: field Memcache.owned_io: ?std.Io.Threaded
 src/cache/memcache.zig: field Memcache.read_buffer: [4096]u8
 src/cache/memcache.zig: field Memcache.reader: ?std.Io.net.Stream.Reader
 src/cache/memcache.zig: field Memcache.stream: ?std.Io.net.Stream
+src/cache/memcache.zig: field Memcache.timeout_reader: ?SocketReader
 src/cache/memcache.zig: field Memcache.write_buffer: [4096]u8
 src/cache/memcache.zig: field Memcache.writer: ?std.Io.net.Stream.Writer
+src/cache/memcache.zig: field Options.connect_timeout_ms: u64
 src/cache/memcache.zig: field Options.io: ?std.Io
+src/cache/memcache.zig: field Options.recv_timeout_ms: u64
 src/cache/memcache.zig: field Options.server: []const u8
 src/cache/memcache.zig: pub const Memcache
 src/cache/memcache.zig: pub const Options
 src/cache/memcache.zig: pub fn Memcache.asCache
 src/cache/memcache.zig: pub fn Memcache.create
 src/cache/memcache.zig: pub fn Memcache.deinit
+src/cache/memcache.zig: sig Memcache.asCache(*Memcache) Cache
+src/cache/memcache.zig: sig Memcache.create(std.mem.Allocator, Options) *Memcache
+src/cache/memcache.zig: sig Memcache.deinit(*Memcache) void
 src/cache/memory.zig: field Memory.allocator: std.mem.Allocator
 src/cache/memory.zig: field Memory.data: std.HashMap([]const u8, Entry, std.hash_map.StringContext, 80)
-src/cache/memory.zig: field Memory.mutex: SpinMutex
+src/cache/memory.zig: field Memory.io: std.Io
+src/cache/memory.zig: field Memory.mutex: std.Io.Mutex
 src/cache/memory.zig: pub const Memory
 src/cache/memory.zig: pub fn Memory.asCache
 src/cache/memory.zig: pub fn Memory.create
+src/cache/memory.zig: pub fn Memory.createWithIo
 src/cache/memory.zig: pub fn Memory.deinit
+src/cache/memory.zig: sig Memory.asCache(*Memory) Cache
+src/cache/memory.zig: sig Memory.create(std.mem.Allocator) *Memory
+src/cache/memory.zig: sig Memory.createWithIo(std.mem.Allocator, std.Io) *Memory
+src/cache/memory.zig: sig Memory.deinit(*Memory) void
 src/cache/mod.zig: field Cache.VTable.deinit: *const fn (ctx: *anyopaque) void
 src/cache/mod.zig: field Cache.VTable.delete: *const fn (ctx: *anyopaque, key: []const u8) CacheError!void
 src/cache/mod.zig: field Cache.VTable.get: *const fn (ctx: *anyopaque, key: []const u8) CacheError!?[]const u8
@@ -50,6 +68,12 @@ src/cache/mod.zig: pub fn Cache.delete
 src/cache/mod.zig: pub fn Cache.get
 src/cache/mod.zig: pub fn Cache.isExist
 src/cache/mod.zig: pub fn Cache.set
+src/cache/mod.zig: sig Cache.deinit(Cache) void
+src/cache/mod.zig: sig Cache.delete(Cache, []const u8) CacheError!void
+src/cache/mod.zig: sig Cache.get(Cache, []const u8) CacheError!?[]const u8
+src/cache/mod.zig: sig Cache.isExist(Cache, []const u8) CacheError!bool
+src/cache/mod.zig: sig Cache.set(Cache, []const u8, []const u8, i64) CacheError!void
+src/cache/redis.zig: field Options.connect_timeout_ms: u64
 src/cache/redis.zig: field Options.db: i32
 src/cache/redis.zig: field Options.host: []const u8
 src/cache/redis.zig: field Options.io: ?std.Io
@@ -57,6 +81,7 @@ src/cache/redis.zig: field Options.max_connections: usize
 src/cache/redis.zig: field Options.password: ?[]const u8
 src/cache/redis.zig: field Options.pool_timeout_ms: u64
 src/cache/redis.zig: field Options.port: u16
+src/cache/redis.zig: field Options.recv_timeout_ms: u64
 src/cache/redis.zig: field PoolStats.created: usize
 src/cache/redis.zig: field PoolStats.discarded: usize
 src/cache/redis.zig: field PoolStats.idle: usize
@@ -74,7 +99,7 @@ src/cache/redis.zig: field Redis.max_connections: usize
 src/cache/redis.zig: field Redis.opts: Options
 src/cache/redis.zig: field Redis.owned_io: ?std.Io.Threaded
 src/cache/redis.zig: field Redis.peak_in_use: usize
-src/cache/redis.zig: field Redis.pool_mutex: SpinMutex
+src/cache/redis.zig: field Redis.pool_mutex: std.Io.Mutex
 src/cache/redis.zig: field Redis.timeout_total: usize
 src/cache/redis.zig: pub const Options
 src/cache/redis.zig: pub const PoolStats
@@ -83,13 +108,18 @@ src/cache/redis.zig: pub fn Redis.asCache
 src/cache/redis.zig: pub fn Redis.create
 src/cache/redis.zig: pub fn Redis.deinit
 src/cache/redis.zig: pub fn Redis.poolStats
+src/cache/redis.zig: sig Redis.asCache(*Redis) Cache
+src/cache/redis.zig: sig Redis.create(std.mem.Allocator, Options) *Redis
+src/cache/redis.zig: sig Redis.deinit(*Redis) void
+src/cache/redis.zig: sig Redis.poolStats(*Redis) PoolStats
 src/credential/default_access_token.zig: field DefaultAccessToken.app_id: []const u8
 src/credential/default_access_token.zig: field DefaultAccessToken.app_secret: []const u8
 src/credential/default_access_token.zig: field DefaultAccessToken.cache: Cache
 src/credential/default_access_token.zig: field DefaultAccessToken.cache_key_prefix: []const u8
 src/credential/default_access_token.zig: field DefaultAccessToken.fetcher: Fetcher
 src/credential/default_access_token.zig: field DefaultAccessToken.fetcher_ctx: *anyopaque
-src/credential/default_access_token.zig: field DefaultAccessToken.lock: SpinMutex
+src/credential/default_access_token.zig: field DefaultAccessToken.io: std.Io
+src/credential/default_access_token.zig: field DefaultAccessToken.lock: std.Io.Mutex
 src/credential/default_access_token.zig: pub const DefaultAccessToken
 src/credential/default_access_token.zig: pub const accessTokenURLTemplate
 src/credential/default_access_token.zig: pub fn DefaultAccessToken.asHandle
@@ -100,12 +130,21 @@ src/credential/default_access_token.zig: pub fn DefaultAccessToken.getAccessToke
 src/credential/default_access_token.zig: pub fn DefaultAccessToken.init
 src/credential/default_access_token.zig: pub fn DefaultAccessToken.initWithFetcher
 src/credential/default_access_token.zig: pub fn DefaultAccessToken.invalidate
+src/credential/default_access_token.zig: sig DefaultAccessToken.asHandle(*DefaultAccessToken) AccessTokenHandle
+src/credential/default_access_token.zig: sig DefaultAccessToken.buildURL(*const DefaultAccessToken, std.mem.Allocator) CredentialError![]u8
+src/credential/default_access_token.zig: sig DefaultAccessToken.cacheKey(*const DefaultAccessToken, std.mem.Allocator) CredentialError![]u8
+src/credential/default_access_token.zig: sig DefaultAccessToken.forceRefresh(*DefaultAccessToken, std.mem.Allocator) CredentialError![]u8
+src/credential/default_access_token.zig: sig DefaultAccessToken.getAccessToken(*DefaultAccessToken, std.mem.Allocator) CredentialError![]u8
+src/credential/default_access_token.zig: sig DefaultAccessToken.init([]const u8, []const u8, []const u8, Cache) DefaultAccessToken
+src/credential/default_access_token.zig: sig DefaultAccessToken.initWithFetcher([]const u8, []const u8, []const u8, Cache, Fetcher, *anyopaque) DefaultAccessToken
+src/credential/default_access_token.zig: sig DefaultAccessToken.invalidate(*DefaultAccessToken, std.mem.Allocator) CredentialError!void
 src/credential/js_ticket.zig: field DefaultJsTicket.app_id: []const u8
 src/credential/js_ticket.zig: field DefaultJsTicket.cache: Cache
 src/credential/js_ticket.zig: field DefaultJsTicket.cache_key_prefix: []const u8
 src/credential/js_ticket.zig: field DefaultJsTicket.fetcher: Fetcher
 src/credential/js_ticket.zig: field DefaultJsTicket.fetcher_ctx: *anyopaque
-src/credential/js_ticket.zig: field DefaultJsTicket.lock: SpinMutex
+src/credential/js_ticket.zig: field DefaultJsTicket.io: std.Io
+src/credential/js_ticket.zig: field DefaultJsTicket.lock: std.Io.Mutex
 src/credential/js_ticket.zig: pub const DefaultJsTicket
 src/credential/js_ticket.zig: pub const getTicketURLTemplate
 src/credential/js_ticket.zig: pub fn DefaultJsTicket.asHandle
@@ -115,6 +154,13 @@ src/credential/js_ticket.zig: pub fn DefaultJsTicket.getTicket
 src/credential/js_ticket.zig: pub fn DefaultJsTicket.init
 src/credential/js_ticket.zig: pub fn DefaultJsTicket.initWithFetcher
 src/credential/js_ticket.zig: pub fn DefaultJsTicket.invalidate
+src/credential/js_ticket.zig: sig DefaultJsTicket.asHandle(*DefaultJsTicket) JsTicketHandle
+src/credential/js_ticket.zig: sig DefaultJsTicket.buildURL(*const DefaultJsTicket, std.mem.Allocator, []const u8) CredentialError![]u8
+src/credential/js_ticket.zig: sig DefaultJsTicket.cacheKey(*const DefaultJsTicket, std.mem.Allocator) CredentialError![]u8
+src/credential/js_ticket.zig: sig DefaultJsTicket.getTicket(*DefaultJsTicket, std.mem.Allocator, []const u8) CredentialError![]u8
+src/credential/js_ticket.zig: sig DefaultJsTicket.init([]const u8, []const u8, Cache) DefaultJsTicket
+src/credential/js_ticket.zig: sig DefaultJsTicket.initWithFetcher([]const u8, []const u8, Cache, Fetcher, *anyopaque) DefaultJsTicket
+src/credential/js_ticket.zig: sig DefaultJsTicket.invalidate(*DefaultJsTicket, std.mem.Allocator) CredentialError!void
 src/credential/mod.zig: field AccessTokenHandle.VTable.getAccessToken: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8
 src/credential/mod.zig: field AccessTokenHandle.VTable.invalidate: ?*const fn (ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!void
 src/credential/mod.zig: field AccessTokenHandle.ptr: *anyopaque
@@ -144,6 +190,11 @@ src/credential/mod.zig: pub fn AccessTokenHandle.invalidateAccessToken
 src/credential/mod.zig: pub fn JsTicketHandle.getTicket
 src/credential/mod.zig: pub fn JsTicketHandle.invalidateTicket
 src/credential/mod.zig: pub fn tokenTTL
+src/credential/mod.zig: sig AccessTokenHandle.getAccessToken(AccessTokenHandle, std.mem.Allocator) anyerror![]u8
+src/credential/mod.zig: sig AccessTokenHandle.invalidateAccessToken(AccessTokenHandle, std.mem.Allocator) anyerror!void
+src/credential/mod.zig: sig JsTicketHandle.getTicket(JsTicketHandle, std.mem.Allocator, []const u8) anyerror![]u8
+src/credential/mod.zig: sig JsTicketHandle.invalidateTicket(JsTicketHandle, std.mem.Allocator) anyerror!void
+src/credential/mod.zig: sig tokenTTL(i64) i64
 src/credential/work_access_token.zig: field ResAccessToken.access_token: []const u8
 src/credential/work_access_token.zig: field ResAccessToken.errcode: i64
 src/credential/work_access_token.zig: field ResAccessToken.errmsg: []const u8
@@ -154,7 +205,8 @@ src/credential/work_access_token.zig: field WorkAccessToken.corp_id: []const u8
 src/credential/work_access_token.zig: field WorkAccessToken.corp_secret: []const u8
 src/credential/work_access_token.zig: field WorkAccessToken.fetcher: Fetcher
 src/credential/work_access_token.zig: field WorkAccessToken.fetcher_ctx: *anyopaque
-src/credential/work_access_token.zig: field WorkAccessToken.lock: SpinMutex
+src/credential/work_access_token.zig: field WorkAccessToken.io: std.Io
+src/credential/work_access_token.zig: field WorkAccessToken.lock: std.Io.Mutex
 src/credential/work_access_token.zig: pub const ResAccessToken
 src/credential/work_access_token.zig: pub const SpinMutex
 src/credential/work_access_token.zig: pub const WorkAccessToken
@@ -165,6 +217,11 @@ src/credential/work_access_token.zig: pub fn WorkAccessToken.getAccessToken
 src/credential/work_access_token.zig: pub fn WorkAccessToken.init
 src/credential/work_access_token.zig: pub fn WorkAccessToken.initWithFetcher
 src/credential/work_access_token.zig: pub fn WorkAccessToken.invalidate
+src/credential/work_access_token.zig: sig WorkAccessToken.asHandle(*WorkAccessToken) credential.AccessTokenHandle
+src/credential/work_access_token.zig: sig WorkAccessToken.getAccessToken(*Self, std.mem.Allocator) credential.CredentialError![]u8
+src/credential/work_access_token.zig: sig WorkAccessToken.init([]const u8, []const u8, []const u8, Cache) WorkAccessToken
+src/credential/work_access_token.zig: sig WorkAccessToken.initWithFetcher([]const u8, []const u8, []const u8, Cache, Fetcher, *anyopaque) WorkAccessToken
+src/credential/work_access_token.zig: sig WorkAccessToken.invalidate(*Self, std.mem.Allocator) credential.CredentialError!void
 src/credential/work_js_ticket.zig: field TicketResponse.errcode: i64
 src/credential/work_js_ticket.zig: field TicketResponse.errmsg: []const u8
 src/credential/work_js_ticket.zig: field TicketResponse.expires_in: i64
@@ -177,7 +234,8 @@ src/credential/work_js_ticket.zig: field WorkJsTicket.cache_key_prefix: []const 
 src/credential/work_js_ticket.zig: field WorkJsTicket.corp_id: []const u8
 src/credential/work_js_ticket.zig: field WorkJsTicket.fetcher: Fetcher
 src/credential/work_js_ticket.zig: field WorkJsTicket.fetcher_ctx: *anyopaque
-src/credential/work_js_ticket.zig: field WorkJsTicket.lock: SpinMutex
+src/credential/work_js_ticket.zig: field WorkJsTicket.io: std.Io
+src/credential/work_js_ticket.zig: field WorkJsTicket.lock: std.Io.Mutex
 src/credential/work_js_ticket.zig: pub const Fetcher
 src/credential/work_js_ticket.zig: pub const TicketResponse
 src/credential/work_js_ticket.zig: pub const TicketType
@@ -187,6 +245,11 @@ src/credential/work_js_ticket.zig: pub fn WorkJsTicket.init
 src/credential/work_js_ticket.zig: pub fn WorkJsTicket.initWithFetcher
 src/credential/work_js_ticket.zig: pub fn WorkJsTicket.invalidate
 src/credential/work_js_ticket.zig: pub fn WorkJsTicket.invalidateAll
+src/credential/work_js_ticket.zig: sig WorkJsTicket.getTicket(*Self, std.mem.Allocator, []const u8, TicketType) credential.CredentialError![]u8
+src/credential/work_js_ticket.zig: sig WorkJsTicket.init([]const u8, []const u8, []const u8, Cache) WorkJsTicket
+src/credential/work_js_ticket.zig: sig WorkJsTicket.initWithFetcher([]const u8, []const u8, []const u8, Cache, Fetcher, *anyopaque) WorkJsTicket
+src/credential/work_js_ticket.zig: sig WorkJsTicket.invalidate(*Self, std.mem.Allocator, TicketType) credential.CredentialError!void
+src/credential/work_js_ticket.zig: sig WorkJsTicket.invalidateAll(*Self, std.mem.Allocator) credential.CredentialError!void
 src/live_probe.zig: field EnvPair.a: []const u8
 src/live_probe.zig: field EnvPair.b: []const u8
 src/live_probe.zig: field FieldCheck.empty_ok: bool
@@ -221,7 +284,20 @@ src/live_probe.zig: pub fn main
 src/live_probe.zig: pub fn preview
 src/live_probe.zig: pub fn readEnv
 src/live_probe.zig: pub fn readEnvPair
+src/live_probe.zig: sig Status.label(Status) []const u8
+src/live_probe.zig: sig bodyHasKey([]const u8, []const u8) bool
+src/live_probe.zig: sig flattenControlChars(std.mem.Allocator, []const u8) []const u8
+src/live_probe.zig: sig gateEnabled(?[]const u8) bool
+src/live_probe.zig: sig hasStrictFlag([]const []const u8) bool
+src/live_probe.zig: sig isNotApplicableErrCode(i64) bool
+src/live_probe.zig: sig isStrictFlag([]const u8) bool
+src/live_probe.zig: sig judgeField(FieldCheck) Status
+src/live_probe.zig: sig main(std.process.Init) void
+src/live_probe.zig: sig preview([]const u8, usize) []const u8
+src/live_probe.zig: sig readEnv(EnvGet, *anyopaque, []const u8) ?[]const u8
+src/live_probe.zig: sig readEnvPair(EnvGet, *anyopaque, []const u8, []const u8) ?EnvPair
 src/main.zig: pub fn main
+src/main.zig: sig main(std.process.Init) void
 src/middleware/mod.zig: pub const CallbackQuery
 src/middleware/mod.zig: pub const DecryptedMessage
 src/middleware/mod.zig: pub const handleServerMessage
@@ -243,6 +319,11 @@ src/middleware/wechat_handler.zig: pub fn handleServerMessage
 src/middleware/wechat_handler.zig: pub fn parseCallbackQuery
 src/middleware/wechat_handler.zig: pub fn verifyServerSignature
 src/middleware/wechat_handler.zig: pub fn verifyURL
+src/middleware/wechat_handler.zig: sig DecryptedMessage.deinit(*DecryptedMessage, std.mem.Allocator) void
+src/middleware/wechat_handler.zig: sig handleServerMessage(std.mem.Allocator, []const u8, []const u8, []const u8) DecryptedMessage
+src/middleware/wechat_handler.zig: sig parseCallbackQuery([]const u8) CallbackQuery
+src/middleware/wechat_handler.zig: sig verifyServerSignature(std.mem.Allocator, []const u8, CallbackQuery) bool
+src/middleware/wechat_handler.zig: sig verifyURL(std.mem.Allocator, []const u8, CallbackQuery) ?[]const u8
 src/minigame/config.zig: field Config.app_id: []const u8
 src/minigame/config.zig: field Config.app_secret: []const u8
 src/minigame/config.zig: field Config.cache: ?Cache
@@ -252,12 +333,17 @@ src/minigame/context/mod.zig: field Context.access_token_handle: credential.Acce
 src/minigame/context/mod.zig: field Context.config: Config
 src/minigame/context/mod.zig: pub const Context
 src/minigame/context/mod.zig: pub fn Context.getAccessToken
+src/minigame/context/mod.zig: sig Context.getAccessToken(*Context, std.mem.Allocator) @TypeOf(self.access_token_handle.getAccessToken(allocator))
 src/minigame/mod.zig: field MiniGame.ctx: Context
 src/minigame/mod.zig: pub const MiniGame
 src/minigame/mod.zig: pub fn MiniGame.getAccessToken
 src/minigame/mod.zig: pub fn MiniGame.getContext
 src/minigame/mod.zig: pub fn MiniGame.init
 src/minigame/mod.zig: pub fn MiniGame.newMiniGame
+src/minigame/mod.zig: sig MiniGame.getAccessToken(*Self, std.mem.Allocator) @TypeOf(self.ctx.getAccessToken(allocator))
+src/minigame/mod.zig: sig MiniGame.getContext(*Self) *Context
+src/minigame/mod.zig: sig MiniGame.init(Context) Self
+src/minigame/mod.zig: sig MiniGame.newMiniGame(Config, credential.AccessTokenHandle) Self
 src/miniprogram/analysis/mod.zig: field Analysis.allocator: std.mem.Allocator
 src/miniprogram/analysis/mod.zig: field Analysis.ctx: *Context
 src/miniprogram/analysis/mod.zig: field Analysis.transport: ?util_http.HttpClient.Transport
@@ -377,6 +463,19 @@ src/miniprogram/analysis/mod.zig: pub fn Analysis.getAnalysisWeeklyVisitTrend
 src/miniprogram/analysis/mod.zig: pub fn Analysis.getPerformanceData
 src/miniprogram/analysis/mod.zig: pub fn Analysis.init
 src/miniprogram/analysis/mod.zig: pub fn Analysis.setTransport
+src/miniprogram/analysis/mod.zig: sig Analysis.getAnalysisDailyRetain(*Self, []const u8, []const u8) std.json.Parsed(ResAnalysisRetain)
+src/miniprogram/analysis/mod.zig: sig Analysis.getAnalysisDailySummary(*Self, []const u8, []const u8) std.json.Parsed(ResAnalysisDailySummary)
+src/miniprogram/analysis/mod.zig: sig Analysis.getAnalysisDailyVisitTrend(*Self, []const u8, []const u8) std.json.Parsed(ResAnalysisVisitTrend)
+src/miniprogram/analysis/mod.zig: sig Analysis.getAnalysisMonthlyRetain(*Self, []const u8, []const u8) std.json.Parsed(ResAnalysisRetain)
+src/miniprogram/analysis/mod.zig: sig Analysis.getAnalysisMonthlyVisitTrend(*Self, []const u8, []const u8) std.json.Parsed(ResAnalysisVisitTrend)
+src/miniprogram/analysis/mod.zig: sig Analysis.getAnalysisUserPortrait(*Self, []const u8, []const u8) std.json.Parsed(ResAnalysisUserPortrait)
+src/miniprogram/analysis/mod.zig: sig Analysis.getAnalysisVisitDistribution(*Self, []const u8, []const u8) std.json.Parsed(ResAnalysisVisitDistribution)
+src/miniprogram/analysis/mod.zig: sig Analysis.getAnalysisVisitPage(*Self, []const u8, []const u8) std.json.Parsed(ResAnalysisVisitPage)
+src/miniprogram/analysis/mod.zig: sig Analysis.getAnalysisWeeklyRetain(*Self, []const u8, []const u8) std.json.Parsed(ResAnalysisRetain)
+src/miniprogram/analysis/mod.zig: sig Analysis.getAnalysisWeeklyVisitTrend(*Self, []const u8, []const u8) std.json.Parsed(ResAnalysisVisitTrend)
+src/miniprogram/analysis/mod.zig: sig Analysis.getPerformanceData(*Self, GetPerformanceDataRequest) std.json.Parsed(GetPerformanceDataResponse)
+src/miniprogram/analysis/mod.zig: sig Analysis.init(*Context, std.mem.Allocator) Self
+src/miniprogram/analysis/mod.zig: sig Analysis.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
 src/miniprogram/auth/mod.zig: field Auth.allocator: std.mem.Allocator
 src/miniprogram/auth/mod.zig: field Auth.ctx: *Context
 src/miniprogram/auth/mod.zig: field Auth.transport: ?util_http.HttpClient.Transport
@@ -421,6 +520,13 @@ src/miniprogram/auth/mod.zig: pub fn Auth.getPaidUnionID
 src/miniprogram/auth/mod.zig: pub fn Auth.getPhoneNumber
 src/miniprogram/auth/mod.zig: pub fn Auth.init
 src/miniprogram/auth/mod.zig: pub fn Auth.setTransport
+src/miniprogram/auth/mod.zig: sig Auth.checkEncryptedData(*Self, []const u8) std.json.Parsed(RspCheckEncryptedData)
+src/miniprogram/auth/mod.zig: sig Auth.checkSession(*Self, []const u8, []const u8) void
+src/miniprogram/auth/mod.zig: sig Auth.code2Session(*Self, []const u8) std.json.Parsed(ResCode2Session)
+src/miniprogram/auth/mod.zig: sig Auth.getPaidUnionID(*Self, GetPaidUnionIDRequest) []u8
+src/miniprogram/auth/mod.zig: sig Auth.getPhoneNumber(*Self, []const u8) std.json.Parsed(GetPhoneNumberResponse)
+src/miniprogram/auth/mod.zig: sig Auth.init(*Context, std.mem.Allocator) Self
+src/miniprogram/auth/mod.zig: sig Auth.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
 src/miniprogram/business/mod.zig: field Business.allocator: std.mem.Allocator
 src/miniprogram/business/mod.zig: field Business.ctx: *Context
 src/miniprogram/business/mod.zig: field Business.transport: ?util_http.HttpClient.Transport
@@ -439,6 +545,9 @@ src/miniprogram/business/mod.zig: pub const Watermark
 src/miniprogram/business/mod.zig: pub fn Business.getPhoneNumber
 src/miniprogram/business/mod.zig: pub fn Business.init
 src/miniprogram/business/mod.zig: pub fn Business.setTransport
+src/miniprogram/business/mod.zig: sig Business.getPhoneNumber(*Self, GetPhoneNumberRequest) std.json.Parsed(PhoneInfo)
+src/miniprogram/business/mod.zig: sig Business.init(*Context, std.mem.Allocator) Self
+src/miniprogram/business/mod.zig: sig Business.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
 src/miniprogram/config.zig: field Config.app_id: []const u8
 src/miniprogram/config.zig: field Config.app_key: []const u8
 src/miniprogram/config.zig: field Config.app_secret: []const u8
@@ -457,11 +566,17 @@ src/miniprogram/content/mod.zig: pub fn Content.checkImage
 src/miniprogram/content/mod.zig: pub fn Content.checkText
 src/miniprogram/content/mod.zig: pub fn Content.init
 src/miniprogram/content/mod.zig: pub fn Content.setTransport
+src/miniprogram/content/mod.zig: sig Content.checkImage(*Self, []const u8) void
+src/miniprogram/content/mod.zig: sig Content.checkText(*Self, []const u8, []const u8, u8) []u8
+src/miniprogram/content/mod.zig: sig Content.init(*Context, std.mem.Allocator) Self
+src/miniprogram/content/mod.zig: sig Content.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
 src/miniprogram/context/mod.zig: field Context.access_token_handle: credential.AccessTokenHandle
 src/miniprogram/context/mod.zig: field Context.config: Config
 src/miniprogram/context/mod.zig: pub const Context
 src/miniprogram/context/mod.zig: pub fn Context.getAccessToken
 src/miniprogram/context/mod.zig: pub fn Context.invalidateAccessToken
+src/miniprogram/context/mod.zig: sig Context.getAccessToken(*Context, std.mem.Allocator) @TypeOf(self.access_token_handle.getAccessToken(allocator))
+src/miniprogram/context/mod.zig: sig Context.invalidateAccessToken(*Context, std.mem.Allocator) anyerror!void
 src/miniprogram/encryptor/mod.zig: field Encryptor.ctx: *Context
 src/miniprogram/encryptor/mod.zig: field PlainData.avatarUrl: []const u8
 src/miniprogram/encryptor/mod.zig: field PlainData.city: []const u8
@@ -486,6 +601,9 @@ src/miniprogram/encryptor/mod.zig: pub const Watermark
 src/miniprogram/encryptor/mod.zig: pub fn Encryptor.decrypt
 src/miniprogram/encryptor/mod.zig: pub fn Encryptor.init
 src/miniprogram/encryptor/mod.zig: pub fn getCipherText
+src/miniprogram/encryptor/mod.zig: sig Encryptor.decrypt(*Self, std.mem.Allocator, []const u8, []const u8, []const u8) std.json.Parsed(PlainData)
+src/miniprogram/encryptor/mod.zig: sig Encryptor.init(*Context) Self
+src/miniprogram/encryptor/mod.zig: sig getCipherText(std.mem.Allocator, []const u8, []const u8, []const u8) []u8
 src/miniprogram/express/mod.zig: field Express.allocator: std.mem.Allocator
 src/miniprogram/express/mod.zig: field Express.ctx: *Context
 src/miniprogram/express/mod.zig: field Express.transport: ?util_http.HttpClient.Transport
@@ -554,6 +672,15 @@ src/miniprogram/express/mod.zig: pub fn Express.setTransport
 src/miniprogram/express/mod.zig: pub fn Express.traceWaybill
 src/miniprogram/express/mod.zig: pub fn Express.updateFollowWaybillGoods
 src/miniprogram/express/mod.zig: pub fn Express.updateWaybillGoods
+src/miniprogram/express/mod.zig: sig Express.followWaybill(*Self, FollowWaybillRequest) std.json.Parsed(FollowWaybillResponse)
+src/miniprogram/express/mod.zig: sig Express.getDeliveryList(*Self) std.json.Parsed(GetDeliveryListResponse)
+src/miniprogram/express/mod.zig: sig Express.init(*Context, std.mem.Allocator) Self
+src/miniprogram/express/mod.zig: sig Express.queryFollowTrace(*Self, QueryFollowTraceRequest) std.json.Parsed(QueryFollowTraceResponse)
+src/miniprogram/express/mod.zig: sig Express.queryTrace(*Self, QueryTraceRequest) std.json.Parsed(QueryTraceResponse)
+src/miniprogram/express/mod.zig: sig Express.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/miniprogram/express/mod.zig: sig Express.traceWaybill(*Self, TraceWaybillRequest) std.json.Parsed(TraceWaybillResponse)
+src/miniprogram/express/mod.zig: sig Express.updateFollowWaybillGoods(*Self, UpdateFollowWaybillGoodsRequest) void
+src/miniprogram/express/mod.zig: sig Express.updateWaybillGoods(*Self, UpdateWaybillGoodsRequest) void
 src/miniprogram/message/mod.zig: field CommonPushData.create_time: i64
 src/miniprogram/message/mod.zig: field CommonPushData.event: []const u8
 src/miniprogram/message/mod.zig: field CommonPushData.from_user_name: []const u8
@@ -805,6 +932,25 @@ src/miniprogram/message/mod.zig: pub fn PushDataXpayGoodsDeliverNotify.isSandbox
 src/miniprogram/message/mod.zig: pub fn PushDataXpayRefundNotify.isSuccess
 src/miniprogram/message/mod.zig: pub fn PushReceiver.getMsgData
 src/miniprogram/message/mod.zig: pub fn PushReceiver.init
+src/miniprogram/message/mod.zig: sig MediaCheckAsyncData.hasRiskyDetail(*const MediaCheckAsyncData) bool
+src/miniprogram/message/mod.zig: sig MediaCheckAsyncData.isPass(*const MediaCheckAsyncData) bool
+src/miniprogram/message/mod.zig: sig MediaCheckAsyncData.isRisky(*const MediaCheckAsyncData) bool
+src/miniprogram/message/mod.zig: sig Message.init(*Context) Message
+src/miniprogram/message/mod.zig: sig Message.sendSubscribeMessage(Message, std.mem.Allocator, SubscribeMessageParams) []u8
+src/miniprogram/message/mod.zig: sig Message.setTransport(*Message, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/miniprogram/message/mod.zig: sig PushDataAddExpressPath.getActions(*const PushDataAddExpressPath) []PushDataAddExpressPathAction
+src/miniprogram/message/mod.zig: sig PushDataOrderSettlement.isAutoConfirmReceive(*const PushDataOrderSettlement) bool
+src/miniprogram/message/mod.zig: sig PushDataOrderSettlement.isManualConfirmReceive(*const PushDataOrderSettlement) bool
+src/miniprogram/message/mod.zig: sig PushDataSecVodAudit.isAuditPassed(*const PushDataSecVodAudit) bool
+src/miniprogram/message/mod.zig: sig PushDataSecVodUpload.isSuccess(*const PushDataSecVodUpload) bool
+src/miniprogram/message/mod.zig: sig PushDataSubscribeMsgChange.getSubscribeMsgChangeEvents(*const PushDataSubscribeMsgChange) []SubscribeMsgChangeEventItem
+src/miniprogram/message/mod.zig: sig PushDataSubscribeMsgSent.getSubscribeMsgSentEvents(*const PushDataSubscribeMsgSent) []SubscribeMsgSentEventItem
+src/miniprogram/message/mod.zig: sig PushDataSubscribePopup.getSubscribeMsgPopupEvents(*const PushDataSubscribePopup) []SubscribeMsgPopupEventItem
+src/miniprogram/message/mod.zig: sig PushDataXpayCoinPayNotify.isSandbox(*const PushDataXpayCoinPayNotify) bool
+src/miniprogram/message/mod.zig: sig PushDataXpayGoodsDeliverNotify.isSandbox(*const PushDataXpayGoodsDeliverNotify) bool
+src/miniprogram/message/mod.zig: sig PushDataXpayRefundNotify.isSuccess(*const PushDataXpayRefundNotify) bool
+src/miniprogram/message/mod.zig: sig PushReceiver.getMsgData(PushReceiver, std.mem.Allocator, []const u8, PushDataType) ParsedPushMsg
+src/miniprogram/message/mod.zig: sig PushReceiver.init() PushReceiver
 src/miniprogram/minidrama/mod.zig: field ApplyUploadRequest.cover_type: []const u8
 src/miniprogram/minidrama/mod.zig: field ApplyUploadRequest.media_name: []const u8
 src/miniprogram/minidrama/mod.zig: field ApplyUploadRequest.media_type: []const u8
@@ -1034,6 +1180,23 @@ src/miniprogram/minidrama/mod.zig: pub fn MiniDrama.pullUpload
 src/miniprogram/minidrama/mod.zig: pub fn MiniDrama.setTransport
 src/miniprogram/minidrama/mod.zig: pub fn MiniDrama.singleFileUpload
 src/miniprogram/minidrama/mod.zig: pub fn MiniDrama.uploadPart
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.applyUpload(*Self, ApplyUploadRequest) std.json.Parsed(ApplyUploadResponse)
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.auditDrama(*Self, AuditDramaRequest) std.json.Parsed(AuditDramaResponse)
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.commitUpload(*Self, CommitUploadRequest) std.json.Parsed(CommitUploadResponse)
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.deleteMedia(*Self, DeleteMediaRequest) std.json.Parsed(DeleteMediaResponse)
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.getCdnLogs(*Self, GetCdnLogsRequest) std.json.Parsed(GetCdnLogsResponse)
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.getCdnUsageData(*Self, GetCdnUsageDataRequest) std.json.Parsed(GetCdnUsageDataResponse)
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.getDrama(*Self, GetDramaRequest) std.json.Parsed(GetDramaResponse)
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.getMedia(*Self, GetMediaRequest) std.json.Parsed(GetMediaResponse)
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.getMediaLink(*Self, GetMediaLinkRequest) std.json.Parsed(GetMediaLinkResponse)
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.getTask(*Self, GetTaskRequest) std.json.Parsed(GetTaskResponse)
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.init(*Context, std.mem.Allocator) Self
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.listDramas(*Self, ListDramasRequest) std.json.Parsed(ListDramasResponse)
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.listMedia(*Self, ListMediaRequest) std.json.Parsed(ListMediaResponse)
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.pullUpload(*Self, PullUploadRequest) std.json.Parsed(PullUploadResponse)
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.singleFileUpload(*Self, SingleFileUploadRequest) std.json.Parsed(SingleFileUploadResponse)
+src/miniprogram/minidrama/mod.zig: sig MiniDrama.uploadPart(*Self, UploadPartRequest) std.json.Parsed(UploadPartResponse)
 src/miniprogram/mod.zig: field MiniProgram.allocator: std.mem.Allocator
 src/miniprogram/mod.zig: field MiniProgram.auth_instance: ?Auth
 src/miniprogram/mod.zig: field MiniProgram.ctx: Context
@@ -1092,6 +1255,31 @@ src/miniprogram/mod.zig: pub fn MiniProgram.getURLScheme
 src/miniprogram/mod.zig: pub fn MiniProgram.getVirtualPayment
 src/miniprogram/mod.zig: pub fn MiniProgram.getWeRun
 src/miniprogram/mod.zig: pub fn MiniProgram.init
+src/miniprogram/mod.zig: sig MiniProgram.getAnalysis(*Self) analysis.Analysis
+src/miniprogram/mod.zig: sig MiniProgram.getAuth(*Self) Auth
+src/miniprogram/mod.zig: sig MiniProgram.getBusiness(*Self) business.Business
+src/miniprogram/mod.zig: sig MiniProgram.getContent(*Self) content.Content
+src/miniprogram/mod.zig: sig MiniProgram.getContext(*MiniProgram) *Context
+src/miniprogram/mod.zig: sig MiniProgram.getEncryptor(*Self) encryptor.Encryptor
+src/miniprogram/mod.zig: sig MiniProgram.getExpress(*Self) express.Express
+src/miniprogram/mod.zig: sig MiniProgram.getMessage(*Self) message.Message
+src/miniprogram/mod.zig: sig MiniProgram.getMiniDrama(*Self) minidrama.MiniDrama
+src/miniprogram/mod.zig: sig MiniProgram.getOCR(*Self) ocr.OCR
+src/miniprogram/mod.zig: sig MiniProgram.getOperation(*Self) operation.Operation
+src/miniprogram/mod.zig: sig MiniProgram.getOrder(*Self) order.Shipping
+src/miniprogram/mod.zig: sig MiniProgram.getPrivacy(*Self) privacy.Privacy
+src/miniprogram/mod.zig: sig MiniProgram.getQRCode(*Self) qrcode.QRCode
+src/miniprogram/mod.zig: sig MiniProgram.getRedPacketCover(*Self) redpacketcover.RedPacketCover
+src/miniprogram/mod.zig: sig MiniProgram.getRiskControl(*Self) riskcontrol.RiskControl
+src/miniprogram/mod.zig: sig MiniProgram.getSecurity(*Self) security.Security
+src/miniprogram/mod.zig: sig MiniProgram.getShortLink(*Self) shortlink.ShortLink
+src/miniprogram/mod.zig: sig MiniProgram.getSubscribe(*Self) subscribe.Subscribe
+src/miniprogram/mod.zig: sig MiniProgram.getTcb(*Self) tcb.Tcb
+src/miniprogram/mod.zig: sig MiniProgram.getURLLink(*Self) urllink.URLLink
+src/miniprogram/mod.zig: sig MiniProgram.getURLScheme(*Self) urlscheme.URLScheme
+src/miniprogram/mod.zig: sig MiniProgram.getVirtualPayment(*Self) virtualpayment.VirtualPayment
+src/miniprogram/mod.zig: sig MiniProgram.getWeRun(*Self) werun.WeRun
+src/miniprogram/mod.zig: sig MiniProgram.init(std.mem.Allocator, Config, credential.AccessTokenHandle) MiniProgram
 src/miniprogram/ocr/mod.zig: field CommonItem.pos: Position
 src/miniprogram/ocr/mod.zig: field CommonItem.text: []const u8
 src/miniprogram/ocr/mod.zig: field Coordinate.x: i64
@@ -1188,6 +1376,14 @@ src/miniprogram/ocr/mod.zig: pub fn OCR.drivingLicense
 src/miniprogram/ocr/mod.zig: pub fn OCR.idCard
 src/miniprogram/ocr/mod.zig: pub fn OCR.init
 src/miniprogram/ocr/mod.zig: pub fn OCR.setTransport
+src/miniprogram/ocr/mod.zig: sig OCR.bankCard(*Self, []const u8) std.json.Parsed(ResBankCard)
+src/miniprogram/ocr/mod.zig: sig OCR.bizLicense(*Self, []const u8) std.json.Parsed(ResBizLicense)
+src/miniprogram/ocr/mod.zig: sig OCR.common(*Self, []const u8) std.json.Parsed(ResCommon)
+src/miniprogram/ocr/mod.zig: sig OCR.driving(*Self, []const u8) std.json.Parsed(ResDriving)
+src/miniprogram/ocr/mod.zig: sig OCR.drivingLicense(*Self, []const u8) std.json.Parsed(ResDrivingLicense)
+src/miniprogram/ocr/mod.zig: sig OCR.idCard(*Self, []const u8) std.json.Parsed(ResIDCard)
+src/miniprogram/ocr/mod.zig: sig OCR.init(*Context, std.mem.Allocator) Self
+src/miniprogram/ocr/mod.zig: sig OCR.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
 src/miniprogram/operation/mod.zig: field ClientVersion.client_version_list: []const []const u8
 src/miniprogram/operation/mod.zig: field ClientVersion.type: i64
 src/miniprogram/operation/mod.zig: field Feedback.content: []const u8
@@ -1370,6 +1566,17 @@ src/miniprogram/operation/mod.zig: pub fn Operation.getVersionList
 src/miniprogram/operation/mod.zig: pub fn Operation.init
 src/miniprogram/operation/mod.zig: pub fn Operation.realTimeLogSearch
 src/miniprogram/operation/mod.zig: pub fn Operation.setTransport
+src/miniprogram/operation/mod.zig: sig Operation.getDomainInfo(*Self, GetDomainInfoRequest) std.json.Parsed(GetDomainInfoResponse)
+src/miniprogram/operation/mod.zig: sig Operation.getFeedbackList(*Self, GetFeedbackListRequest) std.json.Parsed(GetFeedbackListResponse)
+src/miniprogram/operation/mod.zig: sig Operation.getGrayReleasePlan(*Self) std.json.Parsed(GetGrayReleasePlanResponse)
+src/miniprogram/operation/mod.zig: sig Operation.getJsErrDetail(*Self, GetJsErrDetailRequest) std.json.Parsed(GetJsErrDetailResponse)
+src/miniprogram/operation/mod.zig: sig Operation.getJsErrList(*Self, GetJsErrListRequest) std.json.Parsed(GetJsErrListResponse)
+src/miniprogram/operation/mod.zig: sig Operation.getPerformance(*Self, GetPerformanceRequest) std.json.Parsed(GetPerformanceResponse)
+src/miniprogram/operation/mod.zig: sig Operation.getSceneList(*Self) std.json.Parsed(GetSceneListResponse)
+src/miniprogram/operation/mod.zig: sig Operation.getVersionList(*Self) std.json.Parsed(GetVersionListResponse)
+src/miniprogram/operation/mod.zig: sig Operation.init(*Context, std.mem.Allocator) Self
+src/miniprogram/operation/mod.zig: sig Operation.realTimeLogSearch(*Self, RealTimeLogSearchRequest) std.json.Parsed(RealTimeLogSearchResponse)
+src/miniprogram/operation/mod.zig: sig Operation.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
 src/miniprogram/order/mod.zig: field DeliveryMode.split_delivery
 src/miniprogram/order/mod.zig: field DeliveryMode.unified_delivery
 src/miniprogram/order/mod.zig: field GetShippingOrderListRequest.last_index: []const u8
@@ -1475,6 +1682,12 @@ src/miniprogram/order/mod.zig: pub fn Shipping.init
 src/miniprogram/order/mod.zig: pub fn Shipping.notifyConfirmReceive
 src/miniprogram/order/mod.zig: pub fn Shipping.setTransport
 src/miniprogram/order/mod.zig: pub fn Shipping.uploadShippingInfo
+src/miniprogram/order/mod.zig: sig Shipping.getShippingOrder(*Self, GetShippingOrderRequest) std.json.Parsed(ShippingOrderResponse)
+src/miniprogram/order/mod.zig: sig Shipping.getShippingOrderList(*Self, GetShippingOrderListRequest) std.json.Parsed(GetShippingOrderListResponse)
+src/miniprogram/order/mod.zig: sig Shipping.init(*Context, std.mem.Allocator) Self
+src/miniprogram/order/mod.zig: sig Shipping.notifyConfirmReceive(*Self, NotifyConfirmReceiveRequest) void
+src/miniprogram/order/mod.zig: sig Shipping.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/miniprogram/order/mod.zig: sig Shipping.uploadShippingInfo(*Self, UploadShippingInfoRequest) void
 src/miniprogram/privacy/mod.zig: field Desc.privacy_desc: []const u8
 src/miniprogram/privacy/mod.zig: field Desc.privacy_key: []const u8
 src/miniprogram/privacy/mod.zig: field DescList.privacy_desc_list: []Desc
@@ -1521,6 +1734,10 @@ src/miniprogram/privacy/mod.zig: pub fn Privacy.getPrivacySetting
 src/miniprogram/privacy/mod.zig: pub fn Privacy.init
 src/miniprogram/privacy/mod.zig: pub fn Privacy.setPrivacySetting
 src/miniprogram/privacy/mod.zig: pub fn Privacy.uploadPrivacyExtFile
+src/miniprogram/privacy/mod.zig: sig Privacy.getPrivacySetting(*Self, i64) std.json.Parsed(GetPrivacySettingResponse)
+src/miniprogram/privacy/mod.zig: sig Privacy.init(*Context, std.mem.Allocator) Self
+src/miniprogram/privacy/mod.zig: sig Privacy.setPrivacySetting(*Self, SetPrivacySettingRequest) void
+src/miniprogram/privacy/mod.zig: sig Privacy.uploadPrivacyExtFile(*Self, []const u8) std.json.Parsed(UploadPrivacyExtFileResponse)
 src/miniprogram/qrcode/mod.zig: field QRCode.allocator: std.mem.Allocator
 src/miniprogram/qrcode/mod.zig: field QRCode.ctx: *Context
 src/miniprogram/qrcode/mod.zig: field QRCode.transport: ?util_http.HttpClient.Transport
@@ -1529,6 +1746,9 @@ src/miniprogram/qrcode/mod.zig: pub const QRCode
 src/miniprogram/qrcode/mod.zig: pub fn QRCode.getUnlimited
 src/miniprogram/qrcode/mod.zig: pub fn QRCode.init
 src/miniprogram/qrcode/mod.zig: pub fn QRCode.setTransport
+src/miniprogram/qrcode/mod.zig: sig QRCode.getUnlimited(*Self, []const u8, ?[]const u8, u32) []u8
+src/miniprogram/qrcode/mod.zig: sig QRCode.init(*Context, std.mem.Allocator) Self
+src/miniprogram/qrcode/mod.zig: sig QRCode.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
 src/miniprogram/redpacketcover/mod.zig: field GetRedPacketCoverRequest.ctoken: []const u8
 src/miniprogram/redpacketcover/mod.zig: field GetRedPacketCoverRequest.openid: []const u8
 src/miniprogram/redpacketcover/mod.zig: field GetRedPacketCoverResp.data: RedPacketCoverData
@@ -1543,6 +1763,8 @@ src/miniprogram/redpacketcover/mod.zig: pub const RedPacketCover
 src/miniprogram/redpacketcover/mod.zig: pub const RedPacketCoverData
 src/miniprogram/redpacketcover/mod.zig: pub fn RedPacketCover.getRedPacketCoverURL
 src/miniprogram/redpacketcover/mod.zig: pub fn RedPacketCover.init
+src/miniprogram/redpacketcover/mod.zig: sig RedPacketCover.getRedPacketCoverURL(*Self, GetRedPacketCoverRequest) std.json.Parsed(GetRedPacketCoverResp)
+src/miniprogram/redpacketcover/mod.zig: sig RedPacketCover.init(*Context, std.mem.Allocator) Self
 src/miniprogram/retry_testing.zig: field RotatingToken.fetch_calls: usize
 src/miniprogram/retry_testing.zig: field RotatingToken.invalidates: usize
 src/miniprogram/retry_testing.zig: field RotatingToken.tokens: []const []const u8
@@ -1555,6 +1777,10 @@ src/miniprogram/retry_testing.zig: pub fn RotatingToken.asHandle
 src/miniprogram/retry_testing.zig: pub fn RotatingToken.getAccessToken
 src/miniprogram/retry_testing.zig: pub fn RotatingToken.invalidate
 src/miniprogram/retry_testing.zig: pub fn StubToken.getAccessToken
+src/miniprogram/retry_testing.zig: sig RotatingToken.asHandle(*RotatingToken) credential.AccessTokenHandle
+src/miniprogram/retry_testing.zig: sig RotatingToken.getAccessToken(*anyopaque, std.mem.Allocator) anyerror![]u8
+src/miniprogram/retry_testing.zig: sig RotatingToken.invalidate(*anyopaque, std.mem.Allocator) anyerror!void
+src/miniprogram/retry_testing.zig: sig StubToken.getAccessToken(*anyopaque, std.mem.Allocator) anyerror![]u8
 src/miniprogram/riskcontrol/mod.zig: field RiskControl.allocator: std.mem.Allocator
 src/miniprogram/riskcontrol/mod.zig: field RiskControl.ctx: *Context
 src/miniprogram/riskcontrol/mod.zig: field UserRiskRank.errcode: i64
@@ -1576,6 +1802,9 @@ src/miniprogram/riskcontrol/mod.zig: pub const UserRiskRankRequest
 src/miniprogram/riskcontrol/mod.zig: pub fn RiskControl.getUserRiskRank
 src/miniprogram/riskcontrol/mod.zig: pub fn RiskControl.init
 src/miniprogram/riskcontrol/mod.zig: pub fn UserRiskRank.getUnionId
+src/miniprogram/riskcontrol/mod.zig: sig RiskControl.getUserRiskRank(*Self, UserRiskRankRequest) std.json.Parsed(UserRiskRank)
+src/miniprogram/riskcontrol/mod.zig: sig RiskControl.init(*Context, std.mem.Allocator) Self
+src/miniprogram/riskcontrol/mod.zig: sig UserRiskRank.getUnionId(Self) i64
 src/miniprogram/security/mod.zig: field Security.ctx: *Context
 src/miniprogram/security/mod.zig: field Security.transport: ?util_http.HttpClient.Transport
 src/miniprogram/security/mod.zig: field Security.transport_ctx: ?*anyopaque
@@ -1584,12 +1813,19 @@ src/miniprogram/security/mod.zig: pub fn Security.init
 src/miniprogram/security/mod.zig: pub fn Security.mediaCheckAsync
 src/miniprogram/security/mod.zig: pub fn Security.msgSecCheck
 src/miniprogram/security/mod.zig: pub fn Security.setTransport
+src/miniprogram/security/mod.zig: sig Security.init(*Context) Security
+src/miniprogram/security/mod.zig: sig Security.mediaCheckAsync(Security, std.mem.Allocator, []const u8, u8, []const u8, u8) []u8
+src/miniprogram/security/mod.zig: sig Security.msgSecCheck(Security, std.mem.Allocator, []const u8, []const u8, u8) []u8
+src/miniprogram/security/mod.zig: sig Security.setTransport(*Security, ?util_http.HttpClient.Transport, ?*anyopaque) void
 src/miniprogram/shortlink/mod.zig: field ShortLink.allocator: std.mem.Allocator
 src/miniprogram/shortlink/mod.zig: field ShortLink.ctx: *Context
 src/miniprogram/shortlink/mod.zig: pub const ShortLink
 src/miniprogram/shortlink/mod.zig: pub fn ShortLink.generateShortLinkPermanent
 src/miniprogram/shortlink/mod.zig: pub fn ShortLink.generateShortLinkTemp
 src/miniprogram/shortlink/mod.zig: pub fn ShortLink.init
+src/miniprogram/shortlink/mod.zig: sig ShortLink.generateShortLinkPermanent(*Self, []const u8, []const u8) []u8
+src/miniprogram/shortlink/mod.zig: sig ShortLink.generateShortLinkTemp(*Self, []const u8, []const u8) []u8
+src/miniprogram/shortlink/mod.zig: sig ShortLink.init(*Context, std.mem.Allocator) Self
 src/miniprogram/subscribe/mod.zig: field Category.id: i64
 src/miniprogram/subscribe/mod.zig: field Category.name: []const u8
 src/miniprogram/subscribe/mod.zig: field DataEntry.color: []const u8
@@ -1655,6 +1891,13 @@ src/miniprogram/subscribe/mod.zig: pub fn Subscribe.send
 src/miniprogram/subscribe/mod.zig: pub fn Subscribe.sendGetMsgId
 src/miniprogram/subscribe/mod.zig: pub fn Subscribe.setTransport
 src/miniprogram/subscribe/mod.zig: pub fn Subscribe.uniformSend
+src/miniprogram/subscribe/mod.zig: sig Subscribe.getCategory(*Self) std.json.Parsed(struct { errcode: i64 = 0, errmsg: []const u8 = "", data: []const Category = &.{}, })
+src/miniprogram/subscribe/mod.zig: sig Subscribe.init(*Context, std.mem.Allocator) Self
+src/miniprogram/subscribe/mod.zig: sig Subscribe.listTemplates(*Self) std.json.Parsed(TemplateList)
+src/miniprogram/subscribe/mod.zig: sig Subscribe.send(*Self, Message) void
+src/miniprogram/subscribe/mod.zig: sig Subscribe.sendGetMsgId(*Self, Message) i64
+src/miniprogram/subscribe/mod.zig: sig Subscribe.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/miniprogram/subscribe/mod.zig: sig Subscribe.uniformSend(*Self, UniformMessage) void
 src/miniprogram/tcb/mod.zig: field BatchDeleteFileRes.delete_list: []const DeletedFile
 src/miniprogram/tcb/mod.zig: field BatchDeleteFileRes.errcode: i64
 src/miniprogram/tcb/mod.zig: field BatchDeleteFileRes.errmsg: []const u8
@@ -1796,6 +2039,23 @@ src/miniprogram/tcb/mod.zig: pub fn Tcb.init
 src/miniprogram/tcb/mod.zig: pub fn Tcb.invokeCloudFunction
 src/miniprogram/tcb/mod.zig: pub fn Tcb.updateIndex
 src/miniprogram/tcb/mod.zig: pub fn Tcb.uploadFile
+src/miniprogram/tcb/mod.zig: sig Tcb.batchDeleteFile(*Self, []const u8, []const []const u8) std.json.Parsed(BatchDeleteFileRes)
+src/miniprogram/tcb/mod.zig: sig Tcb.batchDownloadFile(*Self, []const u8, []const DownloadFile) std.json.Parsed(BatchDownloadFileRes)
+src/miniprogram/tcb/mod.zig: sig Tcb.databaseAdd(*Self, []const u8, []const u8) std.json.Parsed(DatabaseAddRes)
+src/miniprogram/tcb/mod.zig: sig Tcb.databaseCollectionAdd(*Self, []const u8, []const u8) void
+src/miniprogram/tcb/mod.zig: sig Tcb.databaseCollectionDelete(*Self, []const u8, []const u8) void
+src/miniprogram/tcb/mod.zig: sig Tcb.databaseCollectionGet(*Self, []const u8, i64, i64) std.json.Parsed(DatabaseCollectionGetRes)
+src/miniprogram/tcb/mod.zig: sig Tcb.databaseCount(*Self, []const u8, []const u8) std.json.Parsed(DatabaseCountRes)
+src/miniprogram/tcb/mod.zig: sig Tcb.databaseDelete(*Self, []const u8, []const u8) std.json.Parsed(DatabaseDeleteRes)
+src/miniprogram/tcb/mod.zig: sig Tcb.databaseMigrateExport(*Self, DatabaseMigrateExportReq) std.json.Parsed(DatabaseMigrateExportRes)
+src/miniprogram/tcb/mod.zig: sig Tcb.databaseMigrateImport(*Self, DatabaseMigrateImportReq) std.json.Parsed(DatabaseMigrateImportRes)
+src/miniprogram/tcb/mod.zig: sig Tcb.databaseMigrateQueryInfo(*Self, []const u8, i64) std.json.Parsed(DatabaseMigrateQueryInfoRes)
+src/miniprogram/tcb/mod.zig: sig Tcb.databaseQuery(*Self, []const u8, []const u8) std.json.Parsed(DatabaseQueryRes)
+src/miniprogram/tcb/mod.zig: sig Tcb.databaseUpdate(*Self, []const u8, []const u8) std.json.Parsed(DatabaseUpdateRes)
+src/miniprogram/tcb/mod.zig: sig Tcb.init(*Context, std.mem.Allocator) Self
+src/miniprogram/tcb/mod.zig: sig Tcb.invokeCloudFunction(*Self, []const u8, []const u8, []const u8) std.json.Parsed(InvokeCloudFunctionRes)
+src/miniprogram/tcb/mod.zig: sig Tcb.updateIndex(*Self, UpdateIndexReq) void
+src/miniprogram/tcb/mod.zig: sig Tcb.uploadFile(*Self, []const u8, []const u8) std.json.Parsed(UploadFileRes)
 src/miniprogram/urllink/mod.zig: field CloudBase.domain: []const u8
 src/miniprogram/urllink/mod.zig: field CloudBase.env: []const u8
 src/miniprogram/urllink/mod.zig: field CloudBase.path: []const u8
@@ -1839,6 +2099,10 @@ src/miniprogram/urllink/mod.zig: pub fn URLLink.generate
 src/miniprogram/urllink/mod.zig: pub fn URLLink.init
 src/miniprogram/urllink/mod.zig: pub fn URLLink.query
 src/miniprogram/urllink/mod.zig: pub fn URLLink.queryWithType
+src/miniprogram/urllink/mod.zig: sig URLLink.generate(*Self, ULParams) []u8
+src/miniprogram/urllink/mod.zig: sig URLLink.init(*Context, std.mem.Allocator) Self
+src/miniprogram/urllink/mod.zig: sig URLLink.query(*Self, []const u8) std.json.Parsed(ULQueryResult)
+src/miniprogram/urllink/mod.zig: sig URLLink.queryWithType(*Self, ULQueryRequest) std.json.Parsed(ULQueryResult)
 src/miniprogram/urlscheme/mod.zig: field GenerateResponse.errcode: i64
 src/miniprogram/urlscheme/mod.zig: field GenerateResponse.errmsg: []const u8
 src/miniprogram/urlscheme/mod.zig: field GenerateResponse.openlink: []const u8
@@ -1870,6 +2134,10 @@ src/miniprogram/urlscheme/mod.zig: pub fn URLScheme.generate
 src/miniprogram/urlscheme/mod.zig: pub fn URLScheme.init
 src/miniprogram/urlscheme/mod.zig: pub fn URLScheme.queryScheme
 src/miniprogram/urlscheme/mod.zig: pub fn URLScheme.setTransport
+src/miniprogram/urlscheme/mod.zig: sig URLScheme.generate(*Self, []const u8) std.json.Parsed(GenerateResponse)
+src/miniprogram/urlscheme/mod.zig: sig URLScheme.init(*Context, std.mem.Allocator) Self
+src/miniprogram/urlscheme/mod.zig: sig URLScheme.queryScheme(*Self, QuerySchemeRequest) std.json.Parsed(QuerySchemeResponse)
+src/miniprogram/urlscheme/mod.zig: sig URLScheme.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
 src/miniprogram/virtualpayment/mod.zig: field AdverFundsFilter.fund_type: i64
 src/miniprogram/virtualpayment/mod.zig: field AdverFundsFilter.settle_begin: i64
 src/miniprogram/virtualpayment/mod.zig: field AdverFundsFilter.settle_end: i64
@@ -2276,6 +2544,39 @@ src/miniprogram/virtualpayment/mod.zig: pub fn VirtualPayment.startDownloadOrder
 src/miniprogram/virtualpayment/mod.zig: pub fn VirtualPayment.startPublishGoods
 src/miniprogram/virtualpayment/mod.zig: pub fn VirtualPayment.startUploadGoods
 src/miniprogram/virtualpayment/mod.zig: pub fn VirtualPayment.uploadVPFile
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.bindTransferAccount(*Self, BindTransferAccountRequest) std.json.Parsed(BindTransferAccountResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.cancelCurrencyPay(*Self, CancelCurrencyPayRequest) std.json.Parsed(CancelCurrencyPayResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.completeComplaint(*Self, CompleteComplaintRequest) std.json.Parsed(CompleteComplaintResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.createFundsBill(*Self, CreateFundsBillRequest) std.json.Parsed(CreateFundsBillResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.createWithdrawOrder(*Self, CreateWithdrawOrderRequest) std.json.Parsed(CreateWithdrawOrderResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.currencyPay(*Self, CurrencyPayRequest) std.json.Parsed(CurrencyPayResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.downloadAdverFundsOrder(*Self, DownloadAdverFundsOrderRequest) std.json.Parsed(DownloadAdverFundsOrderResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.downloadBill(*Self, DownloadBillRequest) std.json.Parsed(DownloadBillResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.getComplaintDetail(*Self, GetComplaintDetailRequest) std.json.Parsed(GetComplaintDetailResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.getComplaintList(*Self, GetComplaintListRequest) std.json.Parsed(GetComplaintListResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.getNegotiationHistory(*Self, GetNegotiationHistoryRequest) std.json.Parsed(GetNegotiationHistoryResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.getUploadFileSign(*Self, GetUploadFileSignRequest) std.json.Parsed(GetUploadFileSignResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.init(*Context, std.mem.Allocator) Self
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.notifyProvideGoods(*Self, NotifyProvideGoodsRequest) std.json.Parsed(NotifyProvideGoodsResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.presentCurrency(*Self, PresentCurrencyRequest) std.json.Parsed(PresentCurrencyResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.queryAdverFunds(*Self, QueryAdverFundsRequest) std.json.Parsed(QueryAdverFundsResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.queryBizBalance(*Self, QueryBizBalanceRequest) std.json.Parsed(QueryBizBalanceResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.queryDownloadOrder(*Self, QueryDownloadOrderRequest) std.json.Parsed(QueryDownloadOrderResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.queryFundsBill(*Self, QueryFundsBillRequest) std.json.Parsed(QueryFundsBillResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.queryOrder(*Self, QueryOrderRequest) std.json.Parsed(QueryOrderResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.queryPublishGoods(*Self, QueryPublishGoodsRequest) std.json.Parsed(QueryPublishGoodsResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.queryRecoverBill(*Self, QueryRecoverBillRequest) std.json.Parsed(QueryRecoverBillResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.queryTransferAccount(*Self, QueryTransferAccountRequest) std.json.Parsed(QueryTransferAccountResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.queryUploadGoods(*Self, QueryUploadGoodsRequest) std.json.Parsed(QueryUploadGoodsResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.queryUserBalance(*Self, QueryUserBalanceRequest) std.json.Parsed(QueryUserBalanceResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.queryWithdrawOrder(*Self, QueryWithdrawOrderRequest) std.json.Parsed(QueryWithdrawOrderResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.refundOrder(*Self, RefundOrderRequest) std.json.Parsed(RefundOrderResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.responseComplaint(*Self, ResponseComplaintRequest) std.json.Parsed(ResponseComplaintResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.setSessionKey(*Self, []const u8) void
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.startDownloadOrder(*Self, StartDownloadOrderRequest) std.json.Parsed(StartDownloadOrderResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.startPublishGoods(*Self, StartPublishGoodsRequest) std.json.Parsed(StartPublishGoodsResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.startUploadGoods(*Self, StartUploadGoodsRequest) std.json.Parsed(StartUploadGoodsResponse)
+src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.uploadVPFile(*Self, UploadVPFileRequest) std.json.Parsed(UploadVPFileResponse)
 src/miniprogram/werun/mod.zig: field Data.stepInfoList: []StepInfo
 src/miniprogram/werun/mod.zig: field StepInfo.step: i64
 src/miniprogram/werun/mod.zig: field StepInfo.timestamp: i64
@@ -2286,6 +2587,8 @@ src/miniprogram/werun/mod.zig: pub const StepInfo
 src/miniprogram/werun/mod.zig: pub const WeRun
 src/miniprogram/werun/mod.zig: pub fn WeRun.getWeRunData
 src/miniprogram/werun/mod.zig: pub fn WeRun.init
+src/miniprogram/werun/mod.zig: sig WeRun.getWeRunData(*Self, []const u8, []const u8, []const u8) std.json.Parsed(Data)
+src/miniprogram/werun/mod.zig: sig WeRun.init(*Context, std.mem.Allocator) Self
 src/officialaccount/basic/mod.zig: field Basic.allocator: std.mem.Allocator
 src/officialaccount/basic/mod.zig: field Basic.ctx: *Context
 src/officialaccount/basic/mod.zig: field Basic.transport: ?util_http.HttpClient.Transport
@@ -2306,6 +2609,12 @@ src/officialaccount/basic/mod.zig: pub fn Basic.getCallbackIP
 src/officialaccount/basic/mod.zig: pub fn Basic.init
 src/officialaccount/basic/mod.zig: pub fn Basic.setTransport
 src/officialaccount/basic/mod.zig: pub fn IpList.deinit
+src/officialaccount/basic/mod.zig: sig Basic.clearQuota(*Self) void
+src/officialaccount/basic/mod.zig: sig Basic.getAPIDomainIP(*Self) IpList
+src/officialaccount/basic/mod.zig: sig Basic.getCallbackIP(*Self) IpList
+src/officialaccount/basic/mod.zig: sig Basic.init(*Context, std.mem.Allocator) Self
+src/officialaccount/basic/mod.zig: sig Basic.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/officialaccount/basic/mod.zig: sig IpList.deinit(IpList, std.mem.Allocator) void
 src/officialaccount/broadcast/mod.zig: field Broadcast.allocator: std.mem.Allocator
 src/officialaccount/broadcast/mod.zig: field Broadcast.ctx: *Context
 src/officialaccount/broadcast/mod.zig: field Images.media_ids: []const []const u8
@@ -2362,6 +2671,30 @@ src/officialaccount/broadcast/mod.zig: pub fn Broadcast.sendWxCardToAll
 src/officialaccount/broadcast/mod.zig: pub fn Broadcast.sendWxCardToOpenIDs
 src/officialaccount/broadcast/mod.zig: pub fn Broadcast.sendWxCardToTag
 src/officialaccount/broadcast/mod.zig: pub fn Broadcast.setSpeed
+src/officialaccount/broadcast/mod.zig: sig Broadcast.delete(*Self, i64, i64) void
+src/officialaccount/broadcast/mod.zig: sig Broadcast.getMassStatus(*Self, []const u8) []u8
+src/officialaccount/broadcast/mod.zig: sig Broadcast.getSpeed(*Self) SpeedResult
+src/officialaccount/broadcast/mod.zig: sig Broadcast.init(*Context, std.mem.Allocator) Self
+src/officialaccount/broadcast/mod.zig: sig Broadcast.previewToUser(*Self, []const u8, SendBody, PreviewTarget) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendImageToAll(*Self, Images) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendImageToOpenIDs(*Self, []const []const u8, Images) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendImageToTag(*Self, i64, Images) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendNewsToAll(*Self, []const u8, bool) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendNewsToOpenIDs(*Self, []const []const u8, []const u8) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendNewsToTag(*Self, i64, []const u8) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendTextToAll(*Self, []const u8) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendTextToOpenIDs(*Self, []const []const u8, []const u8) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendTextToTag(*Self, i64, []const u8) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendVideoToAll(*Self, []const u8, []const u8, []const u8) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendVideoToOpenIDs(*Self, []const []const u8, []const u8, []const u8, []const u8) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendVideoToTag(*Self, i64, []const u8, []const u8, []const u8) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendVoiceToAll(*Self, []const u8) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendVoiceToOpenIDs(*Self, []const []const u8, []const u8) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendVoiceToTag(*Self, i64, []const u8) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendWxCardToAll(*Self, []const u8) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendWxCardToOpenIDs(*Self, []const []const u8, []const u8) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.sendWxCardToTag(*Self, i64, []const u8) i64
+src/officialaccount/broadcast/mod.zig: sig Broadcast.setSpeed(*Self, i64) SpeedResult
 src/officialaccount/config.zig: field Config.app_id: []const u8
 src/officialaccount/config.zig: field Config.app_secret: []const u8
 src/officialaccount/config.zig: field Config.cache: ?cache_mod.Cache
@@ -2375,6 +2708,8 @@ src/officialaccount/context.zig: field Context.config: Config
 src/officialaccount/context.zig: pub const Context
 src/officialaccount/context.zig: pub fn Context.getAccessToken
 src/officialaccount/context.zig: pub fn Context.invalidateAccessToken
+src/officialaccount/context.zig: sig Context.getAccessToken(*Context, std.mem.Allocator) @TypeOf(self.access_token_handle.getAccessToken(allocator))
+src/officialaccount/context.zig: sig Context.invalidateAccessToken(*Context, std.mem.Allocator) anyerror!void
 src/officialaccount/customerservice/mod.zig: field CustomerService.allocator: std.mem.Allocator
 src/officialaccount/customerservice/mod.zig: field CustomerService.ctx: *Context
 src/officialaccount/customerservice/mod.zig: field CustomerService.transport: ?util_http.HttpClient.Transport
@@ -2404,6 +2739,15 @@ src/officialaccount/customerservice/mod.zig: pub fn CustomerService.onlineList
 src/officialaccount/customerservice/mod.zig: pub fn CustomerService.setTransport
 src/officialaccount/customerservice/mod.zig: pub fn CustomerService.updateAccount
 src/officialaccount/customerservice/mod.zig: pub fn CustomerService.uploadHeadImg
+src/officialaccount/customerservice/mod.zig: sig CustomerService.addAccount(*Self, []const u8, []const u8) void
+src/officialaccount/customerservice/mod.zig: sig CustomerService.deleteAccount(*Self, []const u8) void
+src/officialaccount/customerservice/mod.zig: sig CustomerService.init(*Context, std.mem.Allocator) Self
+src/officialaccount/customerservice/mod.zig: sig CustomerService.inviteBind(*Self, []const u8, []const u8) void
+src/officialaccount/customerservice/mod.zig: sig CustomerService.listAccounts(*Self) std.json.Parsed(KfListResponse)
+src/officialaccount/customerservice/mod.zig: sig CustomerService.onlineList(*Self) std.json.Parsed(KfOnlineListResponse)
+src/officialaccount/customerservice/mod.zig: sig CustomerService.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/officialaccount/customerservice/mod.zig: sig CustomerService.updateAccount(*Self, []const u8, []const u8) void
+src/officialaccount/customerservice/mod.zig: sig CustomerService.uploadHeadImg(*Self, []const u8, []const u8) void
 src/officialaccount/datacube/mod.zig: field DataCube.allocator: std.mem.Allocator
 src/officialaccount/datacube/mod.zig: field DataCube.ctx: *Context
 src/officialaccount/datacube/mod.zig: pub const AdSlot
@@ -2440,6 +2784,27 @@ src/officialaccount/datacube/mod.zig: pub fn DataCube.getUserShare
 src/officialaccount/datacube/mod.zig: pub fn DataCube.getUserShareHour
 src/officialaccount/datacube/mod.zig: pub fn DataCube.getUserSummary
 src/officialaccount/datacube/mod.zig: pub fn DataCube.init
+src/officialaccount/datacube/mod.zig: sig DataCube.getArticleSummary(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getArticleTotal(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getInterfaceSummary(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getInterfaceSummaryHour(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getPublisherAdPosGeneral(*Self, []const u8, []const u8, i64, i64, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getPublisherCpsGeneral(*Self, []const u8, []const u8, i64, i64) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getPublisherSettlement(*Self, []const u8, []const u8, i64, i64) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getUpstreamMsg(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getUpstreamMsgDist(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getUpstreamMsgDistMonth(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getUpstreamMsgDistWeek(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getUpstreamMsgHour(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getUpstreamMsgMonth(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getUpstreamMsgWeek(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getUserCumulate(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getUserRead(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getUserReadHour(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getUserShare(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getUserShareHour(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.getUserSummary(*Self, []const u8, []const u8) []u8
+src/officialaccount/datacube/mod.zig: sig DataCube.init(*Context, std.mem.Allocator) Self
 src/officialaccount/device/mod.zig: field Device.allocator: std.mem.Allocator
 src/officialaccount/device/mod.zig: field Device.ctx: *Context
 src/officialaccount/device/mod.zig: field Device.transport: ?util_http.HttpClient.Transport
@@ -2449,6 +2814,10 @@ src/officialaccount/device/mod.zig: pub fn Device.createQRCode
 src/officialaccount/device/mod.zig: pub fn Device.init
 src/officialaccount/device/mod.zig: pub fn Device.setTransport
 src/officialaccount/device/mod.zig: pub fn Device.transMsg
+src/officialaccount/device/mod.zig: sig Device.createQRCode(*Self, []const []const u8) []u8
+src/officialaccount/device/mod.zig: sig Device.init(*Context, std.mem.Allocator) Self
+src/officialaccount/device/mod.zig: sig Device.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/officialaccount/device/mod.zig: sig Device.transMsg(*Self, []const u8, []const u8, []const u8) void
 src/officialaccount/draft/mod.zig: field Draft.allocator: std.mem.Allocator
 src/officialaccount/draft/mod.zig: field Draft.ctx: *Context
 src/officialaccount/draft/mod.zig: pub const Draft
@@ -2459,6 +2828,13 @@ src/officialaccount/draft/mod.zig: pub fn Draft.get
 src/officialaccount/draft/mod.zig: pub fn Draft.init
 src/officialaccount/draft/mod.zig: pub fn Draft.list
 src/officialaccount/draft/mod.zig: pub fn Draft.update
+src/officialaccount/draft/mod.zig: sig Draft.add(*Self, []const u8) []u8
+src/officialaccount/draft/mod.zig: sig Draft.count(*Self) i64
+src/officialaccount/draft/mod.zig: sig Draft.delete(*Self, []const u8) void
+src/officialaccount/draft/mod.zig: sig Draft.get(*Self, []const u8) []u8
+src/officialaccount/draft/mod.zig: sig Draft.init(*Context, std.mem.Allocator) Self
+src/officialaccount/draft/mod.zig: sig Draft.list(*Self, i64, i64, bool) []u8
+src/officialaccount/draft/mod.zig: sig Draft.update(*Self, []const u8, i64, []const u8) void
 src/officialaccount/freepublish/mod.zig: field FreePublish.allocator: std.mem.Allocator
 src/officialaccount/freepublish/mod.zig: field FreePublish.ctx: *Context
 src/officialaccount/freepublish/mod.zig: field PublishArticleDetail.count: i64
@@ -2489,11 +2865,17 @@ src/officialaccount/freepublish/mod.zig: pub fn FreePublish.init
 src/officialaccount/freepublish/mod.zig: pub fn FreePublish.list
 src/officialaccount/freepublish/mod.zig: pub fn FreePublish.publish
 src/officialaccount/freepublish/mod.zig: pub fn FreePublish.selectStatus
+src/officialaccount/freepublish/mod.zig: sig FreePublish.delete(*Self, []const u8) void
+src/officialaccount/freepublish/mod.zig: sig FreePublish.init(*Context, std.mem.Allocator) Self
+src/officialaccount/freepublish/mod.zig: sig FreePublish.list(*Self, i64, i64, bool) []u8
+src/officialaccount/freepublish/mod.zig: sig FreePublish.publish(*Self, []const u8) []u8
+src/officialaccount/freepublish/mod.zig: sig FreePublish.selectStatus(*Self, i64) std.json.Parsed(PublishStatusList)
 src/officialaccount/js/mod.zig: field Config.app_id: []const u8
 src/officialaccount/js/mod.zig: field Config.nonce_str: []const u8
 src/officialaccount/js/mod.zig: field Config.signature: []const u8
 src/officialaccount/js/mod.zig: field Config.timestamp: i64
 src/officialaccount/js/mod.zig: field Js.ctx: *Context
+src/officialaccount/js/mod.zig: field Js.io: std.Io
 src/officialaccount/js/mod.zig: field Js.ticket_handle: ?credential.JsTicketHandle
 src/officialaccount/js/mod.zig: pub const Config
 src/officialaccount/js/mod.zig: pub const Js
@@ -2501,6 +2883,10 @@ src/officialaccount/js/mod.zig: pub fn Config.deinit
 src/officialaccount/js/mod.zig: pub fn Js.getConfig
 src/officialaccount/js/mod.zig: pub fn Js.init
 src/officialaccount/js/mod.zig: pub fn Js.setJsTicketHandle
+src/officialaccount/js/mod.zig: sig Config.deinit(*Config, std.mem.Allocator) void
+src/officialaccount/js/mod.zig: sig Js.getConfig(*Self, std.mem.Allocator, []const u8) Config
+src/officialaccount/js/mod.zig: sig Js.init(*Context) Self
+src/officialaccount/js/mod.zig: sig Js.setJsTicketHandle(*Self, credential.JsTicketHandle) void
 src/officialaccount/material/mod.zig: field AddMaterialResult.errcode: i64
 src/officialaccount/material/mod.zig: field AddMaterialResult.errmsg: []const u8
 src/officialaccount/material/mod.zig: field AddMaterialResult.media_id: []const u8
@@ -2533,6 +2919,7 @@ src/officialaccount/material/mod.zig: field GetNewsResult.errmsg: []const u8
 src/officialaccount/material/mod.zig: field GetNewsResult.news_item: []const Article
 src/officialaccount/material/mod.zig: field Material.allocator: std.mem.Allocator
 src/officialaccount/material/mod.zig: field Material.ctx: *Context
+src/officialaccount/material/mod.zig: field Material.io: std.Io
 src/officialaccount/material/mod.zig: field PermanentMaterialType.image
 src/officialaccount/material/mod.zig: field PermanentMaterialType.news
 src/officialaccount/material/mod.zig: field PermanentMaterialType.video
@@ -2581,6 +2968,23 @@ src/officialaccount/material/mod.zig: pub fn Material.getNews
 src/officialaccount/material/mod.zig: pub fn Material.init
 src/officialaccount/material/mod.zig: pub fn Material.updateNews
 src/officialaccount/material/mod.zig: pub fn maxBytesFor
+src/officialaccount/material/mod.zig: sig Material.addMaterial(*Self, PermanentMaterialType, []const u8) std.json.Parsed(AddMaterialResult)
+src/officialaccount/material/mod.zig: sig Material.addMaterialFromBytes(*Self, PermanentMaterialType, []const u8, []const u8) std.json.Parsed(AddMaterialResult)
+src/officialaccount/material/mod.zig: sig Material.addNews(*Self, []const Article) []u8
+src/officialaccount/material/mod.zig: sig Material.addVideo(*Self, []const u8, []const u8, []const u8) std.json.Parsed(AddMaterialResult)
+src/officialaccount/material/mod.zig: sig Material.addVideoFromBytes(*Self, []const u8, []const u8, []const u8, []const u8) std.json.Parsed(AddMaterialResult)
+src/officialaccount/material/mod.zig: sig Material.batchGetMaterial(*Self, PermanentMaterialType, i64, i64) std.json.Parsed(ArticleList)
+src/officialaccount/material/mod.zig: sig Material.deleteMaterial(*Self, []const u8) void
+src/officialaccount/material/mod.zig: sig Material.getMaterialCount(*Self) std.json.Parsed(ResMaterialCount)
+src/officialaccount/material/mod.zig: sig Material.getMedia(*Self, []const u8) []u8
+src/officialaccount/material/mod.zig: sig Material.getMediaToFile(*Self, []const u8, []const u8) u64
+src/officialaccount/material/mod.zig: sig Material.getMediaToFileWithLimit(*Self, []const u8, []const u8, usize) u64
+src/officialaccount/material/mod.zig: sig Material.getMediaURL(*Self, []const u8) []u8
+src/officialaccount/material/mod.zig: sig Material.getMediaWithLimit(*Self, []const u8, usize) []u8
+src/officialaccount/material/mod.zig: sig Material.getNews(*Self, []const u8) std.json.Parsed(GetNewsResult)
+src/officialaccount/material/mod.zig: sig Material.init(*Context, std.mem.Allocator) Self
+src/officialaccount/material/mod.zig: sig Material.updateNews(*Self, *const Article, []const u8, i64) void
+src/officialaccount/material/mod.zig: sig maxBytesFor(PermanentMaterialType) usize
 src/officialaccount/menu/mod.zig: field Button.appid: []const u8
 src/officialaccount/menu/mod.zig: field Button.key: []const u8
 src/officialaccount/menu/mod.zig: field Button.media_id: []const u8
@@ -2670,6 +3074,27 @@ src/officialaccount/menu/mod.zig: pub fn Menu.init
 src/officialaccount/menu/mod.zig: pub fn Menu.menuTryMatch
 src/officialaccount/menu/mod.zig: pub fn Menu.setMenu
 src/officialaccount/menu/mod.zig: pub fn Menu.setTransport
+src/officialaccount/menu/mod.zig: sig Button.setClick([]const u8, []const u8) Button
+src/officialaccount/menu/mod.zig: sig Button.setLocationSelect([]const u8, []const u8) Button
+src/officialaccount/menu/mod.zig: sig Button.setMediaID([]const u8, []const u8) Button
+src/officialaccount/menu/mod.zig: sig Button.setMiniprogram([]const u8, []const u8, []const u8, []const u8) Button
+src/officialaccount/menu/mod.zig: sig Button.setPicPhotoOrAlbum([]const u8, []const u8) Button
+src/officialaccount/menu/mod.zig: sig Button.setPicSysPhoto([]const u8, []const u8) Button
+src/officialaccount/menu/mod.zig: sig Button.setPicWeixin([]const u8, []const u8) Button
+src/officialaccount/menu/mod.zig: sig Button.setScanCodePush([]const u8, []const u8) Button
+src/officialaccount/menu/mod.zig: sig Button.setScanCodeWaitMsg([]const u8, []const u8) Button
+src/officialaccount/menu/mod.zig: sig Button.setSub([]const u8, []const Button) Button
+src/officialaccount/menu/mod.zig: sig Button.setView([]const u8, []const u8) Button
+src/officialaccount/menu/mod.zig: sig Button.setViewLimited([]const u8, []const u8) Button
+src/officialaccount/menu/mod.zig: sig Menu.addConditional(*Self, []const Button, ?MatchRule) void
+src/officialaccount/menu/mod.zig: sig Menu.deleteConditional(*Self, i64) void
+src/officialaccount/menu/mod.zig: sig Menu.deleteMenu(*Self) void
+src/officialaccount/menu/mod.zig: sig Menu.getCurrentSelfMenuInfo(*Self) std.json.Parsed(ResSelfMenuInfo)
+src/officialaccount/menu/mod.zig: sig Menu.getMenu(*Self) std.json.Parsed(ResMenu)
+src/officialaccount/menu/mod.zig: sig Menu.init(*Context, std.mem.Allocator) Self
+src/officialaccount/menu/mod.zig: sig Menu.menuTryMatch(*Self, []const u8) std.json.Parsed(TryMatchResult)
+src/officialaccount/menu/mod.zig: sig Menu.setMenu(*Self, []const Button) void
+src/officialaccount/menu/mod.zig: sig Menu.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
 src/officialaccount/message/mod.zig: field CommonToken.create_time: i64
 src/officialaccount/message/mod.zig: field CommonToken.from_user_name: []const u8
 src/officialaccount/message/mod.zig: field CommonToken.msg_type: MsgType
@@ -2813,6 +3238,7 @@ src/officialaccount/message/mod.zig: field Reply.ReplyData.transfer: ?TransInfo
 src/officialaccount/message/mod.zig: field Reply.ReplyData.video: VideoReply
 src/officialaccount/message/mod.zig: field Reply.ReplyData.voice: VoiceReply
 src/officialaccount/message/mod.zig: field Reply.data: ReplyData
+src/officialaccount/message/mod.zig: field Reply.io: std.Io
 src/officialaccount/message/mod.zig: field Reply.msg_type: ReplyMsgType
 src/officialaccount/message/mod.zig: field ReplyMsgType.image
 src/officialaccount/message/mod.zig: field ReplyMsgType.miniprogrampage
@@ -2891,6 +3317,15 @@ src/officialaccount/message/mod.zig: pub fn Message.setTransport
 src/officialaccount/message/mod.zig: pub fn Reply.format
 src/officialaccount/message/mod.zig: pub fn TransferCustomer.toReply
 src/officialaccount/message/mod.zig: pub fn TypingStatus.jsonValue
+src/officialaccount/message/mod.zig: sig Message.init(*Context, std.mem.Allocator) Self
+src/officialaccount/message/mod.zig: sig Message.sendCustomer(*Self, CustomerMessage) void
+src/officialaccount/message/mod.zig: sig Message.sendCustomerText(*Self, CustomerTextMessage) void
+src/officialaccount/message/mod.zig: sig Message.sendTemplate(*Self, TemplateMessage) i64
+src/officialaccount/message/mod.zig: sig Message.sendTypingStatus(*Self, []const u8, TypingStatus) void
+src/officialaccount/message/mod.zig: sig Message.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/officialaccount/message/mod.zig: sig Reply.format(Reply, std.mem.Allocator, []const u8, []const u8) []u8
+src/officialaccount/message/mod.zig: sig TransferCustomer.toReply(TransferCustomer) Reply
+src/officialaccount/message/mod.zig: sig TypingStatus.jsonValue(TypingStatus) []const u8
 src/officialaccount/mod.zig: pub const Cache
 src/officialaccount/mod.zig: pub const Config
 src/officialaccount/mod.zig: pub const Context
@@ -2944,6 +3379,12 @@ src/officialaccount/oauth/mod.zig: pub fn Oauth.getUserAccessToken
 src/officialaccount/oauth/mod.zig: pub fn Oauth.getUserInfo
 src/officialaccount/oauth/mod.zig: pub fn Oauth.init
 src/officialaccount/oauth/mod.zig: pub fn Oauth.refreshAccessToken
+src/officialaccount/oauth/mod.zig: sig Oauth.checkAccessToken(*Self, []const u8, []const u8) bool
+src/officialaccount/oauth/mod.zig: sig Oauth.getRedirectURL(*Self, []const u8, []const u8, []const u8) []u8
+src/officialaccount/oauth/mod.zig: sig Oauth.getUserAccessToken(*Self, []const u8) std.json.Parsed(ResAccessToken)
+src/officialaccount/oauth/mod.zig: sig Oauth.getUserInfo(*Self, []const u8, []const u8, []const u8) std.json.Parsed(UserInfo)
+src/officialaccount/oauth/mod.zig: sig Oauth.init(*Context, std.mem.Allocator) Self
+src/officialaccount/oauth/mod.zig: sig Oauth.refreshAccessToken(*Self, []const u8) std.json.Parsed(ResAccessToken)
 src/officialaccount/ocr/mod.zig: field Ocr.allocator: std.mem.Allocator
 src/officialaccount/ocr/mod.zig: field Ocr.ctx: *Context
 src/officialaccount/ocr/mod.zig: field Ocr.transport: ?util_http.HttpClient.Transport
@@ -2965,6 +3406,15 @@ src/officialaccount/ocr/mod.zig: pub fn Ocr.idCard
 src/officialaccount/ocr/mod.zig: pub fn Ocr.init
 src/officialaccount/ocr/mod.zig: pub fn Ocr.plateNumber
 src/officialaccount/ocr/mod.zig: pub fn Ocr.setTransport
+src/officialaccount/ocr/mod.zig: sig Ocr.bankCard(*Self, []const u8) []u8
+src/officialaccount/ocr/mod.zig: sig Ocr.bizLicense(*Self, []const u8) []u8
+src/officialaccount/ocr/mod.zig: sig Ocr.common(*Self, []const u8) []u8
+src/officialaccount/ocr/mod.zig: sig Ocr.driverLicense(*Self, []const u8) []u8
+src/officialaccount/ocr/mod.zig: sig Ocr.driving(*Self, []const u8) []u8
+src/officialaccount/ocr/mod.zig: sig Ocr.idCard(*Self, []const u8) []u8
+src/officialaccount/ocr/mod.zig: sig Ocr.init(*Context, std.mem.Allocator) Self
+src/officialaccount/ocr/mod.zig: sig Ocr.plateNumber(*Self, []const u8) []u8
+src/officialaccount/ocr/mod.zig: sig Ocr.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
 src/officialaccount/officialaccount.zig: field OfficialAccount.ctx: Context
 src/officialaccount/officialaccount.zig: pub const OfficialAccount
 src/officialaccount/officialaccount.zig: pub fn OfficialAccount.getAccessToken
@@ -2986,6 +3436,25 @@ src/officialaccount/officialaccount.zig: pub fn OfficialAccount.getServer
 src/officialaccount/officialaccount.zig: pub fn OfficialAccount.getUser
 src/officialaccount/officialaccount.zig: pub fn OfficialAccount.init
 src/officialaccount/officialaccount.zig: pub fn OfficialAccount.newOfficialAccount
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getAccessToken(*OfficialAccount, std.mem.Allocator) @TypeOf(self.ctx.getAccessToken(allocator))
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getBasic(*OfficialAccount, std.mem.Allocator) basic.Basic
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getBroadcast(*OfficialAccount, std.mem.Allocator) broadcast.Broadcast
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getContext(*OfficialAccount) *Context
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getCustomerService(*OfficialAccount, std.mem.Allocator) customerservice.CustomerService
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getDataCube(*OfficialAccount, std.mem.Allocator) datacube.DataCube
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getDevice(*OfficialAccount, std.mem.Allocator) device.Device
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getDraft(*OfficialAccount, std.mem.Allocator) draft.Draft
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getFreePublish(*OfficialAccount, std.mem.Allocator) freepublish.FreePublish
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getJs(*OfficialAccount) js.Js
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getMaterial(*OfficialAccount, std.mem.Allocator) material.Material
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getMenu(*OfficialAccount, std.mem.Allocator) menu.Menu
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getMessage(*OfficialAccount, std.mem.Allocator) message.Message
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getOauth(*OfficialAccount, std.mem.Allocator) oauth.Oauth
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getOcr(*OfficialAccount, std.mem.Allocator) ocr.Ocr
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getServer(*OfficialAccount, std.mem.Allocator) server.Server
+src/officialaccount/officialaccount.zig: sig OfficialAccount.getUser(*OfficialAccount, std.mem.Allocator) user.User
+src/officialaccount/officialaccount.zig: sig OfficialAccount.init(Context) OfficialAccount
+src/officialaccount/officialaccount.zig: sig OfficialAccount.newOfficialAccount(Config, credential.AccessTokenHandle) OfficialAccount
 src/officialaccount/server/mod.zig: field InboundMessage.allocator: std.mem.Allocator
 src/officialaccount/server/mod.zig: field InboundMessage.doc: util_xml.XmlDoc
 src/officialaccount/server/mod.zig: field InboundMessage.nonce: []const u8
@@ -3003,6 +3472,7 @@ src/officialaccount/server/mod.zig: field Server.allocator: std.mem.Allocator
 src/officialaccount/server/mod.zig: field Server.ctx: *Context
 src/officialaccount/server/mod.zig: field Server.handler: ?MessageHandler
 src/officialaccount/server/mod.zig: field Server.handler_ctx: ?*anyopaque
+src/officialaccount/server/mod.zig: field Server.io: std.Io
 src/officialaccount/server/mod.zig: field Server.raw_body: []u8
 src/officialaccount/server/mod.zig: pub const InboundMessage
 src/officialaccount/server/mod.zig: pub const MessageHandler
@@ -3020,6 +3490,18 @@ src/officialaccount/server/mod.zig: pub fn Server.setMessageHandler
 src/officialaccount/server/mod.zig: pub fn Server.setRawBody
 src/officialaccount/server/mod.zig: pub fn Server.validateSignature
 src/officialaccount/server/mod.zig: pub fn Server.validateURL
+src/officialaccount/server/mod.zig: sig InboundMessage.deinit(*InboundMessage) void
+src/officialaccount/server/mod.zig: sig InboundMessage.get(InboundMessage, []const u8) ?[]const u8
+src/officialaccount/server/mod.zig: sig Server.buildEncryptedReply(*Self, []const u8, []const u8, []const u8, i64, []const u8) []u8
+src/officialaccount/server/mod.zig: sig Server.buildReply(*Self, []const u8, []const u8, []const u8) []u8
+src/officialaccount/server/mod.zig: sig Server.init(*Context, std.mem.Allocator) Self
+src/officialaccount/server/mod.zig: sig Server.parseEncryptedMessage(*Self, Query, []const u8) InboundMessage
+src/officialaccount/server/mod.zig: sig Server.parsePlainMessage(*Self, []const u8) InboundMessage
+src/officialaccount/server/mod.zig: sig Server.serve(*Self, Query) []u8
+src/officialaccount/server/mod.zig: sig Server.setMessageHandler(*Self, MessageHandler, ?*anyopaque) void
+src/officialaccount/server/mod.zig: sig Server.setRawBody(*Self, []u8) void
+src/officialaccount/server/mod.zig: sig Server.validateSignature(*Self, Query) []u8
+src/officialaccount/server/mod.zig: sig Server.validateURL(*Self, Query) bool
 src/officialaccount/user/mod.zig: field BatchGetUserListItem.lang: []const u8
 src/officialaccount/user/mod.zig: field BatchGetUserListItem.openid: []const u8
 src/officialaccount/user/mod.zig: field InfoList.errcode: i64
@@ -3092,6 +3574,25 @@ src/officialaccount/user/mod.zig: pub fn User.setTransport
 src/officialaccount/user/mod.zig: pub fn User.updateRemark
 src/officialaccount/user/mod.zig: pub fn User.updateTag
 src/officialaccount/user/mod.zig: pub fn User.userTidList
+src/officialaccount/user/mod.zig: sig User.batchBlackList(*Self, []const []const u8) void
+src/officialaccount/user/mod.zig: sig User.batchGetUserInfo(*Self, []const BatchGetUserListItem) std.json.Parsed(InfoList)
+src/officialaccount/user/mod.zig: sig User.batchTag(*Self, []const []const u8, i64) void
+src/officialaccount/user/mod.zig: sig User.batchUnBlackList(*Self, []const []const u8) void
+src/officialaccount/user/mod.zig: sig User.batchUntag(*Self, []const []const u8, i64) void
+src/officialaccount/user/mod.zig: sig User.createTag(*Self, []const u8) std.json.Parsed(TagCreateResponse)
+src/officialaccount/user/mod.zig: sig User.deleteTag(*Self, i64) void
+src/officialaccount/user/mod.zig: sig User.getAllBlackList(*Self) []const []const u8
+src/officialaccount/user/mod.zig: sig User.getBlackList(*Self, []const u8) std.json.Parsed(OpenidList)
+src/officialaccount/user/mod.zig: sig User.getOpenidList(*Self, []const u8) std.json.Parsed(OpenidList)
+src/officialaccount/user/mod.zig: sig User.getTag(*Self) std.json.Parsed(TagListResponse)
+src/officialaccount/user/mod.zig: sig User.getUserInfo(*Self, []const u8) std.json.Parsed(UserInfo)
+src/officialaccount/user/mod.zig: sig User.init(*Context, std.mem.Allocator) Self
+src/officialaccount/user/mod.zig: sig User.listAllUserOpenIDs(*Self) []const []const u8
+src/officialaccount/user/mod.zig: sig User.openIDListByTag(*Self, i64, []const u8) std.json.Parsed(TagOpenIDList)
+src/officialaccount/user/mod.zig: sig User.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/officialaccount/user/mod.zig: sig User.updateRemark(*Self, []const u8, []const u8) void
+src/officialaccount/user/mod.zig: sig User.updateTag(*Self, i64, []const u8) void
+src/officialaccount/user/mod.zig: sig User.userTidList(*Self, []const u8) []i64
 src/openplatform/account/mod.zig: field Account.allocator: std.mem.Allocator
 src/openplatform/account/mod.zig: field Account.ctx: *Context
 src/openplatform/account/mod.zig: field Account.transport: ?util_http.HttpClient.Transport
@@ -3105,6 +3606,12 @@ src/openplatform/account/mod.zig: pub fn Account.getOpenAccount
 src/openplatform/account/mod.zig: pub fn Account.init
 src/openplatform/account/mod.zig: pub fn Account.setTransport
 src/openplatform/account/mod.zig: pub fn Account.unbind
+src/openplatform/account/mod.zig: sig Account.bind(*Self, []const u8, []const u8, []const u8) void
+src/openplatform/account/mod.zig: sig Account.createOpenAccount(*Self, []const u8, []const u8) []u8
+src/openplatform/account/mod.zig: sig Account.getOpenAccount(*Self, []const u8, []const u8) []u8
+src/openplatform/account/mod.zig: sig Account.init(*Context, std.mem.Allocator) Self
+src/openplatform/account/mod.zig: sig Account.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/openplatform/account/mod.zig: sig Account.unbind(*Self, []const u8, []const u8, []const u8) void
 src/openplatform/config.zig: field Config.app_id: []const u8
 src/openplatform/config.zig: field Config.app_secret: []const u8
 src/openplatform/config.zig: field Config.cache: ?Cache
@@ -3123,6 +3630,11 @@ src/openplatform/context/access_token.zig: pub fn getAuthrAccessToken
 src/openplatform/context/access_token.zig: pub fn getCachedComponentAccessToken
 src/openplatform/context/access_token.zig: pub fn getComponentAccessToken
 src/openplatform/context/access_token.zig: pub fn refreshAuthrAccessToken
+src/openplatform/context/access_token.zig: sig AuthrAccessToken.deinit(*AuthrAccessToken, std.mem.Allocator) void
+src/openplatform/context/access_token.zig: sig getAuthrAccessToken(*Context, std.mem.Allocator, []const u8) Error![]u8
+src/openplatform/context/access_token.zig: sig getCachedComponentAccessToken(*Context, std.mem.Allocator) Error![]u8
+src/openplatform/context/access_token.zig: sig getComponentAccessToken(*Context, std.mem.Allocator, []const u8) Error![]u8
+src/openplatform/context/access_token.zig: sig refreshAuthrAccessToken(*Context, std.mem.Allocator, []const u8, []const u8, []const u8) Error!AuthrAccessToken
 src/openplatform/context/auth.zig: field AuthBaseInfo.access_token: []u8
 src/openplatform/context/auth.zig: field AuthBaseInfo.appid: []u8
 src/openplatform/context/auth.zig: field AuthBaseInfo.expires_in: i64
@@ -3185,12 +3697,22 @@ src/openplatform/context/auth.zig: pub fn getBindComponentURLV2
 src/openplatform/context/auth.zig: pub fn getComponentLoginPage
 src/openplatform/context/auth.zig: pub fn getPreCode
 src/openplatform/context/auth.zig: pub fn queryAuthCode
+src/openplatform/context/auth.zig: sig AuthBaseInfo.deinit(*AuthBaseInfo, std.mem.Allocator) void
+src/openplatform/context/auth.zig: sig getAuthrInfo(*Context, std.mem.Allocator, []const u8) Error!std.json.Parsed(AuthrInfoResponse)
+src/openplatform/context/auth.zig: sig getBindComponentURL(*Context, std.mem.Allocator, []const u8, i64, []const u8) Error![]u8
+src/openplatform/context/auth.zig: sig getBindComponentURLV2(*Context, std.mem.Allocator, []const u8, i64, []const u8) Error![]u8
+src/openplatform/context/auth.zig: sig getComponentLoginPage(*Context, std.mem.Allocator, []const u8, i64, []const u8) Error![]u8
+src/openplatform/context/auth.zig: sig getPreCode(*Context, std.mem.Allocator) Error![]u8
+src/openplatform/context/auth.zig: sig queryAuthCode(*Context, std.mem.Allocator, []const u8) Error!AuthBaseInfo
 src/openplatform/context/mod.zig: field Context.access_token: ?[]const u8
 src/openplatform/context/mod.zig: field Context.config: Config
-src/openplatform/context/mod.zig: field Context.token_mutex: @import("").SpinMutex
+src/openplatform/context/mod.zig: field Context.token_mutex: TokenMutex
 src/openplatform/context/mod.zig: field Context.transport: ?@import("").HttpClient.Transport
 src/openplatform/context/mod.zig: field Context.transport_ctx: ?*anyopaque
+src/openplatform/context/mod.zig: field TokenMutex.io: std.Io
+src/openplatform/context/mod.zig: field TokenMutex.mutex: std.Io.Mutex
 src/openplatform/context/mod.zig: pub const Context
+src/openplatform/context/mod.zig: pub const TokenMutex
 src/openplatform/context/mod.zig: pub fn Context.getAccessToken
 src/openplatform/context/mod.zig: pub fn Context.getAuthrAccessToken
 src/openplatform/context/mod.zig: pub fn Context.getAuthrInfo
@@ -3202,6 +3724,23 @@ src/openplatform/context/mod.zig: pub fn Context.getPreCode
 src/openplatform/context/mod.zig: pub fn Context.queryAuthCode
 src/openplatform/context/mod.zig: pub fn Context.refreshAuthrAccessToken
 src/openplatform/context/mod.zig: pub fn Context.setAccessToken
+src/openplatform/context/mod.zig: pub fn TokenMutex.lock
+src/openplatform/context/mod.zig: pub fn TokenMutex.tryLock
+src/openplatform/context/mod.zig: pub fn TokenMutex.unlock
+src/openplatform/context/mod.zig: sig Context.getAccessToken(*const Context) ?[]const u8
+src/openplatform/context/mod.zig: sig Context.getAuthrAccessToken(*Context, std.mem.Allocator, []const u8) @import("").Error![]u8
+src/openplatform/context/mod.zig: sig Context.getAuthrInfo(*Context, std.mem.Allocator, []const u8) @import("").Error!std.json.Parsed(@import("").AuthrInfoResponse)
+src/openplatform/context/mod.zig: sig Context.getBindComponentURL(*Context, std.mem.Allocator, []const u8, i64, []const u8) @import("").Error![]u8
+src/openplatform/context/mod.zig: sig Context.getBindComponentURLV2(*Context, std.mem.Allocator, []const u8, i64, []const u8) @import("").Error![]u8
+src/openplatform/context/mod.zig: sig Context.getComponentAccessToken(*Context, std.mem.Allocator, []const u8) []u8
+src/openplatform/context/mod.zig: sig Context.getComponentLoginPage(*Context, std.mem.Allocator, []const u8, i64, []const u8) @import("").Error![]u8
+src/openplatform/context/mod.zig: sig Context.getPreCode(*Context, std.mem.Allocator) @import("").Error![]u8
+src/openplatform/context/mod.zig: sig Context.queryAuthCode(*Context, std.mem.Allocator, []const u8) @import("").Error!@import("").AuthBaseInfo
+src/openplatform/context/mod.zig: sig Context.refreshAuthrAccessToken(*Context, std.mem.Allocator, []const u8, []const u8, []const u8) @import("").Error!@import("").AuthrAccessToken
+src/openplatform/context/mod.zig: sig Context.setAccessToken(*Context, []const u8) void
+src/openplatform/context/mod.zig: sig TokenMutex.lock(*TokenMutex) void
+src/openplatform/context/mod.zig: sig TokenMutex.tryLock(*TokenMutex) bool
+src/openplatform/context/mod.zig: sig TokenMutex.unlock(*TokenMutex) void
 src/openplatform/miniprogram/basic.zig: field AccountBasicInfo.errcode: i64
 src/openplatform/miniprogram/basic.zig: field AccountBasicInfo.errmsg: []const u8
 src/openplatform/miniprogram/basic.zig: field Basic.app_id: []const u8
@@ -3248,6 +3787,16 @@ src/openplatform/miniprogram/basic.zig: pub fn Basic.setNickName
 src/openplatform/miniprogram/basic.zig: pub fn Basic.setNickNameFull
 src/openplatform/miniprogram/basic.zig: pub fn Basic.setSearchStatus
 src/openplatform/miniprogram/basic.zig: pub fn Basic.setSignature
+src/openplatform/miniprogram/basic.zig: sig Basic.checkNickName(*Self, std.mem.Allocator, []const u8) Error!std.json.Parsed(CheckNickNameResp)
+src/openplatform/miniprogram/basic.zig: sig Basic.getAccountBasicInfo(*Self, std.mem.Allocator) Error!std.json.Parsed(AccountBasicInfo)
+src/openplatform/miniprogram/basic.zig: sig Basic.getSearchStatus(*Self, std.mem.Allocator) Error!std.json.Parsed(GetSearchStatusResp)
+src/openplatform/miniprogram/basic.zig: sig Basic.init(*Context, []const u8) Self
+src/openplatform/miniprogram/basic.zig: sig Basic.setHeadImage(*Self, std.mem.Allocator, []const u8) Error!void
+src/openplatform/miniprogram/basic.zig: sig Basic.setHeadImageFull(*Self, std.mem.Allocator, SetHeadImageParam) Error!void
+src/openplatform/miniprogram/basic.zig: sig Basic.setNickName(*Self, std.mem.Allocator, []const u8) Error!std.json.Parsed(SetNickNameResp)
+src/openplatform/miniprogram/basic.zig: sig Basic.setNickNameFull(*Self, std.mem.Allocator, SetNickNameParam) Error!std.json.Parsed(SetNickNameResp)
+src/openplatform/miniprogram/basic.zig: sig Basic.setSearchStatus(*Self, std.mem.Allocator, i64) Error!void
+src/openplatform/miniprogram/basic.zig: sig Basic.setSignature(*Self, std.mem.Allocator, []const u8) Error!void
 src/openplatform/miniprogram/component.zig: field Component.ctx: *Context
 src/openplatform/miniprogram/component.zig: field RegisterMiniProgramParam.code: []const u8
 src/openplatform/miniprogram/component.zig: field RegisterMiniProgramParam.code_type: []const u8
@@ -3265,6 +3814,9 @@ src/openplatform/miniprogram/component.zig: pub const RegistrationStatusParam
 src/openplatform/miniprogram/component.zig: pub fn Component.getRegistrationStatus
 src/openplatform/miniprogram/component.zig: pub fn Component.init
 src/openplatform/miniprogram/component.zig: pub fn Component.registerMiniProgram
+src/openplatform/miniprogram/component.zig: sig Component.getRegistrationStatus(*Self, std.mem.Allocator, RegistrationStatusParam) Error!void
+src/openplatform/miniprogram/component.zig: sig Component.init(*Context) Self
+src/openplatform/miniprogram/component.zig: sig Component.registerMiniProgram(*Self, std.mem.Allocator, RegisterMiniProgramParam) Error!void
 src/openplatform/miniprogram/mod.zig: field OpenMiniProgram.app_id: []const u8
 src/openplatform/miniprogram/mod.zig: field OpenMiniProgram.open_context: *Context
 src/openplatform/miniprogram/mod.zig: pub const OpenMiniProgram
@@ -3272,6 +3824,10 @@ src/openplatform/miniprogram/mod.zig: pub fn OpenMiniProgram.getBasic
 src/openplatform/miniprogram/mod.zig: pub fn OpenMiniProgram.getComponent
 src/openplatform/miniprogram/mod.zig: pub fn OpenMiniProgram.getContext
 src/openplatform/miniprogram/mod.zig: pub fn OpenMiniProgram.init
+src/openplatform/miniprogram/mod.zig: sig OpenMiniProgram.getBasic(*Self) @import("").Basic
+src/openplatform/miniprogram/mod.zig: sig OpenMiniProgram.getComponent(*Self) @import("").Component
+src/openplatform/miniprogram/mod.zig: sig OpenMiniProgram.getContext(*Self) *Context
+src/openplatform/miniprogram/mod.zig: sig OpenMiniProgram.init(*Context, []const u8) Self
 src/openplatform/mod.zig: field OpenPlatform.ctx: Context
 src/openplatform/mod.zig: pub const Account
 src/openplatform/mod.zig: pub const Config
@@ -3285,11 +3841,19 @@ src/openplatform/mod.zig: pub fn OpenPlatform.getMiniProgram
 src/openplatform/mod.zig: pub fn OpenPlatform.getOfficialAccount
 src/openplatform/mod.zig: pub fn OpenPlatform.init
 src/openplatform/mod.zig: pub fn OpenPlatform.newOpenPlatform
+src/openplatform/mod.zig: sig OpenPlatform.getAccountManager(*Self, std.mem.Allocator) Account
+src/openplatform/mod.zig: sig OpenPlatform.getContext(*Self) *Context
+src/openplatform/mod.zig: sig OpenPlatform.getMiniProgram(*Self, []const u8) OpenMiniProgram
+src/openplatform/mod.zig: sig OpenPlatform.getOfficialAccount(*Self, []const u8) OpenOfficialAccount
+src/openplatform/mod.zig: sig OpenPlatform.init(Context) Self
+src/openplatform/mod.zig: sig OpenPlatform.newOpenPlatform(Config) Self
 src/openplatform/officialaccount/mod.zig: field OpenOfficialAccount.app_id: []const u8
 src/openplatform/officialaccount/mod.zig: field OpenOfficialAccount.open_context: *Context
 src/openplatform/officialaccount/mod.zig: pub const OpenOfficialAccount
 src/openplatform/officialaccount/mod.zig: pub fn OpenOfficialAccount.getContext
 src/openplatform/officialaccount/mod.zig: pub fn OpenOfficialAccount.init
+src/openplatform/officialaccount/mod.zig: sig OpenOfficialAccount.getContext(*Self) *Context
+src/openplatform/officialaccount/mod.zig: sig OpenOfficialAccount.init(*Context, []const u8) Self
 src/pay/config.zig: field Config.app_id: []const u8
 src/pay/config.zig: field Config.key: []const u8
 src/pay/config.zig: field Config.mch_id: []const u8
@@ -3331,6 +3895,9 @@ src/pay/notify/mod.zig: pub const PaidNotify
 src/pay/notify/mod.zig: pub fn Notify.decryptRefund
 src/pay/notify/mod.zig: pub fn Notify.init
 src/pay/notify/mod.zig: pub fn verifyPaidNotify
+src/pay/notify/mod.zig: sig Notify.decryptRefund(*Self, std.mem.Allocator, []const u8) []u8
+src/pay/notify/mod.zig: sig Notify.init(Config) Self
+src/pay/notify/mod.zig: sig verifyPaidNotify(std.mem.Allocator, Config, []const u8) bool
 src/pay/order/mod.zig: field AppConfig.appid: []const u8
 src/pay/order/mod.zig: field AppConfig.nonce_str: []const u8
 src/pay/order/mod.zig: field AppConfig.package: []const u8
@@ -3351,6 +3918,7 @@ src/pay/order/mod.zig: field CloseOrderResult.result_code: []const u8
 src/pay/order/mod.zig: field CloseOrderResult.return_code: []const u8
 src/pay/order/mod.zig: field CloseOrderResult.return_msg: []const u8
 src/pay/order/mod.zig: field Order.cfg: Config
+src/pay/order/mod.zig: field Order.io: std.Io
 src/pay/order/mod.zig: field Order.transport: ?util_http.HttpClient.Transport
 src/pay/order/mod.zig: field Order.transport_ctx: ?*anyopaque
 src/pay/order/mod.zig: field Params.attach: []const u8
@@ -3409,6 +3977,18 @@ src/pay/order/mod.zig: pub fn Order.setTransport
 src/pay/order/mod.zig: pub fn PreOrder.deinit
 src/pay/order/mod.zig: pub fn QueryOrderResult.deinit
 src/pay/order/mod.zig: pub fn bridgeJsPaySign
+src/pay/order/mod.zig: sig CloseOrderResult.deinit(*CloseOrderResult) void
+src/pay/order/mod.zig: sig Order.bridgeAppConfig(*Self, std.mem.Allocator, PreOrder) AppConfig
+src/pay/order/mod.zig: sig Order.bridgeConfig(*Self, std.mem.Allocator, Params, PreOrder) BridgeConfig
+src/pay/order/mod.zig: sig Order.closeOrder(*Self, std.mem.Allocator, []const u8) CloseOrderResult
+src/pay/order/mod.zig: sig Order.init(Config) Self
+src/pay/order/mod.zig: sig Order.prePayID(*Self, std.mem.Allocator, PreOrder) (error{PrepayIdEmpty} || std.mem.Allocator.Error)![]u8
+src/pay/order/mod.zig: sig Order.prePayOrder(*Self, std.mem.Allocator, Params) PreOrder
+src/pay/order/mod.zig: sig Order.queryOrder(*Self, std.mem.Allocator, []const u8) QueryOrderResult
+src/pay/order/mod.zig: sig Order.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/pay/order/mod.zig: sig PreOrder.deinit(*PreOrder) void
+src/pay/order/mod.zig: sig QueryOrderResult.deinit(*QueryOrderResult) void
+src/pay/order/mod.zig: sig bridgeJsPaySign(std.mem.Allocator, []const u8, []const u8, []const u8, []const u8, []const u8, []const u8) []u8
 src/pay/pay.zig: field Pay.cfg: Config
 src/pay/pay.zig: pub const Pay
 src/pay/pay.zig: pub fn Pay.getNotify
@@ -3417,7 +3997,14 @@ src/pay/pay.zig: pub fn Pay.getRedpacket
 src/pay/pay.zig: pub fn Pay.getRefund
 src/pay/pay.zig: pub fn Pay.getTransfer
 src/pay/pay.zig: pub fn Pay.init
+src/pay/pay.zig: sig Pay.getNotify(*Pay) Notify
+src/pay/pay.zig: sig Pay.getOrder(*Pay) Order
+src/pay/pay.zig: sig Pay.getRedpacket(*Pay) Redpacket
+src/pay/pay.zig: sig Pay.getRefund(*Pay) Refund
+src/pay/pay.zig: sig Pay.getTransfer(*Pay) Transfer
+src/pay/pay.zig: sig Pay.init(Config) Pay
 src/pay/redpacket/mod.zig: field Redpacket.cfg: Config
+src/pay/redpacket/mod.zig: field Redpacket.io: std.Io
 src/pay/redpacket/mod.zig: field Redpacket.transport: ?util_http.HttpClient.Transport
 src/pay/redpacket/mod.zig: field Redpacket.transport_ctx: ?*anyopaque
 src/pay/redpacket/mod.zig: field RedpacketParams.act_name: []const u8
@@ -3443,7 +4030,12 @@ src/pay/redpacket/mod.zig: pub fn Redpacket.init
 src/pay/redpacket/mod.zig: pub fn Redpacket.sendNormal
 src/pay/redpacket/mod.zig: pub fn Redpacket.setTransport
 src/pay/redpacket/mod.zig: pub fn RedpacketResult.deinit
+src/pay/redpacket/mod.zig: sig Redpacket.init(Config) Self
+src/pay/redpacket/mod.zig: sig Redpacket.sendNormal(*Self, std.mem.Allocator, RedpacketParams) RedpacketResult
+src/pay/redpacket/mod.zig: sig Redpacket.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/pay/redpacket/mod.zig: sig RedpacketResult.deinit(*RedpacketResult) void
 src/pay/refund/mod.zig: field Refund.cfg: Config
+src/pay/refund/mod.zig: field Refund.io: std.Io
 src/pay/refund/mod.zig: field Refund.transport: ?util_http.HttpClient.Transport
 src/pay/refund/mod.zig: field Refund.transport_ctx: ?*anyopaque
 src/pay/refund/mod.zig: field RefundParams.notify_url: []const u8
@@ -3466,7 +4058,12 @@ src/pay/refund/mod.zig: pub fn Refund.init
 src/pay/refund/mod.zig: pub fn Refund.refund
 src/pay/refund/mod.zig: pub fn Refund.setTransport
 src/pay/refund/mod.zig: pub fn RefundResult.deinit
+src/pay/refund/mod.zig: sig Refund.init(Config) Self
+src/pay/refund/mod.zig: sig Refund.refund(*Self, std.mem.Allocator, RefundParams) RefundResult
+src/pay/refund/mod.zig: sig Refund.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/pay/refund/mod.zig: sig RefundResult.deinit(*RefundResult) void
 src/pay/transfer/mod.zig: field Transfer.cfg: Config
+src/pay/transfer/mod.zig: field Transfer.io: std.Io
 src/pay/transfer/mod.zig: field Transfer.transport: ?util_http.HttpClient.Transport
 src/pay/transfer/mod.zig: field Transfer.transport_ctx: ?*anyopaque
 src/pay/transfer/mod.zig: field TransferWalletParams.amount: i64
@@ -3490,6 +4087,10 @@ src/pay/transfer/mod.zig: pub fn Transfer.init
 src/pay/transfer/mod.zig: pub fn Transfer.setTransport
 src/pay/transfer/mod.zig: pub fn Transfer.toWallet
 src/pay/transfer/mod.zig: pub fn TransferWalletResult.deinit
+src/pay/transfer/mod.zig: sig Transfer.init(Config) Self
+src/pay/transfer/mod.zig: sig Transfer.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/pay/transfer/mod.zig: sig Transfer.toWallet(*Self, std.mem.Allocator, TransferWalletParams) TransferWalletResult
+src/pay/transfer/mod.zig: sig TransferWalletResult.deinit(*TransferWalletResult) void
 src/pay/v3/config.zig: field Config.api_v3_key: []const u8
 src/pay/v3/config.zig: field Config.app_id: []const u8
 src/pay/v3/config.zig: field Config.mch_id: []const u8
@@ -3531,6 +4132,7 @@ src/pay/v3/notify.zig: field NotifyResponseBody.summary: []const u8
 src/pay/v3/notify.zig: pub const NotifyResource
 src/pay/v3/notify.zig: pub const NotifyResponseBody
 src/pay/v3/notify.zig: pub fn decryptNotifyResource
+src/pay/v3/notify.zig: sig decryptNotifyResource(std.mem.Allocator, []const u8, []const u8, []const u8, []const u8) []u8
 src/pay/v3/order.zig: field Amount.currency: []const u8
 src/pay/v3/order.zig: field Amount.total: i64
 src/pay/v3/order.zig: field JsapiOrderParams.amount: Amount
@@ -3545,6 +4147,7 @@ src/pay/v3/order.zig: field JsapiPayParams.pay_sign: []const u8
 src/pay/v3/order.zig: field JsapiPayParams.sign_type: []const u8
 src/pay/v3/order.zig: field JsapiPayParams.time_stamp: []const u8
 src/pay/v3/order.zig: field OrderV3.cfg: Config
+src/pay/v3/order.zig: field OrderV3.io: std.Io
 src/pay/v3/order.zig: field Payer.openid: []const u8
 src/pay/v3/order.zig: pub const Amount
 src/pay/v3/order.zig: pub const JsapiOrderParams
@@ -3554,6 +4157,9 @@ src/pay/v3/order.zig: pub const Payer
 src/pay/v3/order.zig: pub fn JsapiPayParams.deinit
 src/pay/v3/order.zig: pub fn OrderV3.getJsPayParams
 src/pay/v3/order.zig: pub fn OrderV3.init
+src/pay/v3/order.zig: sig JsapiPayParams.deinit(*JsapiPayParams, std.mem.Allocator) void
+src/pay/v3/order.zig: sig OrderV3.getJsPayParams(OrderV3, std.mem.Allocator, []const u8) JsapiPayParams
+src/pay/v3/order.zig: sig OrderV3.init(Config) OrderV3
 src/pay/v3/refund.zig: field RefundAmount.currency: []const u8
 src/pay/v3/refund.zig: field RefundAmount.from: []const RefundFrom
 src/pay/v3/refund.zig: field RefundAmount.refund: i64
@@ -3603,6 +4209,7 @@ src/pay/v3/refund.zig: field RefundResult.success_time: []const u8
 src/pay/v3/refund.zig: field RefundResult.transaction_id: []const u8
 src/pay/v3/refund.zig: field RefundResult.user_received_account: []const u8
 src/pay/v3/refund.zig: field RefundV3.cfg: Config
+src/pay/v3/refund.zig: field RefundV3.header_transport: ?util_http.HeaderTransport
 src/pay/v3/refund.zig: field RefundV3.transport: ?util_http.HttpClient.Transport
 src/pay/v3/refund.zig: field RefundV3.transport_ctx: ?*anyopaque
 src/pay/v3/refund.zig: pub const RefundAmount
@@ -3616,13 +4223,23 @@ src/pay/v3/refund.zig: pub const RefundV3
 src/pay/v3/refund.zig: pub fn RefundV3.init
 src/pay/v3/refund.zig: pub fn RefundV3.queryRefund
 src/pay/v3/refund.zig: pub fn RefundV3.refund
+src/pay/v3/refund.zig: pub fn RefundV3.setHeaderTransport
 src/pay/v3/refund.zig: pub fn RefundV3.setTransport
+src/pay/v3/refund.zig: sig RefundV3.init(Config) Self
+src/pay/v3/refund.zig: sig RefundV3.queryRefund(*Self, std.mem.Allocator, []const u8) std.json.Parsed(RefundResult)
+src/pay/v3/refund.zig: sig RefundV3.refund(*Self, std.mem.Allocator, RefundParams) std.json.Parsed(RefundResult)
+src/pay/v3/refund.zig: sig RefundV3.setHeaderTransport(*Self, ?util_http.HeaderTransport, ?*anyopaque) void
+src/pay/v3/refund.zig: sig RefundV3.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
 src/pay/v3/signer.zig: field SignResult.authorization: []const u8
 src/pay/v3/signer.zig: field SignResult.nonce_str: []const u8
 src/pay/v3/signer.zig: field SignResult.timestamp: i64
 src/pay/v3/signer.zig: pub const SignResult
 src/pay/v3/signer.zig: pub fn SignResult.deinit
 src/pay/v3/signer.zig: pub fn buildAuthorizationHeader
+src/pay/v3/signer.zig: pub fn buildAuthorizationHeaderWithIo
+src/pay/v3/signer.zig: sig SignResult.deinit(*SignResult, std.mem.Allocator) void
+src/pay/v3/signer.zig: sig buildAuthorizationHeader(std.mem.Allocator, Config, []const u8, []const u8, []const u8) SignResult
+src/pay/v3/signer.zig: sig buildAuthorizationHeaderWithIo(std.mem.Allocator, std.Io, Config, []const u8, []const u8, []const u8) SignResult
 src/pay/v3/transfer.zig: field TransferBillResult.appid: []const u8
 src/pay/v3/transfer.zig: field TransferBillResult.create_time: []const u8
 src/pay/v3/transfer.zig: field TransferBillResult.fail_reason: []const u8
@@ -3668,6 +4285,7 @@ src/pay/v3/transfer.zig: field TransferResult.transfer_bill_no: []const u8
 src/pay/v3/transfer.zig: field TransferSceneReportInfo.info_content: []const u8
 src/pay/v3/transfer.zig: field TransferSceneReportInfo.info_type: []const u8
 src/pay/v3/transfer.zig: field TransferV3.cfg: Config
+src/pay/v3/transfer.zig: field TransferV3.header_transport: ?util_http.HeaderTransport
 src/pay/v3/transfer.zig: field TransferV3.transport: ?util_http.HttpClient.Transport
 src/pay/v3/transfer.zig: field TransferV3.transport_ctx: ?*anyopaque
 src/pay/v3/transfer.zig: field UserRecvStyle.type: []const u8
@@ -3682,8 +4300,15 @@ src/pay/v3/transfer.zig: pub const UserRecvStyle
 src/pay/v3/transfer.zig: pub fn TransferV3.cancelTransfer
 src/pay/v3/transfer.zig: pub fn TransferV3.init
 src/pay/v3/transfer.zig: pub fn TransferV3.queryTransfer
+src/pay/v3/transfer.zig: pub fn TransferV3.setHeaderTransport
 src/pay/v3/transfer.zig: pub fn TransferV3.setTransport
 src/pay/v3/transfer.zig: pub fn TransferV3.transfer
+src/pay/v3/transfer.zig: sig TransferV3.cancelTransfer(*Self, std.mem.Allocator, []const u8) std.json.Parsed(TransferCancelResult)
+src/pay/v3/transfer.zig: sig TransferV3.init(Config) Self
+src/pay/v3/transfer.zig: sig TransferV3.queryTransfer(*Self, std.mem.Allocator, []const u8) std.json.Parsed(TransferBillResult)
+src/pay/v3/transfer.zig: sig TransferV3.setHeaderTransport(*Self, ?util_http.HeaderTransport, ?*anyopaque) void
+src/pay/v3/transfer.zig: sig TransferV3.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/pay/v3/transfer.zig: sig TransferV3.transfer(*Self, std.mem.Allocator, TransferParams) std.json.Parsed(TransferResult)
 src/root.zig: pub const cache
 src/root.zig: pub const credential
 src/root.zig: pub const middleware
@@ -3715,7 +4340,20 @@ src/util/asn1.zig: pub fn Reader.readRawValue
 src/util/asn1.zig: pub fn Reader.readSequenceContent
 src/util/asn1.zig: pub fn Reader.readTag
 src/util/asn1.zig: pub fn Reader.remaining
+src/util/asn1.zig: sig Reader.init([]const u8) Reader
+src/util/asn1.zig: sig Reader.peekTagNumber(*Reader) Error!u5
+src/util/asn1.zig: sig Reader.readBitString(*Reader) Error![]const u8
+src/util/asn1.zig: sig Reader.readInteger(*Reader) Error![]const u8
+src/util/asn1.zig: sig Reader.readLength(*Reader) Error!usize
+src/util/asn1.zig: sig Reader.readNull(*Reader) Error!void
+src/util/asn1.zig: sig Reader.readObjectIdentifier(*Reader) Error![]const u8
+src/util/asn1.zig: sig Reader.readOctetString(*Reader) Error![]const u8
+src/util/asn1.zig: sig Reader.readRawValue(*Reader) Error!struct { tag: Tag, content: []const u8 }
+src/util/asn1.zig: sig Reader.readSequenceContent(*Reader, usize) Error![]const u8
+src/util/asn1.zig: sig Reader.readTag(*Reader) Error!Tag
+src/util/asn1.zig: sig Reader.remaining(Reader) usize
 src/util/benchmark.zig: pub fn main
+src/util/benchmark.zig: sig main(std.process.Init) void
 src/util/crypto.zig: field DecryptedMessage.app_id: []u8
 src/util/crypto.zig: field DecryptedMessage.random: []u8
 src/util/crypto.zig: field DecryptedMessage.raw_xml_msg: []u8
@@ -3731,6 +4369,15 @@ src/util/crypto.zig: pub fn pkcs5Pad
 src/util/crypto.zig: pub fn pkcs5Unpad
 src/util/crypto.zig: pub fn pkcs7Pad
 src/util/crypto.zig: pub fn pkcs7Unpad
+src/util/crypto.zig: sig aesDecryptMsg(Allocator, []const u8, []const u8) (Allocator.Error || WechatError)!DecryptedMessage
+src/util/crypto.zig: sig aesECBDecrypt(Allocator, []const u8, []const u8) (Allocator.Error || WechatError)![]u8
+src/util/crypto.zig: sig aesEncryptMsg(Allocator, []const u8, []const u8, []const u8, []const u8) (Allocator.Error || WechatError)![]u8
+src/util/crypto.zig: sig calculateSign(Allocator, []const u8, []const u8, []const u8) Allocator.Error![]u8
+src/util/crypto.zig: sig md5HexLower(Allocator, []const u8) Allocator.Error![]u8
+src/util/crypto.zig: sig pkcs5Pad(Allocator, []const u8) Allocator.Error![]u8
+src/util/crypto.zig: sig pkcs5Unpad([]const u8) []const u8
+src/util/crypto.zig: sig pkcs7Pad(Allocator, []const u8, usize) (Allocator.Error || error{InvalidArgument})![]u8
+src/util/crypto.zig: sig pkcs7Unpad([]const u8) []const u8
 src/util/error.zig: field CommonError._allocator: ?std.mem.Allocator
 src/util/error.zig: field CommonError.api_name: []const u8
 src/util/error.zig: field CommonError.errcode: i64
@@ -3753,10 +4400,23 @@ src/util/error.zig: pub fn handleFileResponse
 src/util/error.zig: pub fn isTokenInvalidErrCode
 src/util/error.zig: pub fn lastErrorDetail
 src/util/error.zig: pub fn parseCommonError
+src/util/error.zig: sig CommonError.deinit(CommonError) void
+src/util/error.zig: sig CommonError.format(CommonError, std.mem.Allocator) std.mem.Allocator.Error![]u8
+src/util/error.zig: sig clearErrorDetail() void
+src/util/error.zig: sig decodeWithCommonError(std.mem.Allocator, []const u8, []const u8) WechatErrorDecodeError!?CommonError
+src/util/error.zig: sig decodeWithError(type, std.mem.Allocator, []const u8, []const u8) WechatErrorDecodeError!std.json.Parsed(T)
+src/util/error.zig: sig handleFileResponse([]const u8, []const u8) WechatErrorDecodeError![]const u8
+src/util/error.zig: sig isTokenInvalidErrCode(i64) bool
+src/util/error.zig: sig lastErrorDetail() ?ErrorDetail
+src/util/error.zig: sig parseCommonError(std.mem.Allocator, []const u8, []const u8) WechatErrorDecodeError!?CommonError
 src/util/http.zig: field HttpClient.allocator: std.mem.Allocator
+src/util/http.zig: field HttpClient.header_transport: ?HeaderTransport
 src/util/http.zig: field HttpClient.inner: std.http.Client
+src/util/http.zig: field HttpClient.max_response_bytes: usize
 src/util/http.zig: field HttpClient.transport: ?Transport
 src/util/http.zig: field HttpClient.transport_ctx: ?*anyopaque
+src/util/http.zig: field HttpResponse.body: []u8
+src/util/http.zig: field HttpResponse.status: std.http.Status
 src/util/http.zig: field MockTransport.Response.body: []const u8
 src/util/http.zig: field MockTransport.Response.status: u16
 src/util/http.zig: field MockTransport.allocator: std.mem.Allocator
@@ -3768,12 +4428,16 @@ src/util/http.zig: field MultipartField.file_path: []const u8
 src/util/http.zig: field MultipartField.filename: []const u8
 src/util/http.zig: field MultipartField.is_file: bool
 src/util/http.zig: field MultipartField.value: []const u8
+src/util/http.zig: pub const HeaderTransport
 src/util/http.zig: pub const HttpClient
 src/util/http.zig: pub const HttpClient.Transport
+src/util/http.zig: pub const HttpResponse
 src/util/http.zig: pub const MockTransport
 src/util/http.zig: pub const MockTransport.Response
 src/util/http.zig: pub const MultipartField
 src/util/http.zig: pub const UriModifier
+src/util/http.zig: pub const default_max_redirects
+src/util/http.zig: pub const default_max_response_bytes
 src/util/http.zig: pub const max_redirect_hops
 src/util/http.zig: pub fn HttpClient.deinit
 src/util/http.zig: pub fn HttpClient.get
@@ -3784,9 +4448,15 @@ src/util/http.zig: pub fn HttpClient.init
 src/util/http.zig: pub fn HttpClient.post
 src/util/http.zig: pub fn HttpClient.postJSON
 src/util/http.zig: pub fn HttpClient.postMultipart
+src/util/http.zig: pub fn HttpClient.postWithHeaders
 src/util/http.zig: pub fn HttpClient.postXML
 src/util/http.zig: pub fn HttpClient.postXMLWithTLS
+src/util/http.zig: pub fn HttpClient.requestWithHeaders
+src/util/http.zig: pub fn HttpClient.sendWithHeaders
+src/util/http.zig: pub fn HttpClient.setHeaderTransport
+src/util/http.zig: pub fn HttpClient.setMaxResponseBytes
 src/util/http.zig: pub fn HttpClient.setTransport
+src/util/http.zig: pub fn HttpResponse.deinit
 src/util/http.zig: pub fn MockTransport.addRoute
 src/util/http.zig: pub fn MockTransport.deinit
 src/util/http.zig: pub fn MockTransport.dispatch
@@ -3797,14 +4467,45 @@ src/util/http.zig: pub fn getDefaultClient
 src/util/http.zig: pub fn initDefaultClient
 src/util/http.zig: pub fn setUriModifier
 src/util/http.zig: pub var uri_modifier
+src/util/http.zig: sig HttpClient.deinit(*HttpClient) void
+src/util/http.zig: sig HttpClient.get(*HttpClient, []const u8) []u8
+src/util/http.zig: sig HttpClient.getFollowRedirect(*HttpClient, []const u8) []u8
+src/util/http.zig: sig HttpClient.getFollowRedirectLimited(*HttpClient, []const u8, usize) []u8
+src/util/http.zig: sig HttpClient.getFollowRedirectToFile(*HttpClient, []const u8, []const u8, usize) u64
+src/util/http.zig: sig HttpClient.init(std.mem.Allocator) HttpClient
+src/util/http.zig: sig HttpClient.post(*HttpClient, []const u8, []const u8, ?[]const u8) []u8
+src/util/http.zig: sig HttpClient.postJSON(*HttpClient, []const u8, []const u8) []u8
+src/util/http.zig: sig HttpClient.postMultipart(*HttpClient, []const u8, []const MultipartField) []u8
+src/util/http.zig: sig HttpClient.postWithHeaders(*HttpClient, []const u8, []const u8, ?[]const u8, []const std.http.Header) []u8
+src/util/http.zig: sig HttpClient.postXML(*HttpClient, []const u8, []const u8) []u8
+src/util/http.zig: sig HttpClient.postXMLWithTLS(*HttpClient, []const u8, []const u8, []const u8, []const u8) []u8
+src/util/http.zig: sig HttpClient.requestWithHeaders(*HttpClient, std.http.Method, []const u8, []const u8, ?[]const u8, []const std.http.Header) HttpResponse
+src/util/http.zig: sig HttpClient.sendWithHeaders(*HttpClient, std.http.Method, []const u8, []const u8, ?[]const u8, []const std.http.Header) []u8
+src/util/http.zig: sig HttpClient.setHeaderTransport(*HttpClient, ?HeaderTransport, ?*anyopaque) void
+src/util/http.zig: sig HttpClient.setMaxResponseBytes(*HttpClient, usize) void
+src/util/http.zig: sig HttpClient.setTransport(*HttpClient, ?Transport, ?*anyopaque) void
+src/util/http.zig: sig HttpResponse.deinit(*HttpResponse, std.mem.Allocator) void
+src/util/http.zig: sig MockTransport.addRoute(*MockTransport, []const u8, Response) void
+src/util/http.zig: sig MockTransport.deinit(*MockTransport) void
+src/util/http.zig: sig MockTransport.dispatch(*anyopaque, std.mem.Allocator, []const u8, std.http.Method, []const u8, ?[]const u8) anyerror![]u8
+src/util/http.zig: sig MockTransport.init(std.mem.Allocator) MockTransport
+src/util/http.zig: sig defaultClientAllocatorMatches(std.mem.Allocator) bool
+src/util/http.zig: sig deinitDefaultClient() void
+src/util/http.zig: sig getDefaultClient(std.mem.Allocator) *HttpClient
+src/util/http.zig: sig initDefaultClient(std.mem.Allocator) void
+src/util/http.zig: sig setUriModifier(?UriModifier) void
 src/util/json.zig: pub fn appendEscapedString
 src/util/json.zig: pub fn stringFieldObject
 src/util/json.zig: pub fn stringLiteral
+src/util/json.zig: sig appendEscapedString(std.mem.Allocator, anytype, []const u8) std.mem.Allocator.Error!void
+src/util/json.zig: sig stringFieldObject(std.mem.Allocator, []const u8, []const u8) std.mem.Allocator.Error![]u8
+src/util/json.zig: sig stringLiteral(std.mem.Allocator, []const u8) std.mem.Allocator.Error![]u8
 src/util/mod.zig: pub const asn1
 src/util/mod.zig: pub const crypto
 src/util/mod.zig: pub const error_mod
 src/util/mod.zig: pub const http
 src/util/mod.zig: pub const json
+src/util/mod.zig: pub const mtls
 src/util/mod.zig: pub const param
 src/util/mod.zig: pub const pkcs12
 src/util/mod.zig: pub const retry
@@ -3816,21 +4517,49 @@ src/util/mod.zig: pub const time
 src/util/mod.zig: pub const uri
 src/util/mod.zig: pub const util
 src/util/mod.zig: pub const xml
+src/util/mtls.zig: field Endpoint.host: []const u8
+src/util/mtls.zig: field Endpoint.path: []const u8
+src/util/mtls.zig: field Endpoint.port: u16
+src/util/mtls.zig: field Response.body: []u8
+src/util/mtls.zig: field Response.status: u16
+src/util/mtls.zig: pub const Endpoint
+src/util/mtls.zig: pub const NotEnabledError
+src/util/mtls.zig: pub const Response
+src/util/mtls.zig: pub const enabled
+src/util/mtls.zig: pub const max_head_bytes
+src/util/mtls.zig: pub const max_response_bytes
+src/util/mtls.zig: pub fn buildRequest
+src/util/mtls.zig: pub fn parseHttpsUri
+src/util/mtls.zig: pub fn parseResponse
+src/util/mtls.zig: pub fn postXML
+src/util/mtls.zig: pub fn requireOk
+src/util/mtls.zig: sig buildRequest(std.mem.Allocator, Endpoint, []const u8) []u8
+src/util/mtls.zig: sig parseHttpsUri([]const u8) Endpoint
+src/util/mtls.zig: sig parseResponse(std.mem.Allocator, []const u8) Response
+src/util/mtls.zig: sig postXML(std.mem.Allocator, std.Io, []const u8, []const u8, []const u8, []const u8, ?[]const u8) []u8
+src/util/mtls.zig: sig requireOk(*const Response) void
+src/util/mtls_openssl.zig: pub fn exchange
+src/util/mtls_openssl.zig: sig exchange(std.mem.Allocator, Io, []const u8, u16, []const u8, []const u8, []const u8, ?[]const u8, usize) []u8
 src/util/param.zig: field Param.key: []const u8
 src/util/param.zig: field Param.value: []const u8
 src/util/param.zig: pub const Param
 src/util/param.zig: pub fn orderParam
+src/util/param.zig: sig orderParam(Allocator, []const Param, []const u8) Allocator.Error![]u8
 src/util/pkcs12.zig: field P12Result.cert_pem: []u8
 src/util/pkcs12.zig: field P12Result.key_pem: []u8
 src/util/pkcs12.zig: pub const Error
 src/util/pkcs12.zig: pub const P12Result
 src/util/pkcs12.zig: pub fn P12Result.deinit
 src/util/pkcs12.zig: pub fn parse
+src/util/pkcs12.zig: sig P12Result.deinit(*P12Result, std.mem.Allocator) void
+src/util/pkcs12.zig: sig parse(std.mem.Allocator, []const u8, []const u8) Error!P12Result
 src/util/retry.zig: pub fn callApi
+src/util/retry.zig: sig callApi(anytype, std.mem.Allocator, []const u8, anytype) []u8
 src/util/rsa.zig: pub const Ed25519Error
 src/util/rsa.zig: pub const P12Error
 src/util/rsa.zig: pub const RsaError
 src/util/rsa.zig: pub fn ed25519GenerateKeyPair
+src/util/rsa.zig: pub fn ed25519GenerateKeyPairWithIo
 src/util/rsa.zig: pub fn ed25519Sign
 src/util/rsa.zig: pub fn ed25519Verify
 src/util/rsa.zig: pub fn looksLikeRsaPrivateKeyPem
@@ -3841,6 +4570,18 @@ src/util/rsa.zig: pub fn rsaDecrypt
 src/util/rsa.zig: pub fn rsaDecryptBase64
 src/util/rsa.zig: pub fn rsaSign
 src/util/rsa.zig: pub fn rsaVerify
+src/util/rsa.zig: sig ed25519GenerateKeyPair(std.mem.Allocator) Ed25519KeyPair
+src/util/rsa.zig: sig ed25519GenerateKeyPairWithIo(std.mem.Allocator, std.Io) Ed25519KeyPair
+src/util/rsa.zig: sig ed25519Sign(std.mem.Allocator, [ed25519.SecretKey.encoded_length]u8, []const u8) Ed25519Error![]u8
+src/util/rsa.zig: sig ed25519Verify([]const u8, []const u8, [ed25519.PublicKey.encoded_length]u8) Ed25519Error!bool
+src/util/rsa.zig: sig looksLikeRsaPrivateKeyPem([]const u8) bool
+src/util/rsa.zig: sig looksLikeRsaPublicKeyPem([]const u8) bool
+src/util/rsa.zig: sig p12Available() bool
+src/util/rsa.zig: sig parseP12(std.mem.Allocator, []const u8, []const u8) P12Error!struct { cert_pem: []u8, key_pem: []u8, }
+src/util/rsa.zig: sig rsaDecrypt(std.mem.Allocator, []const u8, []const u8) RsaError![]u8
+src/util/rsa.zig: sig rsaDecryptBase64(std.mem.Allocator, []const u8, []const u8) RsaError![]u8
+src/util/rsa.zig: sig rsaSign(std.mem.Allocator, []const u8, []const u8) RsaError![]u8
+src/util/rsa.zig: sig rsaVerify(std.mem.Allocator, []const u8, []const u8, []const u8) RsaError!bool
 src/util/rsa_impl.zig: field PrivateKey.d: std.math.big.int.Managed
 src/util/rsa_impl.zig: field PrivateKey.dp: ?std.math.big.int.Managed
 src/util/rsa_impl.zig: field PrivateKey.dq: ?std.math.big.int.Managed
@@ -3861,17 +4602,39 @@ src/util/rsa_impl.zig: pub fn parsePrivateKeyPem
 src/util/rsa_impl.zig: pub fn parsePublicKeyPem
 src/util/rsa_impl.zig: pub fn signSha256
 src/util/rsa_impl.zig: pub fn verifySha256
+src/util/rsa_impl.zig: sig PrivateKey.deinit(*PrivateKey) void
+src/util/rsa_impl.zig: sig PublicKey.deinit(*PublicKey) void
+src/util/rsa_impl.zig: sig decrypt(std.mem.Allocator, PrivateKey, []const u8) Error![]u8
+src/util/rsa_impl.zig: sig parsePrivateKeyPem(std.mem.Allocator, []const u8) Error!PrivateKey
+src/util/rsa_impl.zig: sig parsePublicKeyPem(std.mem.Allocator, []const u8) Error!PublicKey
+src/util/rsa_impl.zig: sig signSha256(std.mem.Allocator, PrivateKey, []const u8) Error![]u8
+src/util/rsa_impl.zig: sig verifySha256(std.mem.Allocator, PublicKey, []const u8, []const u8) Error!bool
 src/util/signature.zig: pub fn signature
-src/util/sync.zig: field SpinMutex.state: std.atomic.Value(u8)
+src/util/signature.zig: sig signature(Allocator, []const []const u8) Allocator.Error![]u8
+src/util/sync.zig: field SpinMutex.io: std.Io
+src/util/sync.zig: field SpinMutex.mutex: std.Io.Mutex
 src/util/sync.zig: pub const SpinMutex
+src/util/sync.zig: pub const defaultIo
 src/util/sync.zig: pub fn SpinMutex.lock
 src/util/sync.zig: pub fn SpinMutex.tryLock
 src/util/sync.zig: pub fn SpinMutex.unlock
+src/util/sync.zig: sig SpinMutex.lock(*SpinMutex) void
+src/util/sync.zig: sig SpinMutex.tryLock(*SpinMutex) bool
+src/util/sync.zig: sig SpinMutex.unlock(*SpinMutex) void
 src/util/template.zig: pub fn buildTemplateData
+src/util/template.zig: sig buildTemplateData(std.mem.Allocator, anytype) []u8
 src/util/time.zig: pub fn getCurrTS
+src/util/time.zig: pub fn getCurrTSWithIo
+src/util/time.zig: sig getCurrTS() i64
+src/util/time.zig: sig getCurrTSWithIo(std.Io) i64
 src/util/uri.zig: pub fn queryEscape
+src/util/uri.zig: sig queryEscape(std.mem.Allocator, []const u8) std.mem.Allocator.Error![]u8
 src/util/util.zig: pub fn randomStr
+src/util/util.zig: pub fn randomStrWithIo
 src/util/util.zig: pub fn sliceChunk
+src/util/util.zig: sig randomStr(std.mem.Allocator, usize) std.mem.Allocator.Error![]u8
+src/util/util.zig: sig randomStrWithIo(std.mem.Allocator, std.Io, usize) std.mem.Allocator.Error![]u8
+src/util/util.zig: sig sliceChunk(std.mem.Allocator, []const []const u8, usize) std.mem.Allocator.Error![][]const []const u8
 src/util/xml.zig: field XmlDoc.allocator: std.mem.Allocator
 src/util/xml.zig: field XmlDoc.elements: []XmlElement
 src/util/xml.zig: field XmlDoc.root_name: []const u8
@@ -3884,6 +4647,11 @@ src/util/xml.zig: pub fn XmlDoc.deinit
 src/util/xml.zig: pub fn XmlDoc.get
 src/util/xml.zig: pub fn parse
 src/util/xml.zig: pub fn serialize
+src/util/xml.zig: sig XmlDoc.count(XmlDoc) usize
+src/util/xml.zig: sig XmlDoc.deinit(*XmlDoc) void
+src/util/xml.zig: sig XmlDoc.get(XmlDoc, []const u8) ?[]const u8
+src/util/xml.zig: sig parse(std.mem.Allocator, []const u8) (std.mem.Allocator.Error || error{MalformedXml})!XmlDoc
+src/util/xml.zig: sig serialize(std.mem.Allocator, []const u8, []const XmlElement) std.mem.Allocator.Error![]u8
 src/wechat.zig: field Wechat.cache: ?cache_mod.Cache
 src/wechat.zig: pub const Wechat
 src/wechat.zig: pub const Wechat.GetMiniProgramError
@@ -3897,6 +4665,13 @@ src/wechat.zig: pub fn Wechat.getPay
 src/wechat.zig: pub fn Wechat.getWork
 src/wechat.zig: pub fn Wechat.init
 src/wechat.zig: pub fn Wechat.setCache
+src/wechat.zig: sig Wechat.getMiniProgram(*Wechat, std.mem.Allocator, miniprogram_mod.Config, *const fn ( cfg: miniprogram_mod.Config, cache: cache_mod.Cache, ) anyerror!credential_mod.AccessTokenHandle) (GetMiniProgramError || anyerror)!miniprogram_mod.MiniProgram
+src/wechat.zig: sig Wechat.getOfficialAccount(*Wechat, std.mem.Allocator, officialaccount_mod.Config, *const fn (cfg: officialaccount_mod.Config, cache: cache_mod.Cache) anyerror!credential_mod.AccessTokenHandle) (GetOfficialAccountError || anyerror)!officialaccount_mod.OfficialAccount
+src/wechat.zig: sig Wechat.getOpenPlatform(*Wechat, openplatform_mod.Config) GetOpenPlatformError!openplatform_mod.OpenPlatform
+src/wechat.zig: sig Wechat.getPay(*Wechat, pay_mod.Config) pay_mod.Pay
+src/wechat.zig: sig Wechat.getWork(*Wechat, std.mem.Allocator, work_mod.Config) (GetWorkError || anyerror)!work_mod.Work
+src/wechat.zig: sig Wechat.init() Wechat
+src/wechat.zig: sig Wechat.setCache(*Wechat, cache_mod.Cache) void
 src/work/addresslist/mod.zig: field AddressList.allocator: std.mem.Allocator
 src/work/addresslist/mod.zig: field AddressList.ctx: *Context
 src/work/addresslist/mod.zig: field BatchInviteRequest.party: []const i64
@@ -4241,6 +5016,40 @@ src/work/addresslist/mod.zig: pub fn AddressList.updateDepartment
 src/work/addresslist/mod.zig: pub fn AddressList.updateTag
 src/work/addresslist/mod.zig: pub fn AddressList.updateUser
 src/work/addresslist/mod.zig: pub fn AddressList.userAuthSucc
+src/work/addresslist/mod.zig: sig AddressList.addTagUsers(*Self, TagUsersRequest) std.json.Parsed(TagUsersResponse)
+src/work/addresslist/mod.zig: sig AddressList.batchDeleteUsers(*Self, UserBatchDeleteRequest) void
+src/work/addresslist/mod.zig: sig AddressList.batchInvite(*Self, BatchInviteRequest) std.json.Parsed(BatchInviteResponse)
+src/work/addresslist/mod.zig: sig AddressList.convertToOpenID(*Self, []const u8) []u8
+src/work/addresslist/mod.zig: sig AddressList.convertToUserID(*Self, []const u8) []u8
+src/work/addresslist/mod.zig: sig AddressList.createDepartment(*Self, DepartmentCreateRequest) std.json.Parsed(DepartmentCreateResponse)
+src/work/addresslist/mod.zig: sig AddressList.createTag(*Self, CreateTagRequest) std.json.Parsed(CreateTagResponse)
+src/work/addresslist/mod.zig: sig AddressList.createUser(*Self, UserCreateRequest) std.json.Parsed(CommonResponse)
+src/work/addresslist/mod.zig: sig AddressList.deleteDepartment(*Self, i64) void
+src/work/addresslist/mod.zig: sig AddressList.deleteTag(*Self, i64) void
+src/work/addresslist/mod.zig: sig AddressList.deleteTagUsers(*Self, TagUsersRequest) std.json.Parsed(TagUsersResponse)
+src/work/addresslist/mod.zig: sig AddressList.deleteUser(*Self, []const u8) void
+src/work/addresslist/mod.zig: sig AddressList.getDepartment(*Self, i64) std.json.Parsed(DepartmentGetResponse)
+src/work/addresslist/mod.zig: sig AddressList.getDepartmentList(*Self) std.json.Parsed(DepartmentListResponse)
+src/work/addresslist/mod.zig: sig AddressList.getDepartmentListByID(*Self, i64) std.json.Parsed(DepartmentListResponse)
+src/work/addresslist/mod.zig: sig AddressList.getDepartmentSimpleList(*Self, i64) std.json.Parsed(DepartmentSimpleListResponse)
+src/work/addresslist/mod.zig: sig AddressList.getDepartmentUsers(*Self, i64, i64) std.json.Parsed(UserSimpleListResponse)
+src/work/addresslist/mod.zig: sig AddressList.getJoinQrcode(*Self, i64) std.json.Parsed(GetJoinQrcodeResponse)
+src/work/addresslist/mod.zig: sig AddressList.getLinkedCorpDepartmentList(*Self, []const u8) std.json.Parsed(LinkedCorpDepartmentListResponse)
+src/work/addresslist/mod.zig: sig AddressList.getLinkedCorpSimpleList(*Self, []const u8) std.json.Parsed(LinkedCorpSimpleListResponse)
+src/work/addresslist/mod.zig: sig AddressList.getLinkedCorpUser(*Self, []const u8) std.json.Parsed(GetLinkedCorpUserResponse)
+src/work/addresslist/mod.zig: sig AddressList.getLinkedCorpUserList(*Self, []const u8) std.json.Parsed(LinkedCorpUserListResponse)
+src/work/addresslist/mod.zig: sig AddressList.getPermList(*Self) std.json.Parsed(GetPermListResponse)
+src/work/addresslist/mod.zig: sig AddressList.getTag(*Self, i64) std.json.Parsed(GetTagResponse)
+src/work/addresslist/mod.zig: sig AddressList.getUser(*Self, []const u8) std.json.Parsed(UserGetResponse)
+src/work/addresslist/mod.zig: sig AddressList.getUseridByEmail(*Self, GetUseridByEmailRequest) std.json.Parsed(GetUseridResponse)
+src/work/addresslist/mod.zig: sig AddressList.getUseridByMobile(*Self, []const u8) std.json.Parsed(GetUseridResponse)
+src/work/addresslist/mod.zig: sig AddressList.init(*Context, std.mem.Allocator) Self
+src/work/addresslist/mod.zig: sig AddressList.listTags(*Self) std.json.Parsed(ListTagResponse)
+src/work/addresslist/mod.zig: sig AddressList.listUserIDs(*Self, UserListIDRequest) std.json.Parsed(UserListIDResponse)
+src/work/addresslist/mod.zig: sig AddressList.updateDepartment(*Self, DepartmentUpdateRequest) void
+src/work/addresslist/mod.zig: sig AddressList.updateTag(*Self, UpdateTagRequest) void
+src/work/addresslist/mod.zig: sig AddressList.updateUser(*Self, UserUpdateRequest) void
+src/work/addresslist/mod.zig: sig AddressList.userAuthSucc(*Self, []const u8) void
 src/work/appchat/mod.zig: field AppChat.allocator: std.mem.Allocator
 src/work/appchat/mod.zig: field AppChat.ctx: *Context
 src/work/appchat/mod.zig: field ChatInfo.chat_info: ChatInfoInner
@@ -4279,6 +5088,10 @@ src/work/appchat/mod.zig: pub fn AppChat.createChat
 src/work/appchat/mod.zig: pub fn AppChat.getChatInfo
 src/work/appchat/mod.zig: pub fn AppChat.init
 src/work/appchat/mod.zig: pub fn AppChat.updateChat
+src/work/appchat/mod.zig: sig AppChat.createChat(*Self, CreateChatRequest) std.json.Parsed(CreateChatResponse)
+src/work/appchat/mod.zig: sig AppChat.getChatInfo(*Self, []const u8) std.json.Parsed(ChatInfo)
+src/work/appchat/mod.zig: sig AppChat.init(*Context, std.mem.Allocator) Self
+src/work/appchat/mod.zig: sig AppChat.updateChat(*Self, UpdateChatRequest) std.json.Parsed(CommonResponse)
 src/work/checkin/mod.zig: field Checkin.allocator: std.mem.Allocator
 src/work/checkin/mod.zig: field Checkin.ctx: *Context
 src/work/checkin/mod.zig: field CheckinDataItem.checkin_time: i64
@@ -4368,6 +5181,9 @@ src/work/checkin/mod.zig: pub const getCheckinOptionURL
 src/work/checkin/mod.zig: pub fn Checkin.getCheckinData
 src/work/checkin/mod.zig: pub fn Checkin.getCheckinOption
 src/work/checkin/mod.zig: pub fn Checkin.init
+src/work/checkin/mod.zig: sig Checkin.getCheckinData(*Self, CheckinDataRequest) std.json.Parsed(CheckinDataResponse)
+src/work/checkin/mod.zig: sig Checkin.getCheckinOption(*Self, CheckinOptionRequest) std.json.Parsed(CheckinOptionResponse)
+src/work/checkin/mod.zig: sig Checkin.init(*Context, std.mem.Allocator) Self
 src/work/config.zig: field Config.agent_id: []const u8
 src/work/config.zig: field Config.cache: ?cache_mod.Cache
 src/work/config.zig: field Config.corp_id: []const u8
@@ -4385,6 +5201,10 @@ src/work/context/mod.zig: pub fn Context.getAccessToken
 src/work/context/mod.zig: pub fn Context.getJsTicket
 src/work/context/mod.zig: pub fn Context.invalidateAccessToken
 src/work/context/mod.zig: pub fn Context.invalidateJsTicket
+src/work/context/mod.zig: sig Context.getAccessToken(*Context, std.mem.Allocator) @TypeOf(self.access_token_handle.getAccessToken(allocator))
+src/work/context/mod.zig: sig Context.getJsTicket(*Context, std.mem.Allocator, []const u8) []u8
+src/work/context/mod.zig: sig Context.invalidateAccessToken(*Context, std.mem.Allocator) anyerror!void
+src/work/context/mod.zig: sig Context.invalidateJsTicket(*Context, std.mem.Allocator) anyerror!void
 src/work/externalcontact/mod.zig: field AcquisitionCustomer.chat_status: i64
 src/work/externalcontact/mod.zig: field AcquisitionCustomer.external_userid: []const u8
 src/work/externalcontact/mod.zig: field AcquisitionCustomer.state: []const u8
@@ -5555,6 +6375,85 @@ src/work/externalcontact/mod.zig: pub fn ExternalContact.updateContactWay
 src/work/externalcontact/mod.zig: pub fn ExternalContact.updateCustomerAcquisitionLink
 src/work/externalcontact/mod.zig: pub fn ExternalContact.updateJoinWay
 src/work/externalcontact/mod.zig: pub fn ExternalContact.updateUserRemark
+src/work/externalcontact/mod.zig: sig ExternalContact.addContactWay(*Self, AddContactWayRequest) std.json.Parsed(AddContactWayResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.addCropTag(*Self, AddCropTagRequest) std.json.Parsed(AddCropTagResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.addGroupWelcomeTemplate(*Self, AddGroupWelcomeTemplateRequest) std.json.Parsed(AddGroupWelcomeTemplateResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.addJoinWay(*Self, AddJoinWayRequest) std.json.Parsed(AddJoinWayResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.addMomentTask(*Self, AddMomentTaskRequest) std.json.Parsed(AddMomentTaskResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.addMsgTemplate(*Self, AddMsgTemplateRequest) std.json.Parsed(AddMsgTemplateResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.addStrategyTag(*Self, AddStrategyTagRequest) std.json.Parsed(AddStrategyTagResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.batchGetExternalUserDetails(*Self, BatchGetExternalUserDetailsRequest) std.json.Parsed(ExternalUserDetailListResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.cancelGroupMsgSend(*Self, GroupMsgSendRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.cancelMomentTask(*Self, CancelMomentTaskRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.closeTempChat(*Self, CloseTempChatRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.createCustomerAcquisitionLink(*Self, CreateCustomerAcquisitionLinkRequest) std.json.Parsed(CreateCustomerAcquisitionLinkResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.createCustomerStrategy(*Self, CreateCustomerStrategyRequest) std.json.Parsed(CreateCustomerStrategyResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.createMomentStrategy(*Self, CreateMomentStrategyRequest) std.json.Parsed(CreateMomentStrategyResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.customerAcquisitionQuota(*Self) std.json.Parsed(CustomerAcquisitionQuotaResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.customerAcquisitionStatistic(*Self, CustomerAcquisitionStatisticRequest) std.json.Parsed(CustomerAcquisitionStatisticResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.delContactWay(*Self, DelContactWayRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.delCustomerStrategy(*Self, DelCustomerStrategyRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.delGroupWelcomeTemplate(*Self, DelGroupWelcomeTemplateRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.delJoinWay(*Self, JoinWayConfigRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.delMomentStrategy(*Self, DelMomentStrategyRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.delStrategyTag(*Self, DelStrategyTagRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.deleteCropTag(*Self, DeleteCropTagRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.deleteCustomerAcquisitionLink(*Self, DeleteCustomerAcquisitionLinkRequest) std.json.Parsed(CommonErrorResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.editCropTag(*Self, EditCropTagRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.editCustomerStrategy(*Self, EditCustomerStrategyRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.editGroupWelcomeTemplate(*Self, EditGroupWelcomeTemplateRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.editMomentStrategy(*Self, EditMomentStrategyRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.editStrategyTag(*Self, EditStrategyTagRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.getChatInfo(*Self, GetChatInfoRequest) std.json.Parsed(GetChatInfoResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getContactWay(*Self, GetContactWayRequest) std.json.Parsed(GetContactWayResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getCropTagList(*Self, GetCropTagRequest) std.json.Parsed(GetCropTagListResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getCustomerAcquisition(*Self, GetCustomerAcquisitionRequest) std.json.Parsed(GetCustomerAcquisitionResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getCustomerInfoWithLink(*Self, GetCustomerInfoWithLinkRequest) std.json.Parsed(GetCustomerInfoWithLinkResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getCustomerStrategy(*Self, GetCustomerStrategyRequest) std.json.Parsed(GetCustomerStrategyResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getExternalContact(*Self, []const u8, []const u8) std.json.Parsed(ExternalUserDetailResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getExternalContactList(*Self, []const u8) std.json.Parsed(ExternalUserListResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getFollowUserList(*Self) std.json.Parsed(FollowUserListResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getGroupChatDetail(*Self, GroupChatDetailRequest) std.json.Parsed(GroupChatDetailResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getGroupChatList(*Self, GroupChatListRequest) std.json.Parsed(GroupChatListResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getGroupChatStat(*Self, GetGroupChatStatRequest) std.json.Parsed(GetGroupChatStatResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getGroupChatStatByDay(*Self, GetGroupChatStatByDayRequest) std.json.Parsed(GetGroupChatStatByDayResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getGroupMsgListV2(*Self, GetGroupMsgListV2Request) std.json.Parsed(GetGroupMsgListV2Response)
+src/work/externalcontact/mod.zig: sig ExternalContact.getGroupMsgSendResult(*Self, GetGroupMsgSendResultRequest) std.json.Parsed(GetGroupMsgSendResultResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getGroupMsgTask(*Self, GetGroupMsgTaskRequest) std.json.Parsed(GetGroupMsgTaskResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getGroupWelcomeTemplate(*Self, GetGroupWelcomeTemplateRequest) std.json.Parsed(GetGroupWelcomeTemplateResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getJoinWay(*Self, JoinWayConfigRequest) std.json.Parsed(GetJoinWayResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getMomentComments(*Self, GetMomentCommentsRequest) std.json.Parsed(GetMomentCommentsResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getMomentCustomerList(*Self, GetMomentCustomerListRequest) std.json.Parsed(GetMomentCustomerListResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getMomentList(*Self, GetMomentListRequest) std.json.Parsed(GetMomentListResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getMomentSendResult(*Self, GetMomentCustomerListRequest) std.json.Parsed(GetMomentSendResultResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getMomentStrategy(*Self, GetMomentStrategyRequest) std.json.Parsed(GetMomentStrategyResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getMomentTask(*Self, GetMomentTaskListRequest) std.json.Parsed(GetMomentTaskResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getMomentTaskResult(*Self, []const u8) std.json.Parsed(GetMomentTaskResultResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getPermit(*Self) std.json.Parsed(GetPermitResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getRangeCustomerStrategy(*Self, GetRangeCustomerStrategyRequest) std.json.Parsed(GetRangeCustomerStrategyResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getRangeMomentStrategy(*Self, GetRangeMomentStrategyRequest) std.json.Parsed(GetRangeMomentStrategyResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getStrategyTagList(*Self, GetStrategyTagListRequest) std.json.Parsed(GetStrategyTagListResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getUnassignedList(*Self, GetUnassignedListRequest) std.json.Parsed(GetUnassignedListResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.getUserBehaviorData(*Self, GetUserBehaviorRequest) std.json.Parsed(GetUserBehaviorResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.groupChatOnJobTransfer(*Self, GroupChatTransferRequest) std.json.Parsed(GroupChatTransferResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.groupChatTransfer(*Self, GroupChatTransferRequest) std.json.Parsed(GroupChatTransferResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.init(*Context, std.mem.Allocator) Self
+src/work/externalcontact/mod.zig: sig ExternalContact.listContactWay(*Self, ListContactWayRequest) std.json.Parsed(ListContactWayResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.listCustomerStrategy(*Self, ListCustomerStrategyRequest) std.json.Parsed(ListCustomerStrategyResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.listLink(*Self, ListLinkRequest) std.json.Parsed(ListLinkResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.listMomentStrategy(*Self, ListMomentStrategyRequest) std.json.Parsed(ListMomentStrategyResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.markTag(*Self, MarkTagRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.opengidToChatID(*Self, OpengIDToChatIDRequest) std.json.Parsed(OpengIDToChatIDResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.remindGroupMsgSend(*Self, GroupMsgSendRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.resignedTransferCustomer(*Self, ResignedTransferCustomerRequest) std.json.Parsed(ResignedTransferCustomerResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.resignedTransferResult(*Self, ResignedTransferResultRequest) std.json.Parsed(ResignedTransferResultResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.sendWelcomeMsg(*Self, SendWelcomeMsgRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.transferCustomer(*Self, TransferCustomerRequest) std.json.Parsed(TransferCustomerResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.transferResult(*Self, TransferResultRequest) std.json.Parsed(TransferResultResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.updateContactWay(*Self, UpdateContactWayRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.updateCustomerAcquisitionLink(*Self, UpdateCustomerAcquisitionLinkRequest) std.json.Parsed(CommonErrorResponse)
+src/work/externalcontact/mod.zig: sig ExternalContact.updateJoinWay(*Self, UpdateJoinWayRequest) void
+src/work/externalcontact/mod.zig: sig ExternalContact.updateUserRemark(*Self, UpdateUserRemarkRequest) void
 src/work/invoice/mod.zig: field GetInvoiceBatchRequest.item_list: []InvoiceRef
 src/work/invoice/mod.zig: field GetInvoiceBatchResponse.errcode: i64
 src/work/invoice/mod.zig: field GetInvoiceBatchResponse.errmsg: []const u8
@@ -5624,12 +6523,16 @@ src/work/invoice/mod.zig: pub const getInvoiceInfoURL
 src/work/invoice/mod.zig: pub fn Invoice.getInvoiceBatch
 src/work/invoice/mod.zig: pub fn Invoice.getInvoiceInfo
 src/work/invoice/mod.zig: pub fn Invoice.init
+src/work/invoice/mod.zig: sig Invoice.getInvoiceBatch(*Self, GetInvoiceBatchRequest) std.json.Parsed(GetInvoiceBatchResponse)
+src/work/invoice/mod.zig: sig Invoice.getInvoiceInfo(*Self, GetInvoiceInfoRequest) std.json.Parsed(GetInvoiceInfoResponse)
+src/work/invoice/mod.zig: sig Invoice.init(*Context, std.mem.Allocator) Self
 src/work/jsapi/mod.zig: field Config.app_id: []const u8
 src/work/jsapi/mod.zig: field Config.nonce_str: []const u8
 src/work/jsapi/mod.zig: field Config.signature: []const u8
 src/work/jsapi/mod.zig: field Config.timestamp: i64
 src/work/jsapi/mod.zig: field Js.agent_ticket_handle: ?credential.JsTicketHandle
 src/work/jsapi/mod.zig: field Js.ctx: *Context
+src/work/jsapi/mod.zig: field Js.io: std.Io
 src/work/jsapi/mod.zig: field Js.ticket_handle: ?credential.JsTicketHandle
 src/work/jsapi/mod.zig: pub const Config
 src/work/jsapi/mod.zig: pub const Js
@@ -5639,6 +6542,12 @@ src/work/jsapi/mod.zig: pub fn Js.getConfig
 src/work/jsapi/mod.zig: pub fn Js.init
 src/work/jsapi/mod.zig: pub fn Js.setAgentJsTicketHandle
 src/work/jsapi/mod.zig: pub fn Js.setJsTicketHandle
+src/work/jsapi/mod.zig: sig Config.deinit(*Config, std.mem.Allocator) void
+src/work/jsapi/mod.zig: sig Js.getAgentConfig(*Self, std.mem.Allocator, []const u8) Config
+src/work/jsapi/mod.zig: sig Js.getConfig(*Self, std.mem.Allocator, []const u8) Config
+src/work/jsapi/mod.zig: sig Js.init(*Context) Self
+src/work/jsapi/mod.zig: sig Js.setAgentJsTicketHandle(*Self, credential.JsTicketHandle) void
+src/work/jsapi/mod.zig: sig Js.setJsTicketHandle(*Self, credential.JsTicketHandle) void
 src/work/kf/mod.zig: field AccountAddRequest.media_id: []const u8
 src/work/kf/mod.zig: field AccountAddRequest.name: []const u8
 src/work/kf/mod.zig: field AccountAddResponse.errcode: i64
@@ -6140,8 +7049,47 @@ src/work/kf/mod.zig: pub fn SyncMessage.getOriginValue
 src/work/kf/mod.zig: pub fn SyncMessage.jsonParse
 src/work/kf/mod.zig: pub fn SyncMessage.originAs
 src/work/kf/mod.zig: pub fn SyncMessage.originPayloadAs
+src/work/kf/mod.zig: sig Kf.addAccount(*Self, AccountAddRequest) std.json.Parsed(AccountAddResponse)
+src/work/kf/mod.zig: sig Kf.addContactWay(*Self, ContactWayRequest) std.json.Parsed(ContactWayResponse)
+src/work/kf/mod.zig: sig Kf.addKnowledgeGroup(*Self, KnowledgeGroupAddRequest) std.json.Parsed(KnowledgeGroupAddResponse)
+src/work/kf/mod.zig: sig Kf.addKnowledgeIntent(*Self, KnowledgeIntentAddRequest) std.json.Parsed(KnowledgeIntentAddResponse)
+src/work/kf/mod.zig: sig Kf.addServicer(*Self, ServicerRequest) std.json.Parsed(ServicerResponse)
+src/work/kf/mod.zig: sig Kf.cancelUpgradeService(*Self, UpgradeServiceCancelRequest) std.json.Parsed(CommonResponse)
+src/work/kf/mod.zig: sig Kf.customerBatchGet(*Self, CustomerBatchGetRequest) std.json.Parsed(CustomerBatchGetResponse)
+src/work/kf/mod.zig: sig Kf.delAccount(*Self, AccountDelRequest) std.json.Parsed(CommonResponse)
+src/work/kf/mod.zig: sig Kf.delKnowledgeGroup(*Self, KnowledgeGroupDelRequest) std.json.Parsed(CommonResponse)
+src/work/kf/mod.zig: sig Kf.delKnowledgeIntent(*Self, KnowledgeIntentDelRequest) std.json.Parsed(CommonResponse)
+src/work/kf/mod.zig: sig Kf.delServicer(*Self, ServicerRequest) std.json.Parsed(ServicerResponse)
+src/work/kf/mod.zig: sig Kf.getAccountList(*Self) std.json.Parsed(AccountListResponse)
+src/work/kf/mod.zig: sig Kf.getAccountPage(*Self, AccountPageRequest) std.json.Parsed(AccountListResponse)
+src/work/kf/mod.zig: sig Kf.getCorpQualification(*Self) std.json.Parsed(CorpQualificationResponse)
+src/work/kf/mod.zig: sig Kf.getCorpStatistic(*Self, CorpStatisticRequest) std.json.Parsed(CorpStatisticResponse)
+src/work/kf/mod.zig: sig Kf.getServiceState(*Self, ServiceStateGetRequest) std.json.Parsed(ServiceStateGetResponse)
+src/work/kf/mod.zig: sig Kf.getServicerList(*Self, []const u8) std.json.Parsed(ServicerListResponse)
+src/work/kf/mod.zig: sig Kf.getServicerStatistic(*Self, ServicerStatisticRequest) std.json.Parsed(ServicerStatisticResponse)
+src/work/kf/mod.zig: sig Kf.getUpgradeServiceConfig(*Self) std.json.Parsed(UpgradeServiceConfigResponse)
+src/work/kf/mod.zig: sig Kf.init(*Context, std.mem.Allocator) Self
+src/work/kf/mod.zig: sig Kf.listKnowledgeGroup(*Self, KnowledgeGroupListRequest) std.json.Parsed(KnowledgeGroupListResponse)
+src/work/kf/mod.zig: sig Kf.listKnowledgeIntent(*Self, KnowledgeIntentListRequest) std.json.Parsed(KnowledgeIntentListResponse)
+src/work/kf/mod.zig: sig Kf.modKnowledgeGroup(*Self, KnowledgeGroupModRequest) std.json.Parsed(CommonResponse)
+src/work/kf/mod.zig: sig Kf.modKnowledgeIntent(*Self, KnowledgeIntentModRequest) std.json.Parsed(CommonResponse)
+src/work/kf/mod.zig: sig Kf.sendMsg(*Self, TextMessage) std.json.Parsed(SendMsgResponse)
+src/work/kf/mod.zig: sig Kf.sendMsgOnEvent(*Self, TextEventMessage) std.json.Parsed(SendMsgResponse)
+src/work/kf/mod.zig: sig Kf.sendMsgRich(*Self, SendMessage) std.json.Parsed(SendMsgResponse)
+src/work/kf/mod.zig: sig Kf.syncMsg(*Self, SyncMsgRequest) std.json.Parsed(SyncMsgResponse)
+src/work/kf/mod.zig: sig Kf.transServiceState(*Self, ServiceStateTransRequest) std.json.Parsed(ServiceStateTransResponse)
+src/work/kf/mod.zig: sig Kf.updateAccount(*Self, AccountUpdateRequest) std.json.Parsed(CommonResponse)
+src/work/kf/mod.zig: sig Kf.upgradeGroupChatService(*Self, UpgradeGroupChatServiceRequest) std.json.Parsed(CommonResponse)
+src/work/kf/mod.zig: sig Kf.upgradeMemberService(*Self, UpgradeMemberServiceRequest) std.json.Parsed(CommonResponse)
+src/work/kf/mod.zig: sig Kf.upgradeService(*Self, UpgradeServiceRequest) std.json.Parsed(CommonResponse)
+src/work/kf/mod.zig: sig SyncMessage.getOriginData(SyncMessage, std.mem.Allocator) []u8
+src/work/kf/mod.zig: sig SyncMessage.getOriginValue(SyncMessage) ?std.json.Value
+src/work/kf/mod.zig: sig SyncMessage.jsonParse(std.mem.Allocator, anytype, std.json.ParseOptions) @This()
+src/work/kf/mod.zig: sig SyncMessage.originAs(SyncMessage, std.mem.Allocator, type) std.json.Parsed(T)
+src/work/kf/mod.zig: sig SyncMessage.originPayloadAs(SyncMessage, std.mem.Allocator, type) std.json.Parsed(T)
 src/work/material/mod.zig: field Material.allocator: std.mem.Allocator
 src/work/material/mod.zig: field Material.ctx: *Context
+src/work/material/mod.zig: field Material.io: std.Io
 src/work/material/mod.zig: field MediaType.file
 src/work/material/mod.zig: field MediaType.image
 src/work/material/mod.zig: field MediaType.video
@@ -6169,6 +7117,14 @@ src/work/material/mod.zig: pub fn Material.init
 src/work/material/mod.zig: pub fn Material.upload
 src/work/material/mod.zig: pub fn MediaType.wire
 src/work/material/mod.zig: pub fn maxBytesFor
+src/work/material/mod.zig: sig Material.getTempFile(*Self, []const u8) []u8
+src/work/material/mod.zig: sig Material.getTempFileToFile(*Self, []const u8, []const u8) u64
+src/work/material/mod.zig: sig Material.getTempFileToFileWithLimit(*Self, []const u8, []const u8, usize) u64
+src/work/material/mod.zig: sig Material.getTempFileWithLimit(*Self, []const u8, usize) []u8
+src/work/material/mod.zig: sig Material.init(*Context, std.mem.Allocator) Self
+src/work/material/mod.zig: sig Material.upload(*Self, MediaType, []const u8, ?[]const u8) std.json.Parsed(UploadResponse)
+src/work/material/mod.zig: sig MediaType.wire(MediaType) []const u8
+src/work/material/mod.zig: sig maxBytesFor(MediaType) usize
 src/work/message/mod.zig: field Message.allocator: std.mem.Allocator
 src/work/message/mod.zig: field Message.ctx: *Context
 src/work/message/mod.zig: field SendImageRequest.common: SendRequestCommon
@@ -6206,6 +7162,10 @@ src/work/message/mod.zig: pub fn Message.init
 src/work/message/mod.zig: pub fn Message.sendImage
 src/work/message/mod.zig: pub fn Message.sendMarkdown
 src/work/message/mod.zig: pub fn Message.sendText
+src/work/message/mod.zig: sig Message.init(*Context, std.mem.Allocator) Self
+src/work/message/mod.zig: sig Message.sendImage(*Self, SendImageRequest) std.json.Parsed(SendResponse)
+src/work/message/mod.zig: sig Message.sendMarkdown(*Self, SendMarkdownRequest) std.json.Parsed(SendResponse)
+src/work/message/mod.zig: sig Message.sendText(*Self, SendTextRequest) std.json.Parsed(SendResponse)
 src/work/mod.zig: pub const AddressList
 src/work/mod.zig: pub const AppChat
 src/work/mod.zig: pub const Cache
@@ -6259,6 +7219,9 @@ src/work/msgaudit/mod.zig: pub const getRoomInfoURL
 src/work/msgaudit/mod.zig: pub fn MsgAudit.getAgreeInfo
 src/work/msgaudit/mod.zig: pub fn MsgAudit.getRoomInfo
 src/work/msgaudit/mod.zig: pub fn MsgAudit.init
+src/work/msgaudit/mod.zig: sig MsgAudit.getAgreeInfo(*Self, AgreeInfoRequest) std.json.Parsed(AgreeInfoResponse)
+src/work/msgaudit/mod.zig: sig MsgAudit.getRoomInfo(*Self, []const u8) std.json.Parsed(RoomInfoResponse)
+src/work/msgaudit/mod.zig: sig MsgAudit.init(*Context, std.mem.Allocator) Self
 src/work/oauth/mod.zig: field GetTfaInfoRequest.code: []const u8
 src/work/oauth/mod.zig: field GetTfaInfoResponse.errcode: i64
 src/work/oauth/mod.zig: field GetTfaInfoResponse.errmsg: []const u8
@@ -6316,6 +7279,16 @@ src/work/oauth/mod.zig: pub fn Oauth.init
 src/work/oauth/mod.zig: pub fn Oauth.setTransport
 src/work/oauth/mod.zig: pub fn Oauth.tfaSucc
 src/work/oauth/mod.zig: pub fn Oauth.userInfoToId
+src/work/oauth/mod.zig: sig Oauth.getQrContentTargetURL(*Self, []const u8, []const u8) []u8
+src/work/oauth/mod.zig: sig Oauth.getRedirectPrivateURL(*Self, []const u8, []const u8) []u8
+src/work/oauth/mod.zig: sig Oauth.getRedirectURL(*Self, []const u8) []u8
+src/work/oauth/mod.zig: sig Oauth.getTfaInfo(*Self, []const u8) std.json.Parsed(GetTfaInfoResponse)
+src/work/oauth/mod.zig: sig Oauth.getUserDetail(*Self, []const u8) std.json.Parsed(GetUserDetailResponse)
+src/work/oauth/mod.zig: sig Oauth.getUserInfo(*Self, []const u8) std.json.Parsed(GetUserInfoResponse)
+src/work/oauth/mod.zig: sig Oauth.init(*Context, std.mem.Allocator) Self
+src/work/oauth/mod.zig: sig Oauth.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/work/oauth/mod.zig: sig Oauth.tfaSucc(*Self, []const u8, []const u8) void
+src/work/oauth/mod.zig: sig Oauth.userInfoToId(*Self, []const u8) std.json.Parsed(ResUserInfo)
 src/work/robot/mod.zig: field MarkdownMessage.content: []const u8
 src/work/robot/mod.zig: field Robot.allocator: std.mem.Allocator
 src/work/robot/mod.zig: field TextMessage.content: []const u8
@@ -6331,6 +7304,9 @@ src/work/robot/mod.zig: pub const webhookSendURL
 src/work/robot/mod.zig: pub fn Robot.init
 src/work/robot/mod.zig: pub fn Robot.sendMarkdown
 src/work/robot/mod.zig: pub fn Robot.sendText
+src/work/robot/mod.zig: sig Robot.init(std.mem.Allocator) Self
+src/work/robot/mod.zig: sig Robot.sendMarkdown(*Self, []const u8, MarkdownMessage) std.json.Parsed(WebhookSendResponse)
+src/work/robot/mod.zig: sig Robot.sendText(*Self, []const u8, TextMessage) std.json.Parsed(WebhookSendResponse)
 src/work/server/mod.zig: field WorkCallbackQuery.echostr: []const u8
 src/work/server/mod.zig: field WorkCallbackQuery.msg_signature: []const u8
 src/work/server/mod.zig: field WorkCallbackQuery.nonce: []const u8
@@ -6342,6 +7318,10 @@ src/work/server/mod.zig: pub fn WorkServer.decryptMsg
 src/work/server/mod.zig: pub fn WorkServer.init
 src/work/server/mod.zig: pub fn WorkServer.verifyMsgSignature
 src/work/server/mod.zig: pub fn decodeAesKey
+src/work/server/mod.zig: sig WorkServer.decryptMsg(WorkServer, std.mem.Allocator, []const u8) crypto.DecryptedMessage
+src/work/server/mod.zig: sig WorkServer.init(*Context) WorkServer
+src/work/server/mod.zig: sig WorkServer.verifyMsgSignature(WorkServer, std.mem.Allocator, []const u8, WorkCallbackQuery) bool
+src/work/server/mod.zig: sig decodeAesKey([]const u8) util_error.WechatError![32]u8
 src/work/smartbot/mod.zig: field InboundMessage.allocator: std.mem.Allocator
 src/work/smartbot/mod.zig: field InboundMessage.content: []const u8
 src/work/smartbot/mod.zig: field InboundMessage.corp_id: []const u8
@@ -6361,6 +7341,7 @@ src/work/smartbot/mod.zig: field Server.allocator: std.mem.Allocator
 src/work/smartbot/mod.zig: field Server.ctx: *Context
 src/work/smartbot/mod.zig: field Server.handler: ?MessageHandler
 src/work/smartbot/mod.zig: field Server.handler_ctx: ?*anyopaque
+src/work/smartbot/mod.zig: field Server.io: std.Io
 src/work/smartbot/mod.zig: field Server.raw_body: []u8
 src/work/smartbot/mod.zig: pub const InboundMessage
 src/work/smartbot/mod.zig: pub const MessageHandler
@@ -6379,6 +7360,18 @@ src/work/smartbot/mod.zig: pub fn Server.setMessageHandler
 src/work/smartbot/mod.zig: pub fn Server.setRawBody
 src/work/smartbot/mod.zig: pub fn Server.validateMessageSignature
 src/work/smartbot/mod.zig: pub fn Server.validateUrlSignature
+src/work/smartbot/mod.zig: sig InboundMessage.deinit(*InboundMessage) void
+src/work/smartbot/mod.zig: sig InboundMessage.get(InboundMessage, []const u8) ?[]const u8
+src/work/smartbot/mod.zig: sig Server.buildEncryptedReply(*Self, []const u8, []const u8, []const u8, []const u8, i64, []const u8) []u8
+src/work/smartbot/mod.zig: sig Server.buildReplyXml(*Self, []const u8, []const u8, []const u8, []const u8) []u8
+src/work/smartbot/mod.zig: sig Server.computeSignature(*Self, []const []const u8) []u8
+src/work/smartbot/mod.zig: sig Server.init(*Context, std.mem.Allocator) Self
+src/work/smartbot/mod.zig: sig Server.parseEncryptedMessage(*Self, Query) InboundMessage
+src/work/smartbot/mod.zig: sig Server.serve(*Self, Query, bool) ?[]u8
+src/work/smartbot/mod.zig: sig Server.setMessageHandler(*Self, MessageHandler, ?*anyopaque) void
+src/work/smartbot/mod.zig: sig Server.setRawBody(*Self, []u8) void
+src/work/smartbot/mod.zig: sig Server.validateMessageSignature(*Self, Query) bool
+src/work/smartbot/mod.zig: sig Server.validateUrlSignature(*Self, Query) bool
 src/work/work.zig: field Work.agent_js_adapter: ?WorkJsTicketAdapter
 src/work/work.zig: field Work.corp_js_adapter: ?WorkJsTicketAdapter
 src/work/work.zig: field Work.ctx: Context
@@ -6417,3 +7410,31 @@ src/work/work.zig: pub fn Work.setDefaultTicketType
 src/work/work.zig: pub fn Work.setJsTicketHandle
 src/work/work.zig: pub fn WorkJsTicketAdapter.asHandle
 src/work/work.zig: pub fn WorkJsTicketAdapter.init
+src/work/work.zig: sig Work.deinit(*Work, std.mem.Allocator) void
+src/work/work.zig: sig Work.getAccessToken(*Work, std.mem.Allocator) @TypeOf(self.ctx.getAccessToken(allocator))
+src/work/work.zig: sig Work.getAddressList(*Work, std.mem.Allocator) addresslist.AddressList
+src/work/work.zig: sig Work.getAgentJsTicket(*Work, std.mem.Allocator, []const u8) []u8
+src/work/work.zig: sig Work.getAppChat(*Work, std.mem.Allocator) appchat.AppChat
+src/work/work.zig: sig Work.getCheckin(*Work, std.mem.Allocator) checkin.Checkin
+src/work/work.zig: sig Work.getContext(*Work) *Context
+src/work/work.zig: sig Work.getCorpJsTicket(*Work, std.mem.Allocator, []const u8) []u8
+src/work/work.zig: sig Work.getExternalContact(*Work, std.mem.Allocator) externalcontact.ExternalContact
+src/work/work.zig: sig Work.getInvoice(*Work, std.mem.Allocator) invoice.Invoice
+src/work/work.zig: sig Work.getJs(*Work) jsapi.Js
+src/work/work.zig: sig Work.getJsTicket(*Work, std.mem.Allocator, []const u8) []u8
+src/work/work.zig: sig Work.getKf(*Work, std.mem.Allocator) kf.Kf
+src/work/work.zig: sig Work.getMaterial(*Work, std.mem.Allocator) material.Material
+src/work/work.zig: sig Work.getMessage(*Work, std.mem.Allocator) message.Message
+src/work/work.zig: sig Work.getMsgAudit(*Work, std.mem.Allocator) msgaudit.MsgAudit
+src/work/work.zig: sig Work.getOauth(*Work, std.mem.Allocator) oauth.Oauth
+src/work/work.zig: sig Work.getRobot(*Work, std.mem.Allocator) robot.Robot
+src/work/work.zig: sig Work.getServer(*Work) server.WorkServer
+src/work/work.zig: sig Work.getSmartbot(*Work, std.mem.Allocator) smartbot.Server
+src/work/work.zig: sig Work.init(Context) Work
+src/work/work.zig: sig Work.invalidateJsTicket(*Work, std.mem.Allocator, credential.TicketType) void
+src/work/work.zig: sig Work.newDefaultWork(Config, std.mem.Allocator) Work
+src/work/work.zig: sig Work.newWork(Config, credential.AccessTokenHandle, ?credential.JsTicketHandle) Work
+src/work/work.zig: sig Work.setDefaultTicketType(*Work, credential.TicketType) void
+src/work/work.zig: sig Work.setJsTicketHandle(*Work, credential.JsTicketHandle) void
+src/work/work.zig: sig WorkJsTicketAdapter.asHandle(*WorkJsTicketAdapter) credential.JsTicketHandle
+src/work/work.zig: sig WorkJsTicketAdapter.init(*Work, credential.TicketType) WorkJsTicketAdapter

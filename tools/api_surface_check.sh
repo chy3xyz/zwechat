@@ -7,12 +7,16 @@
 # 本门禁把「公开 API 面」固化成 api/surface.txt：任何 pub 声明/字段的
 # 删除、改名、改类型都会让快照对不上，从而要求变更方显式去 CHANGELOG 交代。
 #
+# 函数签名也进了快照（`sig` 行，只记参数类型与返回类型）：改参数类型、增删参数、
+# 改返回类型同样会让下游编译失败，这类变更记为「删除 + 新增」两条，走同一套对账。
+#
 # ── 维护方式（重要）───────────────────────────────────────────────────────────
-#   1. 有意改名 / 删除 / 改类型公开 API 时，必须两件事一起做：
+#   1. 有意改名 / 删除 / 改类型公开 API（含函数的参数/返回类型）时，必须两件事一起做：
 #        a) tools/api_surface_check.sh --update     # 刷新 api/surface.txt
 #        b) 在 CHANGELOG.md 的**最新版本段落**或 **[Unreleased] 段落**里写明
 #           被删除/改名的**旧符号名**，且必须写到容器一级：
 #             pub 类型字段/方法 → `容器.旧名`（如 `Button.type_`）
+#             函数签名变化      → 该函数的 `容器.名`（如 `Context.transport`）
 #             内联匿名类型字段 → `容器.字段.子字段`（如 `OpenidList.data.openid`；
 #                                写成末两段 `data.openid` 也认）
 #             顶层（文件级）声明 → 直接写名字（如 `getMediaList`）
@@ -26,14 +30,17 @@
 #   3. 纯新增 API（只增不删）：门禁放行，但打印新增清单，请在 CHANGELOG 的
 #      `### Added` 段落补记录，并顺手 `--update`。
 #   4. 发版前建议跑一次 `--update`，把快照与 CHANGELOG 一起提交，避免快照停留在旧版本。
+#   5. `sig` 行（函数签名）是相对旧 awk 新增的一类条目，首次引入时整体表现为「纯新增」，
+#      门禁不会因此要求 CHANGELOG 记录；此后函数签名的任何变化都走上面同一套对账。
 #
 # ── 用法 ────────────────────────────────────────────────────────────────────
 #   tools/api_surface_check.sh            # 校验（CI 用，差异时 exit 1）
 #   tools/api_surface_check.sh --update   # 用当前源码刷新 api/surface.txt
 #   tools/api_surface_check.sh --help
 #
-# 依赖：bash + awk + find + sort + grep + sed + cmp + comm + mktemp（无网络依赖）。
-# 提取逻辑见 tools/api_surface.awk（含口径说明与已知漏报）。
+# 依赖：bash + zig（`zig run tools/api_surface.zig`，本地缓存即可离线运行）
+#       + sort + grep + sed + cmp + comm + mktemp（无网络依赖）。
+# 提取逻辑见 tools/api_surface.zig（含口径说明与已知漏报）。
 
 set -euo pipefail
 export LC_ALL=C
@@ -41,15 +48,20 @@ export LC_ALL=C
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SNAPSHOT_REL="api/surface.txt"
 SNAPSHOT="$ROOT/$SNAPSHOT_REL"
-AWK_TOOL_REL="tools/api_surface.awk"
+TOOL_REL="tools/api_surface.zig"
 CHANGELOG="$ROOT/CHANGELOG.md"
 
 read -r -d '' HEADER <<'EOF' || true
 # api/surface.txt — zwechat 公开 API 面快照（发版纪律门禁，不要手改）
 # 生成 / 校验：tools/api_surface_check.sh（--update 刷新；判定语义见脚本顶部注释）
-# 格式：<文件>: pub fn|const|var <容器>.<名称>  |  <文件>: field <容器>.<字段>: <类型>
+# 提取器：tools/api_surface.zig（基于 std.zig.Ast 的真实语法树；旧 awk 版只记函数名）
+# 格式：<文件>: pub fn|const|var <容器>.<名称>
+#       <文件>: sig <容器>.<名称>(参数类型, ...) <返回类型>
+#       <文件>: field <容器>.<字段>: <类型>
 # 口径：src/ 下所有「被 pub 标注的声明」，以及 pub 类型（含其内联匿名子类型）的字段；
 #       函数体 / test 块 / 私有类型内部一律不计。字段行不带 pub 前缀是因为 Zig 无私有字段。
+# `sig` 行只记参数类型与返回类型（不记参数名）：改参数类型、增删参数、改返回类型都会让
+#       下游编译失败，必须有自己的行才拦得住（旧 awk 只记名字，这类变更全漏）。
 EOF
 
 usage() {
@@ -72,21 +84,25 @@ count_entries() {
 }
 
 # 用当前源码生成快照到 stdout（头部注释 + 排序后的条目）。
+#
+# 提取器是 tools/api_surface.zig（基于 `std.zig.Ast` 的真实语法树，新加了函数签名行）。
+# `zig run` 会把编译缓存写进仓库根的 .zig-cache，故必须在 $ROOT 下执行。
 generate() {
-  local list
   printf '%s\n' "$HEADER"
-  list="$(cd "$ROOT" && find src -type f -name '*.zig' | sort)"
-  # 文件名均为 ASCII 且不含空白，故按空白切分传参是安全的。
-  # shellcheck disable=SC2086
-  (cd "$ROOT" && awk -f "$AWK_TOOL_REL" $list) | sort -u
+  (cd "$ROOT" && zig run "$TOOL_REL") | sort -u
 }
 
 # 从快照差异行里取出符号名：
 #   `路径: pub fn 容器.名字` → 容器.名字
+#   `路径: sig 容器.名字(参数类型, ...) 返回类型` → 容器.名字
 #   `路径: field 容器.字段: 类型` → 容器.字段
+# `sig` 那行的参数表里可能再出现 `: `（如 `*const fn (ctx: *anyopaque) void`），
+# 所以先按「`sig` 后第一个空白/左括号之前的部分」整段取出符号名，再走后面的通用规则。
+# 已知边界：名字本身含空格的 `@"foo bar"` 形式会被截断到第一个空格（仓库内无此写法）。
 # 只用 BRE（BSD sed 不支持 `\|` 交替）。
 symbol_of() {
   sed -e 's/^[^:]*: //' \
+    -e 's/^sig \([^ (]*\).*/\1/' \
     -e 's/^field //' \
     -e 's/^pub fn //' \
     -e 's/^pub const //' \
@@ -249,8 +265,8 @@ main() {
      然后运行 tools/api_surface_check.sh --update，并把 api/surface.txt 与 CHANGELOG.md 一起提交。
   2) 若这是误改：把公开 API 改回去，不要动 api/surface.txt。
 
-规则：pub 声明与结构体字段的删除/改名/改类型都属于「下游会编译失败」的变更，
-必须同时更新快照与 CHANGELOG。
+规则：pub 声明、结构体字段、函数签名（参数类型/返回类型）的删除、改名、改类型都属于
+「下游会编译失败」的变更，必须同时更新快照与 CHANGELOG。
 EOF
     exit 1
   fi
