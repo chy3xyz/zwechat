@@ -12,20 +12,38 @@
 //!   单连接；连接池两者兼得）。
 //! - **池锁只保护空闲连接表与计数器**：建连、AUTH/SELECT、请求-响应往返、
 //!   `close` 全部在池锁之外进行。持池锁做网络 I/O 会让池退化回单连接串行
-//!   —— 这是本实现的核心纪律，改动时不要破坏。
+//!   —— 这是本实现的核心纪律，改动时不要破坏。池锁本身是 `std.Io.Mutex`
+//!   （真阻塞的 futex 锁），但临界区极短，等待者几乎不会真的睡下去。
 //! - **等待有上界**：池已满时调用方在锁外「短自旋 + 小睡」等待归还，超过
 //!   `Options.pool_timeout_ms` 放弃并返回 `error.PoolTimeout`（vtable 边界映射为
 //!   `CacheError.StorageError`，同时计入 `Redis.poolStats().timeouts`）。永远不挂死。
+//!   注意：这条等待路径**刻意不阻塞在池锁上**（在锁上等就没有超时可言了），
+//!   而是短自旋 + 小睡轮询，直到超时或拿到连接。
 //! - **坏连接不进池**：读写失败 / 协议解析失败的连接已失步或已断开，直接关闭丢弃，
 //!   下次取连接时重建；服务端返回 `-ERR`（回复完整、协议仍同步）的连接照常复用。
+//! - **可选读超时**（`Options.recv_timeout_ms`，默认 `0` = 不超时）：配置后每次
+//!   socket 读取都受 deadline 约束，服务端 accept 后不回包时调用线程有界返回，
+//!   该连接按坏连接丢弃（计入 `discarded`），下次请求重建 —— 池不会被半死的
+//!   服务端占死。
+//! - **可选建连超时**（`Options.connect_timeout_ms`，默认 `0` = 不超时）：配置后
+//!   **TCP 握手本身**也受 deadline 约束 —— 对端 SYN 被静默丢弃（黑洞 / 防火墙
+//!   DROP / 对端过载）时不再卡到内核上限（Linux 默认 ≈ 127s、macOS ≈ 75s），
+//!   到点直接以 `error.StorageError` 返回，且**不创建连接**（不进池、`created`
+//!   不增长）。实现见文件末尾「建连超时」一节：本工具链的 std 没有可用的
+//!   connect 超时能力，只能用「非阻塞 connect + poll(deadline)」自己实现。
+//! - **主机解析交给 std**：`IpAddress.parse` 认 IPv4 / IPv6 字面量，
+//!   `HostName.lookup` 认域名；不再有只支持 IPv4 的手写解析。
 //! - `get` 返回的切片借用自**当前连接的复用值缓冲**：任何后续 `get`（含其它线程的
 //!   `get`）之后都不保证仍有效，跨操作持有必须 `allocator.dupe`。
 //! - 不支持 TLS；如需 TLS，可外部用 stunnel / redis+tls 代理，或后续扩展。
 
 const std = @import("std");
+const posix = std.posix;
 const Cache = @import("mod.zig").Cache;
 const CacheError = @import("mod.zig").CacheError;
-const SpinMutex = @import("../util/sync.zig").SpinMutex;
+
+/// 建连超时路径只在 POSIX 上实现（Windows / WASI 退化为阻塞 connect）。
+const native_os = @import("builtin").os.tag;
 
 /// Redis 连接选项。
 pub const Options = struct {
@@ -53,6 +71,43 @@ pub const Options = struct {
     ///   同时 `Redis.poolStats().timeouts` 自增 —— 等待一定是**有界**的，不会挂死；
     /// - `0` 表示不等待（池满即刻超时）。
     pool_timeout_ms: u64 = 30_000,
+
+    /// 单次 socket 读取的超时（毫秒），默认 `0` = 不超时。
+    ///
+    /// - `0`（默认）沿用阻塞读：行为与历史版本完全一致；
+    /// - `> 0` 时每次从 socket 读取都套一个不超过本时长的 deadline
+    ///   （`Io.operateTimeout`，语义等价 `SO_RCVTIMEO`）。服务端 accept 之后
+    ///   不回包（半死 / 过载 / 连接被中间设备静默吞掉）时，调用线程在
+    ///   `recv_timeout_ms` 内拿到 `error.StorageError`，而不是永久阻塞把
+    ///   池连接占死；
+    /// - 超时后连接**一定被丢弃**（计入 `poolStats().discarded`），下次请求重建：
+    ///   半条回复留在连接上会让后续请求协议失步，复用比断连危险得多；
+    /// - 只约束「单次读取」，不约束一次请求的总时长（多次读取各自计时），
+    ///   **也不约束建连**（建连看 `connect_timeout_ms`）。
+    recv_timeout_ms: u64 = 0,
+
+    /// 建连（TCP 三次握手）的超时（毫秒），默认 `0` = 不超时（保持历史行为）。
+    ///
+    /// **与 `recv_timeout_ms` 的分工**：
+    /// - 本项管「连上之前」：对端 SYN 被丢弃（黑洞 / 防火墙 DROP / 对端过载）
+    ///   时，阻塞 connect 会一直卡到内核上限（Linux 默认 SYN 重传 6 次 ≈ 127s，
+    ///   macOS ≈ 75s），期间调用线程与池槽位都被占住；
+    /// - `recv_timeout_ms` 管「连上之后」的每一次 socket 读取，**不覆盖建连**；
+    /// - 两者可以独立开关：只配 `recv_timeout_ms` 时，半死的对端能在读阶段脱身，
+    ///   但连不上的对端仍会卡住；只配本项时，连得上的对端如果 accept 后不回包
+    ///   依然会一直等。
+    ///
+    /// 语义与取舍：
+    /// - `0`（默认）沿用阻塞 connect：零额外系统调用，行为与历史版本一致；
+    /// - `> 0` 时用「非阻塞 connect + `poll(deadline)`」把建连卡在期限内，
+    ///   到点返回 `error.ConnectTimeout`，池边界映射为 `error.StorageError`；
+    /// - 超时的 socket **立即关闭**：既不进池也不计入 `created`/`discarded`
+    ///   —— 半开的连接没有任何复用价值；
+    /// - 只约束建连：握手成功后 socket 恢复成阻塞模式，读写仍由 `recv_timeout_ms`
+    ///   决定；
+    /// - POSIX（Linux / macOS / BSD）上真实生效；**Windows / WASI 退化为阻塞
+    ///   connect**（选项仍可配置，但不生效），需要严格上限的部署别把这当成已受保护。
+    connect_timeout_ms: u64 = 0,
 };
 
 /// 连接池运行观测数据（用于监控与测试取证）。
@@ -85,6 +140,75 @@ const Reply = union(enum) {
     null_bulk: void,
 };
 
+/// 带可选读超时的 socket 读取器。
+///
+/// 与 `std.Io.net.Stream.Reader` 同形（父结构里的 `interface` 字段 + `stream`），
+/// 唯一区别是底层读取走 `Io.operateTimeout`：`recv_timeout_ms > 0` 时服务端
+/// accept 之后不回包也不会让调用线程永久阻塞（否则池连接会被占死）。
+/// 超时与其它读取失败都表现为 `error.ReadFailed`，调用方一律丢弃连接 ——
+/// 半条回复留在连接上会让后续请求协议失步。
+///
+/// 读缓冲由调用方提供（与 std 的读取器一致），因此这里只覆盖 vtable 的 `stream`
+/// 一项；`readVec` / `discard` / `rebase` 沿用 std 默认实现，缓冲语义不变。
+const SocketReader = struct {
+    io: std.Io,
+    stream: std.Io.net.Stream,
+    interface: std.Io.Reader,
+    /// 单次读取的超时毫秒数；`0` = 不超时（阻塞读，`Io.operateTimeout` 直接
+    /// 退化为 `Io.operate`，与 `std.Io.net.Stream.Reader` 完全同路）。
+    recv_timeout_ms: u64 = 0,
+
+    fn init(io: std.Io, stream: std.Io.net.Stream, buffer: []u8, recv_timeout_ms: u64) SocketReader {
+        return .{
+            .io = io,
+            .stream = stream,
+            .recv_timeout_ms = recv_timeout_ms,
+            .interface = .{
+                .vtable = &vtable,
+                .buffer = buffer,
+                .seek = 0,
+                .end = 0,
+            },
+        };
+    }
+
+    const vtable: std.Io.Reader.VTable = .{ .stream = streamImpl };
+
+    fn streamImpl(io_r: *std.Io.Reader, io_w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const r: *SocketReader = @alignCast(@fieldParentPtr("interface", io_r));
+        const dest = limit.slice(try io_w.writableSliceGreedy(1));
+        var data = [1][]u8{dest};
+        const result = r.io.operateTimeout(.{ .net_read = .{
+            .socket_handle = r.stream.socket.handle,
+            .data = &data,
+        } }, r.timeout()) catch |err| switch (err) {
+            error.Timeout => {
+                std.log.warn("redis socket 读超时（recv_timeout_ms={d}）：丢弃该连接", .{r.recv_timeout_ms});
+                return error.ReadFailed;
+            },
+            else => return error.ReadFailed,
+        };
+        const n = result.net_read catch return error.ReadFailed;
+        if (n == 0) return error.EndOfStream; // 对端已关闭，等同于 std 的读取器
+        io_w.advance(n);
+        return n;
+    }
+
+    /// `recv_timeout_ms` → `Io.Timeout`。
+    ///
+    /// 用 `awake` 时钟：这是一段「最长阻塞多久」的进程内耗时，休眠期间进程本就不跑，
+    /// 唤醒后继续用完剩下的额度才是语义正确的（与 memory.zig 里 TTL 的 `boot` 相反）。
+    fn timeout(self: *const SocketReader) std.Io.Timeout {
+        if (self.recv_timeout_ms == 0) return .none;
+        // 配置值来自外部，先钳到 i64 上限再交给 std（`fromMilliseconds` 要求 i64）。
+        const ms: i64 = @intCast(@min(self.recv_timeout_ms, std.math.maxInt(i64)));
+        return .{ .duration = .{
+            .raw = .fromMilliseconds(ms),
+            .clock = .awake,
+        } };
+    }
+};
+
 /// 单条 RESP 连接：独占一条 TCP 流、一对读写缓冲区与一个值缓冲。
 ///
 /// 任意时刻至多被一个调用方持有（借出期间不持有池锁），因此连接内部状态无需再加锁，
@@ -95,7 +219,7 @@ const Conn = struct {
     stream: std.Io.net.Stream,
     read_buffer: [4096]u8 = undefined,
     write_buffer: [4096]u8 = undefined,
-    reader: std.Io.net.Stream.Reader,
+    reader: SocketReader,
     writer: std.Io.net.Stream.Writer,
     /// 读取 RESP 简单字符串/整数字行时的临时缓冲区（每条连接独立）。
     line_buffer: [512]u8 = undefined,
@@ -135,7 +259,7 @@ const Conn = struct {
     }
 
     fn readReply(self: *Conn) !Reply {
-        const kind = try self.readByte();
+        const kind = try self.reader.interface.takeByte();
 
         switch (kind) {
             '+' => return .{ .simple_string = try self.readLine() },
@@ -153,9 +277,10 @@ const Conn = struct {
                 // 复用 value_buf：仅在需要更大容量时才重新分配。
                 self.value_buf.clearRetainingCapacity();
                 try self.value_buf.resize(self.allocator, size);
-                try self.reader.interface.readSliceAll(self.value_buf.items);
+                const r = &self.reader.interface;
+                r.readSliceAll(self.value_buf.items) catch return error.StorageError;
                 var trailing: [2]u8 = undefined;
-                try self.reader.interface.readSliceAll(&trailing);
+                r.readSliceAll(&trailing) catch return error.StorageError;
                 if (trailing[0] != '\r' or trailing[1] != '\n') return error.StorageError;
                 return .{ .bulk_string = self.value_buf.items };
             },
@@ -167,25 +292,24 @@ const Conn = struct {
         }
     }
 
-    fn readByte(self: *Conn) !u8 {
-        var byte: [1]u8 = undefined;
-        try self.reader.interface.readSliceAll(&byte);
-        return byte[0];
-    }
-
+    /// 读一行（不含 `\r\n`），结果拷进 `line_buffer`。
+    ///
+    /// 用 `takeDelimiterExclusive('\r')` 一次取到分隔符（`std` 内部按缓冲区扫描，
+    /// 不再逐字节一次 `readSliceAll`），再吃一个字节确认 `\n`。
+    /// 长度上限仍是 `line_buffer.len`（超限返回 `error.StorageError`）。
+    ///
+    /// 返回的切片借用自 `line_buffer`：**下一次 readLine 之前有效**（`Reply` 的
+    /// 借用语义、以及 `Reply` 与 `value_buf` 的独立生命周期都由这次拷贝保证）。
     fn readLine(self: *Conn) ![]const u8 {
-        var i: usize = 0;
-        while (true) {
-            const b = try self.readByte();
-            if (b == '\r') {
-                const lf = try self.readByte();
-                if (lf != '\n') return error.StorageError;
-                return self.line_buffer[0..i];
-            }
-            if (i >= self.line_buffer.len) return error.StorageError;
-            self.line_buffer[i] = b;
-            i += 1;
-        }
+        const r = &self.reader.interface;
+        const line = r.takeDelimiterExclusive('\r') catch return error.StorageError;
+        if (line.len > self.line_buffer.len) return error.StorageError;
+        // `Exclusive` 版把 seek 停在分隔符上，分隔符本身还得自己消费；
+        // 顺带保持原来的严格性：不是 CRLF 结尾的帧一律拒绝。
+        if ((r.takeByte() catch return error.StorageError) != '\r') return error.StorageError;
+        if ((r.takeByte() catch return error.StorageError) != '\n') return error.StorageError;
+        @memcpy(self.line_buffer[0..line.len], line);
+        return self.line_buffer[0..line.len];
     }
 };
 
@@ -213,7 +337,8 @@ pub const Redis = struct {
     // ---------------- 连接池状态：全部由 `pool_mutex` 保护 ----------------
     /// 池锁。临界区只包含「空闲表操作 + 计数更新」，**绝不包含** connect/close/读写
     /// socket 等任何网络 I/O；否则池会退化回单连接串行，本次改造就白做了。
-    pool_mutex: SpinMutex = .{},
+    /// 真阻塞的 `std.Io.Mutex`（`self.io` 驱动 futex 等待 / 唤醒）。
+    pool_mutex: std.Io.Mutex = .init,
     /// 空闲（已建好、可立即复用）连接。容量在 `create` 时预留到 `max_connections`，
     /// 因此正常路径上池锁内不会发生堆分配。
     idle: std.ArrayListUnmanaged(*Conn) = .empty,
@@ -258,19 +383,19 @@ pub const Redis = struct {
         // 关闭池内所有空闲连接。调用方需保证此时没有进行中的操作；
         // close 是系统调用，逐个在池锁之外执行。
         while (true) {
-            self.pool_mutex.lock();
+            self.pool_mutex.lockUncancelable(self.io);
             const conn = self.idle.pop() orelse {
-                self.pool_mutex.unlock();
+                self.pool_mutex.unlock(self.io);
                 break;
             };
             self.live -= 1;
-            self.pool_mutex.unlock();
+            self.pool_mutex.unlock(self.io);
             self.freeConn(conn);
         }
 
-        self.pool_mutex.lock();
+        self.pool_mutex.lockUncancelable(self.io);
         self.idle.deinit(self.allocator);
-        self.pool_mutex.unlock();
+        self.pool_mutex.unlock(self.io);
 
         if (self.owned_io) |*t| {
             t.deinit();
@@ -288,8 +413,8 @@ pub const Redis = struct {
 
     /// 连接池运行统计快照（加锁读取，临界区内无 I/O）。
     pub fn poolStats(self: *Redis) PoolStats {
-        self.pool_mutex.lock();
-        defer self.pool_mutex.unlock();
+        self.pool_mutex.lockUncancelable(self.io);
+        defer self.pool_mutex.unlock(self.io);
         return .{
             .live = self.live,
             .idle = self.idle.items.len,
@@ -317,36 +442,36 @@ pub const Redis = struct {
         var spin_rounds: usize = 0;
 
         while (true) {
-            self.pool_mutex.lock();
+            self.pool_mutex.lockUncancelable(self.io);
             if (self.idle.pop()) |conn| {
                 self.noteBorrowLocked();
-                self.pool_mutex.unlock();
+                self.pool_mutex.unlock(self.io);
                 return conn;
             }
             if (self.live < self.max_connections) {
                 // 先占槽位，防止并发下超建；建连本身放到锁外。
                 self.live += 1;
                 self.noteBorrowLocked();
-                self.pool_mutex.unlock();
+                self.pool_mutex.unlock(self.io);
 
                 const conn = self.createConn() catch |err| {
-                    self.pool_mutex.lock();
+                    self.pool_mutex.lockUncancelable(self.io);
                     self.live -= 1;
-                    self.pool_mutex.unlock();
+                    self.pool_mutex.unlock(self.io);
                     return err;
                 };
-                self.pool_mutex.lock();
+                self.pool_mutex.lockUncancelable(self.io);
                 self.created_total += 1;
-                self.pool_mutex.unlock();
+                self.pool_mutex.unlock(self.io);
                 return conn;
             }
-            self.pool_mutex.unlock();
+            self.pool_mutex.unlock(self.io);
 
             // 池已满：锁外等待。短自旋 + 小睡两段式退避（不持锁，归还方能立刻送达）。
             if (timeout_ns == 0 or nowNanoseconds() - start_ns >= timeout_ns) {
-                self.pool_mutex.lock();
+                self.pool_mutex.lockUncancelable(self.io);
                 self.timeout_total += 1;
-                self.pool_mutex.unlock();
+                self.pool_mutex.unlock(self.io);
                 return error.PoolTimeout;
             }
             if (spin_rounds < WaitSpinRounds) {
@@ -365,22 +490,22 @@ pub const Redis = struct {
             self.discardConn(conn);
             return;
         }
-        self.pool_mutex.lock();
+        self.pool_mutex.lockUncancelable(self.io);
         self.idle.append(self.allocator, conn) catch {
-            self.pool_mutex.unlock();
+            self.pool_mutex.unlock(self.io);
             self.discardConn(conn);
             return;
         };
-        self.pool_mutex.unlock();
+        self.pool_mutex.unlock(self.io);
     }
 
     /// 丢弃一条不可用连接：先关闭（锁外 I/O），再更新计数，最后释放内存。
     fn discardConn(self: *Redis, conn: *Conn) void {
         self.freeConn(conn);
-        self.pool_mutex.lock();
+        self.pool_mutex.lockUncancelable(self.io);
         self.live -= 1;
         self.discarded_total += 1;
-        self.pool_mutex.unlock();
+        self.pool_mutex.unlock(self.io);
     }
 
     /// 关闭并释放一条连接（维护 `live` 计数之外的资源）。不加池锁。
@@ -407,13 +532,22 @@ pub const Redis = struct {
 
     /// 建立一条新连接（TCP + 可选 AUTH / SELECT）。**不得**在持有 `pool_mutex` 时调用。
     fn createConn(self: *Redis) PoolError!*Conn {
-        const addr = std.Io.net.IpAddress{ .ip4 = .{
-            .bytes = parseIpv4(self.opts.host) catch return error.StorageError,
-            .port = self.opts.port,
-        } };
-        const stream = addr.connect(self.io, .{ .mode = .stream }) catch |err| {
-            std.log.warn("redis connect failed: {s}", .{@errorName(err)});
+        const addr = resolveHost(self.io, self.opts.host, self.opts.port) catch |err| {
+            std.log.warn("redis 主机解析失败：host={s} err={s}", .{ self.opts.host, @errorName(err) });
             return error.StorageError;
+        };
+        const stream = connectStream(self.io, addr, self.opts.connect_timeout_ms) catch |err| switch (err) {
+            error.ConnectTimeout => {
+                std.log.warn(
+                    "redis 建连超时（connect_timeout_ms={d}）：放弃本次操作，不创建连接",
+                    .{self.opts.connect_timeout_ms},
+                );
+                return error.StorageError;
+            },
+            else => {
+                std.log.warn("redis connect failed: {s}", .{@errorName(err)});
+                return error.StorageError;
+            },
         };
         errdefer stream.close(self.io);
 
@@ -427,7 +561,7 @@ pub const Redis = struct {
             .reader = undefined,
             .writer = undefined,
         };
-        conn.reader = stream.reader(self.io, &conn.read_buffer);
+        conn.reader = SocketReader.init(self.io, stream, &conn.read_buffer, self.opts.recv_timeout_ms);
         conn.writer = stream.writer(self.io, &conn.write_buffer);
 
         if (self.opts.password) |pwd| {
@@ -587,21 +721,226 @@ pub const Redis = struct {
 };
 
 /// 当前单调时钟纳秒时间戳（`std.Io.Clock.now`，与 memory.zig 一致）。
+///
+/// 这里刻意用 `awake`：它只服务连接池的**等待耗时**判定（`pool_timeout_ms`），
+/// 要的是「进程实际等了多久」；休眠期间进程不跑，不该算进等待额度。
+/// （TTL 语义相反，见 memory.zig 的 `ttlClock`。）
 fn nowNanoseconds() i64 {
     const ts = std.Io.Clock.now(.awake, std.Options.debug_io);
     return @intCast(ts.nanoseconds);
 }
 
-fn parseIpv4(host: []const u8) ![4]u8 {
-    var it = std.mem.splitScalar(u8, host, '.');
-    var octets: [4]u8 = undefined;
-    for (&octets) |*o| {
-        const part = it.next() orelse return error.InvalidAddress;
-        const n = std.fmt.parseInt(u8, part, 10) catch return error.InvalidAddress;
-        o.* = n;
+/// 把 `Options.host` 解析成可连接的地址。
+///
+/// - 字面量（`"127.0.0.1"` / `"::1"`）走 `std.Io.net.IpAddress.parse`：纯函数、
+///   IPv4 与 IPv6 通吃（旧的手写实现只认 IPv4 字面量）；
+/// - 其余按域名走 `std.Io.net.HostName.lookup`：DNS + `/etc/hosts` + RFC 6761 的
+///   `localhost` 全都覆盖。注意 `IpAddress.resolve` **不是** DNS —— 它只是在
+///   `parse` 之上多支持 IPv6 的作用域后缀（`fe80::1%en0`），对域名同样报
+///   `error.ParseFailed`，所以这里没有用它；
+/// - 域名路径依赖宿主 `Io` 的 `netLookup`；未实现时 std 的默认实现返回
+///   `error.NetworkDown`（不 panic），字面量路径完全不触达它；
+/// - 双栈主机上优先取 A 记录（IPv4），与改动前的纯 IPv4 行为最接近。
+fn resolveHost(io: std.Io, host: []const u8, port: u16) !std.Io.net.IpAddress {
+    if (std.Io.net.IpAddress.parse(host, port)) |addr| return addr else |_| {}
+
+    const name = std.Io.net.HostName.init(host) catch return error.InvalidAddress;
+    // 容量 ≥ 16 时 `HostName.lookup` 保证不阻塞（见 std 文档）。
+    var results_buf: [16]std.Io.net.HostName.LookupResult = undefined;
+    var results: std.Io.Queue(std.Io.net.HostName.LookupResult) = .init(&results_buf);
+    try std.Io.net.HostName.lookup(name, io, &results, .{ .port = port });
+
+    var fallback: ?std.Io.net.IpAddress = null;
+    while (results.getOneUncancelable(io)) |result| {
+        switch (result) {
+            .address => |addr| switch (addr) {
+                .ip4 => return addr,
+                .ip6 => if (fallback == null) {
+                    fallback = addr;
+                },
+            },
+            .canonical_name => {},
+        }
+    } else |err| switch (err) {
+        error.Closed => {}, // 结果产出完毕时 lookup 关闭队列，属正常收尾
     }
-    if (it.next() != null) return error.InvalidAddress;
-    return octets;
+    return fallback orelse error.InvalidAddress;
+}
+
+// ============================================================================
+// 建连（含可选超时）
+// ============================================================================
+
+/// 建连失败的错误集（`connectStream` 及其超时路径共用）。
+const ConnectError = error{
+    /// 到点仍未建连（我们自己设的 deadline，来自 `Options.connect_timeout_ms`）。
+    ConnectTimeout,
+    ConnectionRefused,
+    HostUnreachable,
+    NetworkUnreachable,
+    NetworkDown,
+    AddressUnavailable,
+    AccessDenied,
+    /// 其它建连失败（含 socket / `fcntl` / `poll` / `getsockopt` 失败）。
+    ConnectFailed,
+};
+
+/// `O_NONBLOCK` 的原始标志位。
+///
+/// `posix.O` 在各平台都是 packed struct（darwin 的 `NONBLOCK` 是 `bool` 字段，
+/// 不是常量位），逐平台写死 `0x4` / `0x800` 早晚出错 —— 让编译器自己算。
+const o_nonblock: u32 = blk: {
+    var o: posix.O = @bitCast(@as(u32, 0));
+    o.NONBLOCK = true;
+    break :blk @bitCast(o);
+};
+
+/// 建连：`timeout_ms == 0`（默认）走 std 的阻塞 connect，行为与历史版本一致。
+///
+/// **为什么建连超时要自己实现**（本工具链实测结论，`0.17.0-dev.2151+2ec5523d5`）：
+/// - `std.Io.net.IpAddress.ConnectOptions` 确实有 `timeout` 字段
+///   （`std/Io/net.zig:341`），但 `Threaded` 后端直接
+///   `if (options.timeout != .none) @panic("TODO implement netConnectIpPosix with timeout")`
+///   （`std/Io/Threaded.zig:12358`，Windows 版 `:12377` 同样 panic，
+///   `std/Io/Kqueue.zig:1035` 也是 `@panic("TODO")`）—— 传 timeout 就是让进程崩；
+/// - `std.Io.Operation` 里**没有** `net_connect` 这个 tag（只有 `net_receive` /
+///   `net_send` / `net_read` / `net_write` / `file_*`），所以
+///   `io.operateTimeout(.{ .net_connect = ... }, t)` 根本无法构造。
+///
+/// 于是退到 POSIX 自带的能力：socket 仍由 `Io` 后端建（CLOEXEC、SOCK_STREAM 与协议
+/// 的跨平台差异交给 std），随后 `O_NONBLOCK` → `connect` 立刻返回 `EINPROGRESS`
+/// → `poll(POLLOUT, deadline)` → 读 `SO_ERROR` 判成败 → 恢复原阻塞标志位。
+/// 失败与超时路径都由 `errdefer` 关掉这条 socket，它绝不会被池化。
+fn connectStream(io: std.Io, addr: std.Io.net.IpAddress, timeout_ms: u64) ConnectError!std.Io.net.Stream {
+    if (timeout_ms == 0) return blockingConnect(io, addr);
+    return if (comptime native_os == .windows or native_os == .wasi)
+        // 没有可用的 POSIX poll 路径：退化为阻塞 connect（`Options.connect_timeout_ms`
+        // 在这两个平台不生效，Options 文档里已写明）。
+        blockingConnect(io, addr)
+    else
+        connectDeadline(io, addr, timeout_ms);
+}
+
+/// std 的阻塞 connect（历史路径），把它的错误集折叠进本文件的错误集，
+/// 便于调用点统一打日志。
+fn blockingConnect(io: std.Io, addr: std.Io.net.IpAddress) ConnectError!std.Io.net.Stream {
+    return addr.connect(io, .{ .mode = .stream }) catch |err| switch (err) {
+        error.ConnectionRefused => error.ConnectionRefused,
+        error.HostUnreachable => error.HostUnreachable,
+        error.NetworkUnreachable => error.NetworkUnreachable,
+        error.NetworkDown => error.NetworkDown,
+        error.AddressUnavailable => error.AddressUnavailable,
+        error.AccessDenied => error.AccessDenied,
+        // 内核自己判超时才返回这个（极少见）；对调用方来说与我们的 deadline 同义。
+        error.Timeout => error.ConnectTimeout,
+        else => error.ConnectFailed,
+    };
+}
+
+/// 带 deadline 的建连（POSIX）：见 `connectStream` 的说明。
+fn connectDeadline(io: std.Io, addr: std.Io.net.IpAddress, timeout_ms: u64) ConnectError!std.Io.net.Stream {
+    // 先建一条「同族、端口 0」的本地 socket：不 bind 到具体地址，只是借 `Io`
+    // 后端拿到一条合法的 SOCK_STREAM fd（含 CLOEXEC 等平台细节）。
+    const local: std.Io.net.IpAddress = switch (addr) {
+        .ip4 => .{ .ip4 = .{ .bytes = @splat(0), .port = 0 } },
+        .ip6 => .{ .ip6 = .{ .bytes = @splat(0), .port = 0 } },
+    };
+    const sock = local.bind(io, .{ .mode = .stream }) catch return error.ConnectFailed;
+    const stream = std.Io.net.Stream{ .socket = sock };
+    errdefer stream.close(io);
+
+    const fd = sock.handle;
+    const saved_flags = fcntlGetFlags(fd) catch return error.ConnectFailed;
+    sysFcntl(fd, posix.F.SETFL, saved_flags | o_nonblock) catch return error.ConnectFailed;
+    // 无论成败都要恢复原来的阻塞标志位：池化出去的连接必须还是「阻塞读」语义
+    // （读超时另有 `recv_timeout_ms` 管）。
+    defer sysFcntl(fd, posix.F.SETFL, saved_flags) catch {};
+
+    var storage: std.Io.Threaded.PosixAddress = undefined;
+    const addr_len = std.Io.Threaded.addressToPosix(&addr, &storage);
+    switch (posix.errno(posix.system.connect(fd, &storage.any, addr_len))) {
+        // 非阻塞 socket 上 connect 一般返回 EINPROGRESS；回环等本地场景可能一步到位。
+        .SUCCESS => {},
+        .INPROGRESS, .AGAIN => {
+            var fds = [1]posix.pollfd{.{
+                .fd = fd,
+                .events = @intCast(posix.POLL.OUT),
+                .revents = 0,
+            }};
+            const deadline_ms: i32 = @intCast(@min(timeout_ms, std.math.maxInt(i32)));
+            const ready = posix.poll(&fds, deadline_ms) catch return error.ConnectFailed;
+            if (ready == 0) return error.ConnectTimeout;
+            // poll 说「可写」只代表结果已到：非阻塞 connect 的失败是异步的，
+            // 真正的 errno 只在 `SO_ERROR` 里。
+            const so_error = getSockError(fd) catch return error.ConnectFailed;
+            if (so_error != 0) return connectErrno(@fromBackingInt(@intCast(so_error)));
+        },
+        else => |e| return connectErrno(e),
+    }
+    // `Socket.address` 的契约是**本地**地址（std 的 connect 实现也是握手后
+    // getsockname 得到的），刚建出来的还是 0.0.0.0:0，这里回填一下；
+    // 取不到就退回 `local`（只影响诊断信息，不该因此判建连失败）。
+    const bound = std.Io.net.Socket{ .handle = fd, .address = localAddress(fd) orelse local };
+    return std.Io.net.Stream{ .socket = bound };
+}
+
+/// 读端口的本地地址（`getsockname`）；失败返回 `null`（调用方自行兜底）。
+fn localAddress(fd: posix.fd_t) ?std.Io.net.IpAddress {
+    var storage: std.Io.Threaded.PosixAddress = undefined;
+    var len: posix.socklen_t = @sizeOf(std.Io.Threaded.PosixAddress);
+    if (posix.errno(posix.system.getsockname(fd, &storage.any, &len)) != .SUCCESS) return null;
+    return std.Io.Threaded.addressFromPosix(&storage);
+}
+
+/// 读 `SO_ERROR`（非阻塞 connect 的真实结果）；无错误返回 0。
+fn getSockError(fd: posix.fd_t) error{SockOptFailed}!u16 {
+    var so_error: i32 = 0;
+    var opt_len: posix.socklen_t = @sizeOf(i32);
+    // `optval` 的形参类型在 ABI 间不同：libc 是 `?*anyopaque`，Linux 裸系统调用是
+    // `[*]u8`。按实际签名分支，别用 `link_libc` 猜。
+    const rc = if (@typeInfo(@TypeOf(posix.system.getsockopt)).@"fn".param_types[3].? == [*]u8)
+        posix.system.getsockopt(fd, posix.SOL.SOCKET, posix.SO.ERROR, @ptrCast(&so_error), &opt_len)
+    else
+        posix.system.getsockopt(fd, posix.SOL.SOCKET, posix.SO.ERROR, @as(?*anyopaque, @ptrCast(&so_error)), &opt_len);
+    if (posix.errno(rc) != .SUCCESS) return error.SockOptFailed;
+    if (opt_len != @sizeOf(i32) or so_error <= 0) return 0;
+    return @intCast(so_error);
+}
+
+/// 读文件的打开标志位（`F_GETFL`）。
+fn fcntlGetFlags(fd: posix.fd_t) error{FcntlFailed}!u32 {
+    const rc = sysFcntlCall(fd, posix.F.GETFL, 0);
+    if (posix.errno(rc) != .SUCCESS) return error.FcntlFailed;
+    return @intCast(rc);
+}
+
+/// 设置文件的打开标志位（`F_SETFL`）。
+fn sysFcntl(fd: posix.fd_t, cmd: i32, arg: u32) error{FcntlFailed}!void {
+    if (posix.errno(sysFcntlCall(fd, cmd, arg)) != .SUCCESS) return error.FcntlFailed;
+}
+
+/// 跨 ABI 的裸 `fcntl` 调用：libc 版是变参（第三参数按 C 规则传 `c_uint`），
+/// Linux 裸系统调用版是 `(i32, i32, usize)`。按实际签名分支。
+fn sysFcntlCall(fd: posix.fd_t, cmd: i32, arg: u32) @typeInfo(@TypeOf(posix.system.fcntl)).@"fn".return_type.? {
+    const info = @typeInfo(@TypeOf(posix.system.fcntl)).@"fn";
+    return if (info.param_types.len >= 3)
+        posix.system.fcntl(fd, cmd, @as(info.param_types[2].?, @intCast(arg)))
+    else
+        posix.system.fcntl(fd, cmd, @as(c_uint, arg));
+}
+
+/// 把 `connect` / `SO_ERROR` 报出的 errno 映射进本文件的错误集。
+fn connectErrno(e: posix.E) ConnectError {
+    return switch (e) {
+        .CONNREFUSED => error.ConnectionRefused,
+        .HOSTUNREACH => error.HostUnreachable,
+        .NETUNREACH => error.NetworkUnreachable,
+        .ADDRNOTAVAIL => error.AddressUnavailable,
+        .ACCES => error.AccessDenied,
+        .NETDOWN => error.NetworkDown,
+        .TIMEDOUT => error.ConnectTimeout,
+        else => error.ConnectFailed,
+    };
 }
 
 // ============================================================================
@@ -659,10 +998,14 @@ fn mockReadCommand(alloc: std.mem.Allocator, reader: *std.Io.net.Stream.Reader) 
 }
 
 /// mock 服务器的 KV 存储；可被多条连接共享（自带互斥）。
+///
+/// 与生产代码同一套同步原语：`std.Io.Mutex`（真阻塞），`io` 只用来自动 futex
+/// 等待 / 唤醒，与 `Threaded` 实例无关，故直接用 `global_single_threaded`。
 const Store = struct {
     allocator: std.mem.Allocator,
     map: std.HashMap([]const u8, []const u8, std.hash_map.StringContext, 80),
-    mutex: SpinMutex = .{},
+    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    mutex: std.Io.Mutex = .init,
 
     fn init(allocator: std.mem.Allocator) Store {
         return .{
@@ -681,8 +1024,8 @@ const Store = struct {
     }
 
     fn put(self: *Store, key: []const u8, val: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
 
         const owned_key = try self.allocator.dupe(u8, key);
         errdefer self.allocator.free(owned_key);
@@ -697,8 +1040,8 @@ const Store = struct {
     }
 
     fn remove(self: *Store, key: []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         if (self.map.fetchRemove(key)) |old| {
             self.allocator.free(old.key);
             self.allocator.free(old.value);
@@ -706,15 +1049,15 @@ const Store = struct {
     }
 
     fn contains(self: *Store, key: []const u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         return self.map.contains(key);
     }
 
     /// 复制一份值供调用方使用（避免持锁写 socket）。调用方负责 free。
     fn getCopy(self: *Store, key: []const u8) !?[]u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
         const val = self.map.get(key) orelse return null;
         return try self.allocator.dupe(u8, val);
     }
@@ -806,6 +1149,13 @@ const MockPoolServer = struct {
     delay_ms: u64 = 0,
     /// 第 N 条（从 1 起）连接在首个命令后回一个非法 RESP 帧并断开，模拟坏连接。
     poison_conn: ?usize = null,
+    /// 第 N 条（从 1 起）连接在读到首个命令后**永不回包**（模拟 accept 之后卡死 /
+    /// 被中间设备静默吞掉的服务端）。读超时用例专用。
+    ///
+    /// 兜底：即使客户端读超时失效，该连接也最多挂 `silent_hold_ms` 就主动断开
+    /// （`stop` 置位时立即退出），因此用例只会「失败」而不会永久挂住。
+    silent_conn: ?usize = null,
+    silent_hold_ms: u64 = 3000,
 
     ready: std.atomic.Value(bool) = .init(false),
     stop: std.atomic.Value(bool) = .init(false),
@@ -897,6 +1247,17 @@ const MockPoolServer = struct {
                         return;
                     }
                 }
+                if (self.silent_conn) |silent| {
+                    if (silent == conn_index) {
+                        // 命令收下了，但**永不回包**：模拟服务端半死。
+                        // 客户端必须靠读超时脱身；这里的等待只是兜底（见字段注释）。
+                        var waited_ms: u64 = 0;
+                        while (waited_ms < self.silent_hold_ms and !self.stop.load(.acquire)) : (waited_ms += 20) {
+                            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(20), .awake) catch {};
+                        }
+                        return;
+                    }
+                }
             }
             if (!mockHandleCommand(store, args.items, &writer)) break;
         }
@@ -913,6 +1274,81 @@ fn stopPoolServer(srv: *MockPoolServer, thread: std.Thread) void {
     };
     conn.close(io);
     thread.join();
+}
+
+/// 建连超时用例的「黑洞」目标：一个 `listen(kernel_backlog = 1)` 且**永不 accept**
+/// 的本地 socket，外加几条已经把 accept 队列填满的填充连接。
+///
+/// 队列满之后内核对新来的 SYN 直接丢弃（Linux / macOS 默认都是
+/// `tcp_abort_on_overflow = 0`），客户端 connect 于是停在 SYN-SENT：既不成功也不被
+/// 拒绝 —— 正是验证「客户端自己的建连 deadline」所需要的环境，而且完全在本进程内，
+/// 不依赖任何外部网络。
+///
+/// 为什么不用 TEST-NET-1（`192.0.2.1` 这类保留地址）：实测本机与 OrbStack 的 Linux
+/// 容器里对它的 connect 都能在 0~8ms 内「成功」（本地代理 / NAT 应答），它既不是
+/// 黑洞也不确定，写进用例只会是假绿或假红。
+const StalledTarget = struct {
+    /// 填充连接各自的 deadline（毫秒）。只要远小于内核的 SYN 重传上限即可。
+    const fill_timeout_ms: u64 = 150;
+    /// 填充次数上限：accept 队列容量 = backlog+1（Linux）/ backlog（macOS），
+    /// 4 次足够填满；4 次都没出现超时说明 backlog 没按预期生效，用例宁可跳过。
+    const max_fills = 4;
+
+    addr: std.Io.net.IpAddress,
+    server: std.Io.net.Server,
+    listening: bool = true,
+    /// 已进 accept 队列的填充连接（对端永不 accept）。用例收尾必须 close。
+    fills: [max_fills]?std.Io.net.Stream = @splat(null),
+
+    /// 关掉 listener 腾出端口（幂等）：用例后面要在同一端口上起假 server，
+    /// 用「同一个实例连同一个地址」证明超时之后一切照常。
+    fn closeListener(self: *StalledTarget, io: std.Io) void {
+        if (self.listening) {
+            self.server.deinit(io);
+            self.listening = false;
+        }
+    }
+
+    fn deinit(self: *StalledTarget, io: std.Io) void {
+        self.closeListener(io);
+        for (&self.fills) |*slot| {
+            if (slot.*) |s| {
+                s.close(io);
+                slot.* = null;
+            }
+        }
+    }
+};
+
+/// 造一个「SYN 被丢弃」的本地目标。返回 `null` 表示本环境造不出来
+/// （内核在队列满时直接 RST），调用方应跳过用例而不是让用例变红。
+fn makeStalledTarget(io: std.Io, port: u16) !?StalledTarget {
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = port } };
+    var target = StalledTarget{
+        .addr = addr,
+        // 只 listen、**永不 accept**：进来的连接会堆在内核的 accept 队列里。
+        .server = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 1 }),
+    };
+    errdefer target.deinit(io);
+
+    for (&target.fills) |*slot| {
+        const stream = connectStream(io, addr, StalledTarget.fill_timeout_ms) catch |err| switch (err) {
+            // 队列已满 → 内核开始丢 SYN → 黑洞就绪。
+            error.ConnectTimeout => return target,
+            // 队列满时内核直接 RST（`tcp_abort_on_overflow = 1` 之类）：造不出确定性
+            // 黑洞，交给调用方跳过。
+            error.ConnectionRefused => {
+                target.deinit(io);
+                return null;
+            },
+            // 其它错误如实上抛：不要用 skip 掩盖真实问题（例如本地回环不可用）。
+            else => return err,
+        };
+        slot.* = stream;
+    }
+    // 填满 max_fills 条都没超时：不猜原因，交给跳过。
+    target.deinit(io);
+    return null;
 }
 
 /// 有界等待 mock 服务器就绪（最多 2 秒，避免服务器起不来时测试无限挂住）。
@@ -1364,4 +1800,173 @@ test "redis 连接池：池满等待超时返回 PoolTimeout 而非挂死" {
     redis.deinit();
     allocator.destroy(redis);
     stopPoolServer(&srv, server_thread);
+}
+
+test "redis 主机解析：IPv4/IPv6 字面量、域名与非法输入" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    // IPv4 字面量（改动前的唯一支持项，语义必须原样保留）。
+    const v4 = try resolveHost(io, "127.0.0.1", 6379);
+    try std.testing.expect(v4 == .ip4);
+    try std.testing.expectEqual(@as(u16, 6379), v4.getPort());
+    try std.testing.expectEqualSlices(u8, &.{ 127, 0, 0, 1 }, &v4.ip4.bytes);
+
+    // IPv6 字面量：手写实现完全做不到，现在由 std 一步解析。
+    const v6 = try resolveHost(io, "::1", 6379);
+    try std.testing.expect(v6 == .ip6);
+    try std.testing.expectEqual(@as(u16, 6379), v6.getPort());
+    const v6_full = try resolveHost(io, "2001:db8::1", 6380);
+    try std.testing.expect(v6_full == .ip6);
+    try std.testing.expectEqual(@as(u16, 6380), v6_full.getPort());
+
+    // 非法输入（含空格 / 下划线 → 连主机名都不合法）必须是明确的配置错误，
+    // 而不是被当成地址或域名拿去做解析。
+    try std.testing.expectError(error.InvalidAddress, resolveHost(io, "not a host", 6379));
+    try std.testing.expectError(error.InvalidAddress, resolveHost(io, "bad_host", 6379));
+
+    // 域名：走 std 的 HostName.lookup（DNS + /etc/hosts + RFC 6761 的 localhost）。
+    // 名字解析依赖运行环境，离线容器里跳过，不让环境噪声污染用例。
+    const by_name = resolveHost(io, "localhost", 6379) catch |err| switch (err) {
+        error.UnknownHostName,
+        error.NameServerFailure,
+        error.NoAddressReturned,
+        error.ResolvConfParseFailed,
+        error.DetectingNetworkConfigurationFailed,
+        error.NetworkDown,
+        => return error.SkipZigTest,
+        else => return err,
+    };
+    try std.testing.expectEqual(@as(u16, 6379), by_name.getPort());
+}
+
+test "redis 读超时：服务端不回包 → 有界失败、连接被丢弃、下次请求重建" {
+    const allocator = std.testing.allocator;
+    const port = try findFreePort();
+
+    var srv: MockPoolServer = .{
+        .allocator = allocator,
+        .addr = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = port } },
+        // 第 1 条连接读到命令后永不回包（服务端半死）；第 2 条正常服务。
+        .silent_conn = 1,
+        // 兜底：即使客户端读超时失效，服务端也会在这之后断开 —— 用例只会失败，
+        // 不会把套件挂死。刻意放得远（8s）于下面 1.5s 的判定上界，好让判定
+        // 只反映「客户端超时是否生效」，不受 CI 调度抖动影响。
+        .silent_hold_ms = 8000,
+    };
+    const server_thread = try srv.start();
+    waitReady(&srv.ready);
+
+    const redis = try Redis.create(allocator, .{
+        .host = "127.0.0.1",
+        .port = port,
+        .max_connections = 1,
+        .pool_timeout_ms = 2_000,
+        .recv_timeout_ms = 200,
+    });
+    errdefer allocator.destroy(redis);
+    errdefer redis.deinit();
+
+    const c = redis.asCache();
+
+    // (a) 有界失败：必须在远早于服务端兜底断开（8000ms）之前报错，而不是挂死。
+    const start_ns = std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds;
+    try std.testing.expectError(error.StorageError, c.get("silent"));
+    const elapsed_ms = @divTrunc(std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds - start_ns, std.time.ns_per_ms);
+    std.debug.print("[redis recv timeout] elapsed_ms={d}\n", .{elapsed_ms});
+    try std.testing.expect(elapsed_ms >= 100); // 确实等过（不是被别的错误短路）
+    try std.testing.expect(elapsed_ms < 5000); // 是客户端超时在起作用，不是服务端断开
+
+    // (b) 超时连接被丢弃、不进池。
+    const after = redis.poolStats();
+    try std.testing.expectEqual(@as(usize, 1), after.discarded);
+    try std.testing.expectEqual(@as(usize, 0), after.idle);
+    try std.testing.expectEqual(@as(usize, 0), after.live);
+    try std.testing.expectEqual(@as(usize, 0), after.timeouts); // 池等待没超时，是 socket 读超时
+
+    // (c) 下一次请求重建连接并成功（若坏连接被复用，这里必然再次失败）。
+    try c.set("after_timeout", "v", 60);
+    const got = try c.get("after_timeout");
+    try std.testing.expect(got != null);
+    try std.testing.expectEqualStrings("v", got.?);
+    try std.testing.expect(try c.isExist("after_timeout"));
+
+    const stats = redis.poolStats();
+    try std.testing.expectEqual(@as(usize, 2), stats.created); // 卡死的那条 + 重建的那条
+    try std.testing.expectEqual(@as(usize, 1), stats.live);
+    // 服务端只见过两条连接：卡死的那条 + c) 里重建的那条（坏连接没有被复用）。
+    try std.testing.expectEqual(@as(usize, 2), srv.accepted.load(.acquire));
+
+    redis.deinit();
+    allocator.destroy(redis);
+    stopPoolServer(&srv, server_thread);
+}
+
+test "redis 建连超时：SYN 被丢弃 → 有界失败、不建连接、同实例随后连正常地址成功" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const port = try findFreePort();
+
+    // 黑洞目标（本进程内的本地 listener，队列填满后内核丢 SYN）。
+    // 造不出来（队列满即 RST 的环境）就跳过 —— 绝不用「可能永久阻塞」的地址硬测。
+    var stall = (try makeStalledTarget(io, port)) orelse {
+        std.debug.print("[redis connect timeout] 本环境造不出「SYN 被丢弃」的目标，跳过\n", .{});
+        return error.SkipZigTest;
+    };
+    defer stall.deinit(io);
+
+    const redis = try Redis.create(allocator, .{
+        .host = "127.0.0.1",
+        .port = port,
+        .max_connections = 1,
+        .pool_timeout_ms = 2_000,
+        .connect_timeout_ms = 300,
+    });
+    errdefer allocator.destroy(redis);
+    errdefer redis.deinit();
+
+    const c = redis.asCache();
+
+    // (a) 有界失败：必须在 [100ms, 5000ms) 内返回，而不是等内核的 SYN 重传兜底
+    //     （Linux 默认 ≈ 127s、macOS ≈ 75s）。
+    const start_ns = std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds;
+    try std.testing.expectError(error.StorageError, c.get("never"));
+    const elapsed_ms = @divTrunc(std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds - start_ns, std.time.ns_per_ms);
+    std.debug.print("[redis connect timeout] elapsed_ms={d}\n", .{elapsed_ms});
+    try std.testing.expect(elapsed_ms >= 100); // 确实等到了 deadline，不是被别的错误短路
+    try std.testing.expect(elapsed_ms < 5000); // 是客户端 deadline 在起作用，不是内核兜底
+
+    // (b) 超时的连接**没有被创建**，自然也没有进池。
+    const after = redis.poolStats();
+    try std.testing.expectEqual(@as(usize, 0), after.created);
+    try std.testing.expectEqual(@as(usize, 0), after.live);
+    try std.testing.expectEqual(@as(usize, 0), after.idle);
+    try std.testing.expectEqual(@as(usize, 0), after.in_use);
+    try std.testing.expectEqual(@as(usize, 0), after.discarded);
+    try std.testing.expectEqual(@as(usize, 0), after.timeouts); // 池等待没超时，是建连超时
+
+    // (c) 同一个实例、同一个地址：黑洞下线（端口腾出来）后换成正常服务端，
+    //     下一次请求必须建连成功并正常工作。
+    stall.closeListener(io);
+    var ready = std.atomic.Value(bool).init(false);
+    const server_thread = try mockRedisServer(allocator, stall.addr, &ready);
+    waitReady(&ready);
+    // 端口没抢回来时这里立刻失败（否则会以「连接被拒」的形式误导排查方向）。
+    try std.testing.expect(ready.load(.acquire));
+
+    try c.set("after_connect_timeout", "v", 60);
+    const got = try c.get("after_connect_timeout");
+    try std.testing.expect(got != null);
+    try std.testing.expectEqualStrings("v", got.?);
+    try std.testing.expect(try c.isExist("after_connect_timeout"));
+
+    // 全程只成功建立了一条连接：超时那条根本没被创建（`created` 就是证据）。
+    const stats = redis.poolStats();
+    try std.testing.expectEqual(@as(usize, 1), stats.created);
+    try std.testing.expectEqual(@as(usize, 1), stats.live);
+    try std.testing.expectEqual(@as(usize, 1), stats.idle);
+    try std.testing.expectEqual(@as(usize, 0), stats.discarded);
+
+    redis.deinit();
+    allocator.destroy(redis);
+    server_thread.join();
 }

@@ -126,7 +126,7 @@ pub const AuthorizerInfo = struct {
     alias: []const u8 = "",
     qrcode_url: []const u8 = "",
     /// 注意：微信 JSON key 是大写开头的 `MiniProgramInfo`（Go 结构标签如此）。
-    @"MiniProgramInfo": ?MiniProgramInfo = null,
+    MiniProgramInfo: ?MiniProgramInfo = null,
     register_type: i64 = 0,
     account_status: i64 = 0,
     basic_config: ?AuthorizerBasicConfig = null,
@@ -678,8 +678,8 @@ test "getAuthrInfo mock：解析授权方信息（含 MiniProgramInfo 与嵌套�
     try std.testing.expect(!info.basic_config.?.isEmailConfigured);
 
     // 小程序信息子树（JSON key 为大写开头的 MiniProgramInfo）。
-    try std.testing.expect(info.@"MiniProgramInfo" != null);
-    const mp = info.@"MiniProgramInfo".?;
+    try std.testing.expect(info.MiniProgramInfo != null);
+    const mp = info.MiniProgramInfo.?;
     try std.testing.expectEqual(@as(usize, 1), mp.network.RequestDomain.len);
     try std.testing.expectEqualStrings("https://a.com", mp.network.RequestDomain[0]);
     try std.testing.expectEqual(@as(usize, 1), mp.categories.len);

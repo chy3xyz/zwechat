@@ -2,11 +2,11 @@
 //! credential/js_ticket — 默认 jsapi_ticket 获取器
 //!
 //! 对应 `_ref/wechat/credential/default_js_ticket.go`：先从缓存中取，
-//! 没有则从微信服务器拉取，并缓存；线程安全（自旋锁 + 双检）。
+//! 没有则从微信服务器拉取，并缓存；线程安全（`std.Io.Mutex` 真阻塞锁 + 双检）。
 //!
-//! **singleflight 风格锁范围**：SpinMutex 只保护缓存读/写临界区，HTTP 回源在锁外执行；
+//! **singleflight 风格锁范围**：锁只保护缓存读/写临界区，HTTP 回源在锁外执行；
 //! 极端并发 miss 时允许多个并发回源（幂等 GET，last-write-wins 无害），
-//! 避免其他线程在锁上空转烧 CPU。
+//! 避免其他线程白等一整个回源 RTT。
 //!
 //! 缓存 key：`"{prefix}_jsapi_ticket_{app_id}"`（与 Go 一致）。
 //! 缓存 TTL：`expires_in - 1500` 秒。
@@ -22,7 +22,6 @@ const mod_zig = @import("mod.zig");
 const JsTicketHandle = mod_zig.JsTicketHandle;
 const CredentialError = mod_zig.CredentialError;
 const Fetcher = mod_zig.Fetcher;
-const SpinMutex = @import("../util/sync.zig").SpinMutex;
 const tokenTTL = mod_zig.tokenTTL;
 
 /// jsapi_ticket 接口 URL 模板（与 Go `getTicketURL` 一致）。
@@ -37,13 +36,17 @@ fn defaultFetcher(ctx: *anyopaque, allocator: std.mem.Allocator, url: []const u8
     return client.get(url) catch return CredentialError.HttpError;
 }
 
-/// 自旋锁实现统一取自 `util/sync.zig`（与 `default_access_token.zig` 保持一致）。
 /// 默认 `jsapi_ticket` 实现（对应 Go 的 `DefaultJsTicket`）。
+///
+/// 互斥用 `std.Io.Mutex`（真阻塞的 futex 锁），与 `default_access_token.zig` 一致；
+/// `io` 默认 `std.Io.Threaded.global_single_threaded.io()`，可用 `.io = ...` 注入。
 pub const DefaultJsTicket = struct {
     app_id: []const u8,
     cache_key_prefix: []const u8,
     cache: Cache,
-    lock: SpinMutex = .{},
+    /// futex 等待 / 唤醒所用的 `Io` 句柄。
+    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    lock: std.Io.Mutex = .init,
     fetcher: Fetcher,
     fetcher_ctx: *anyopaque,
 
@@ -131,16 +134,16 @@ pub const DefaultJsTicket = struct {
         }
 
         // 2) 加锁双检：命中则直接用现成值
-        self.lock.lock();
+        self.lock.lockUncancelable(self.io);
         if (try self.cache.get(key)) |val| {
             if (val.len > 0) {
-                self.lock.unlock();
+                self.lock.unlock(self.io);
                 return allocator.dupe(u8, val);
             }
         }
-        self.lock.unlock();
+        self.lock.unlock(self.io);
 
-        // 3) 锁外从服务端拉取（自旋锁不跨网络 I/O）
+        // 3) 锁外从服务端拉取（锁不跨网络 I/O）
         const url = try self.buildURL(allocator, access_token);
         defer allocator.free(url);
 
@@ -156,8 +159,8 @@ pub const DefaultJsTicket = struct {
         if (resp.errcode != 0) return CredentialError.ApiError;
 
         // 4) 重新加锁双检：回源期间可能已被其他线程回写，命中直接用现成的
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
         if (try self.cache.get(key)) |val| {
             if (val.len > 0) return allocator.dupe(u8, val);
         }
@@ -181,8 +184,8 @@ pub const DefaultJsTicket = struct {
         const key = try self.cacheKey(allocator);
         defer allocator.free(key);
 
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
         try self.cache.delete(key);
     }
 

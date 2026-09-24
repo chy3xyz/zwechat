@@ -2,11 +2,10 @@
 //! credential/default_access_token — 默认 access_token 获取器
 //!
 //! 对应 `_ref/wechat/credential/default_access_token.go`：先从缓存中取，
-//! 没有则从微信服务器拉取，并缓存；线程安全（`std.atomic.Value(u8)` 自旋锁 + 双检，
-//! 与 Zig 0.17-dev 移除 `std.Thread.Mutex` 的现状对齐）。
+//! 没有则从微信服务器拉取，并缓存；线程安全（`std.Io.Mutex` 真阻塞锁 + 双检）。
 //!
-//! **singleflight 风格锁范围**：SpinMutex 只保护缓存读/写临界区，HTTP 回源在锁外执行
-//! （自旋锁不适合持锁跨网络 I/O，否则同 appid 的其他线程只能空转烧 CPU）。
+//! **singleflight 风格锁范围**：锁只保护缓存读/写临界区，HTTP 回源在锁外执行
+//! （持锁跨网络 I/O 会让同 appid 的其他线程白等一整个回源 RTT）。
 //! 取舍：极端并发 miss 时可能有 N 个并发回源请求（这些端点都是幂等 GET，
 //! N 个结果都合法，last-write-wins 无害），这比 N-1 个线程空转划算得多。
 //!
@@ -24,7 +23,6 @@ const mod_zig = @import("mod.zig");
 const AccessTokenHandle = mod_zig.AccessTokenHandle;
 const CredentialError = mod_zig.CredentialError;
 const Fetcher = mod_zig.Fetcher;
-const SpinMutex = @import("../util/sync.zig").SpinMutex;
 const tokenTTL = mod_zig.tokenTTL;
 
 /// access_token 接口 URL 模板（与 Go `accessTokenURL` 一致）。
@@ -39,22 +37,25 @@ fn defaultFetcher(ctx: *anyopaque, allocator: std.mem.Allocator, url: []const u8
     return client.get(url) catch return CredentialError.HttpError;
 }
 
-/// Zig 0.17-dev 不再提供 `std.Thread.Mutex`，互斥统一使用
-/// `util/sync.zig` 的 CAS 自旋锁（`std.atomic.spinLoopHint` + CAS，
-/// 零依赖；缓存场景下临界区极短，足够使用）。
 /// 默认 `access_token` 实现（对应 Go 的 `DefaultAccessToken`）。
+///
+/// 互斥用 `std.Io.Mutex`（真阻塞的 futex 锁，可静态初始化并内嵌为字段）；
+/// `io` 驱动 futex 等待 / 唤醒，默认 `std.Io.Threaded.global_single_threaded.io()`
+/// （其 futex 路径不依赖实例状态，跨线程使用安全），调用方可用 `.io = ...` 注入。
 ///
 /// 字段说明：
 /// - `app_id` / `app_secret` / `cache_key_prefix`：调用方持有（通常是字符串字面量）。
 /// - `cache`：必须早于本对象存活；不持有所有权。
-/// - `lock`：并发获取 token 时的自旋互斥锁，保证双检模式正确性。
+/// - `lock`：并发获取 token 时的互斥锁，保证双检模式正确性。
 /// - `fetcher` / `fetcher_ctx`：默认指向 `util.http.getDefaultClient().get`，测试时可注入。
 pub const DefaultAccessToken = struct {
     app_id: []const u8,
     app_secret: []const u8,
     cache_key_prefix: []const u8,
     cache: Cache,
-    lock: SpinMutex = .{},
+    /// futex 等待 / 唤醒所用的 `Io` 句柄。
+    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    lock: std.Io.Mutex = .init,
     fetcher: Fetcher,
     fetcher_ctx: *anyopaque,
 
@@ -145,16 +146,16 @@ pub const DefaultAccessToken = struct {
         }
 
         // 2) 加锁双检：命中则直接用现成值
-        self.lock.lock();
+        self.lock.lockUncancelable(self.io);
         if (try self.cache.get(key)) |val| {
             if (val.len > 0) {
-                self.lock.unlock();
+                self.lock.unlock(self.io);
                 return allocator.dupe(u8, val);
             }
         }
-        self.lock.unlock();
+        self.lock.unlock(self.io);
 
-        // 3) 锁外从服务端拉取（自旋锁不跨网络 I/O）
+        // 3) 锁外从服务端拉取（锁不跨网络 I/O）
         const url = try self.buildURL(allocator);
         defer allocator.free(url);
 
@@ -170,8 +171,8 @@ pub const DefaultAccessToken = struct {
         if (resp.errcode != 0) return CredentialError.ApiError;
 
         // 4) 重新加锁双检：回源期间可能已被其他线程回写，命中直接用现成的
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
         if (try self.cache.get(key)) |val| {
             if (val.len > 0) return allocator.dupe(u8, val);
         }
@@ -195,8 +196,8 @@ pub const DefaultAccessToken = struct {
         const key = try self.cacheKey(allocator);
         defer allocator.free(key);
 
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
         try self.cache.delete(key);
     }
 
@@ -208,9 +209,9 @@ pub const DefaultAccessToken = struct {
         defer allocator.free(key);
 
         // 1) 锁内清缓存
-        self.lock.lock();
+        self.lock.lockUncancelable(self.io);
         self.cache.delete(key) catch {};
-        self.lock.unlock();
+        self.lock.unlock(self.io);
 
         // 2) 锁外回源
         const url = try self.buildURL(allocator);
@@ -228,8 +229,8 @@ pub const DefaultAccessToken = struct {
         if (resp.errcode != 0) return CredentialError.ApiError;
 
         // 3) 锁内回写（并发 forceRefresh 之间 last-write-wins）
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
         try self.cache.set(key, resp.access_token, tokenTTL(resp.expires_in));
 
         return allocator.dupe(u8, resp.access_token);
@@ -614,8 +615,8 @@ test "DefaultAccessToken: expires_in 取 i64 极值不溢出 panic 且缓存 TTL
 
 /// 并发回源协调桩：fetcher 内部等待两个线程都进入后才放行。
 ///
-/// 自旋带迭代上限——若旧实现（持 SpinMutex 跨回源）回归，第二个线程会永远
-/// 拿不到锁，这里在上限后设置 `deadlock_suspected` 并放行，而不是挂死测试。
+/// 自旋带迭代上限——若旧实现（持锁跨回源）回归，第二个线程会永远拿不到锁，
+/// 这里在上限后设置 `deadlock_suspected` 并放行，而不是挂死测试。
 const ConcurrentFetchCtx = struct {
     response: []const u8,
     entered: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
@@ -738,4 +739,24 @@ test "DefaultAccessToken: fetcher 抛错后锁被正确释放，可再次进入 
     defer allocator.free(token);
     try std.testing.expectEqualStrings("recovered_token", token);
     try std.testing.expectEqual(@as(usize, 2), stub_ctx.calls);
+}
+
+test "DefaultAccessToken: lock 已迁移为 std.Io.Mutex（持锁期间同线程 tryLock 返回 false）" {
+    // 取证：字段不再是 `util/sync.zig` 的自旋锁——`tryLock` 无参数、
+    // `lockUncancelable` 需要 `io`。用 tryLock 断言替代死锁测试。
+    const allocator = std.testing.allocator;
+    const ctx = makeMemoryCache(allocator);
+    defer {
+        ctx.mem.deinit();
+        allocator.destroy(ctx.mem);
+    }
+
+    var dat = DefaultAccessToken.init("wx_lock_semantics", "secret", "gowechat_test_", ctx.cache);
+
+    dat.lock.lockUncancelable(dat.io);
+    try std.testing.expect(!dat.lock.tryLock());
+    dat.lock.unlock(dat.io);
+
+    try std.testing.expect(dat.lock.tryLock());
+    dat.lock.unlock(dat.io);
 }

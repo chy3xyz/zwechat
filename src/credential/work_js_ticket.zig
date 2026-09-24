@@ -7,14 +7,13 @@
 //! - agent ticket: `https://qyapi.weixin.qq.com/cgi-bin/ticket/get?access_token=...&type=agent_config`
 //!
 //! 缓存 key 前缀：`{prefix}_corp_jsapi_ticket_{corpid}` / `{prefix}_agent_jsapi_ticket_{corpid}_{agentid}`。
-//! 锁范围同 `default_access_token.zig`：SpinMutex 只保护缓存临界区，HTTP 回源在锁外。
+//! 锁范围同 `default_access_token.zig`：锁只保护缓存临界区，HTTP 回源在锁外。
 
 const std = @import("std");
 const Cache = @import("../cache/mod.zig").Cache;
 const util_http = @import("../util/http.zig");
 const util_error = @import("../util/error.zig");
 const credential = @import("mod.zig");
-const SpinMutex = @import("../util/sync.zig").SpinMutex;
 
 /// Ticket 类型（与 Go `TicketType` 对应）。
 pub const TicketType = enum {
@@ -39,7 +38,9 @@ pub const WorkJsTicket = struct {
     agent_id: []const u8,
     cache_key_prefix: []const u8,
     cache: Cache,
-    lock: SpinMutex = .{},
+    /// futex 等待 / 唤醒所用的 `Io` 句柄（默认 `global_single_threaded`，可注入）。
+    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    lock: std.Io.Mutex = .init,
     fetcher: Fetcher,
     fetcher_ctx: *anyopaque,
 
@@ -141,16 +142,16 @@ pub const WorkJsTicket = struct {
         }
 
         // 2) 加锁双检：命中则直接用现成值
-        self.lock.lock();
+        self.lock.lockUncancelable(self.io);
         if (try self.cache.get(key)) |val| {
             if (val.len > 0) {
-                self.lock.unlock();
+                self.lock.unlock(self.io);
                 return allocator.dupe(u8, val);
             }
         }
-        self.lock.unlock();
+        self.lock.unlock(self.io);
 
-        // 3) 锁外从服务端拉取（自旋锁不跨网络 I/O）
+        // 3) 锁外从服务端拉取（锁不跨网络 I/O）
         const url = try self.buildURL(allocator, ticket_type, access_token);
         defer allocator.free(url);
 
@@ -165,8 +166,8 @@ pub const WorkJsTicket = struct {
         if (parsed.value.errcode != 0) return credential.CredentialError.ApiError;
 
         // 4) 重新加锁双检：回源期间可能已被其他线程回写，命中直接用现成的
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
         if (try self.cache.get(key)) |val| {
             if (val.len > 0) return allocator.dupe(u8, val);
         }
@@ -196,8 +197,8 @@ pub const WorkJsTicket = struct {
         const key = try self.cacheKey(allocator, ticket_type);
         defer allocator.free(key);
 
-        self.lock.lock();
-        defer self.lock.unlock();
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
         try self.cache.delete(key);
     }
 

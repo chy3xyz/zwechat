@@ -13,6 +13,40 @@ const std = @import("std");
 
 const Config = @import("../config.zig").Config;
 
+/// token 互斥量：**对外保持零参数 `lock()` / `unlock()`**，内部是
+/// `std.Io.Mutex`（真阻塞的 futex 锁）。
+///
+/// 为什么保留零参数签名：`token_mutex` 的调用点在 `access_token.zig` /
+/// `auth.zig`（`ctx.token_mutex.lock()` / `.unlock()`），本次迁移不动那两个文件；
+/// 包装层让「自旋」换成「阻塞」而调用点零改动。
+///
+/// 原实现是 `util/sync.zig` 的 CAS 自旋锁，而这里**刻意持锁跨越
+/// authorizer 刷新的 HTTP 往返**（见 `Context.token_mutex` 注释），
+/// 自旋锁在长临界区里会把等待者整个时间片烧在 CPU 上空转——这正是迁移到
+/// futex 阻塞锁收益最大的地方。
+pub const TokenMutex = struct {
+    /// futex 等待 / 唤醒所用的 `Io` 句柄，可注入（默认
+    /// `std.Io.Threaded.global_single_threaded.io()`，其 futex 路径不依赖实例状态）。
+    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    /// 真正的互斥量。非递归：同一线程重复 `lock` 会死锁。
+    mutex: std.Io.Mutex = .init,
+
+    /// 获取锁，阻塞直到成功（futex 等待，不空转）。
+    pub fn lock(self: *TokenMutex) void {
+        self.mutex.lockUncancelable(self.io);
+    }
+
+    /// 释放锁。锁必须已被当前线程持有。
+    pub fn unlock(self: *TokenMutex) void {
+        self.mutex.unlock(self.io);
+    }
+
+    /// 尝试获取锁，不阻塞。返回 `true` 表示获取成功。
+    pub fn tryLock(self: *TokenMutex) bool {
+        return self.mutex.tryLock();
+    }
+};
+
 /// 开放平台（第三方平台）调用上下文。
 ///
 /// 设计要点：
@@ -40,8 +74,13 @@ pub const Context = struct {
     ///
     /// **刻意持锁跨 HTTP**：authorizer 刷新会轮换 `refresh_token`（新值回存缓存），
     /// 并发刷新互相覆盖会永久丢失凭据；单实例回源串行化是刻意的取舍。
-    /// 自旋锁不适合长临界区，但 token 回源频率极低（小时级），可接受。
-    token_mutex: @import("../../util/sync.zig").SpinMutex = .{},
+    ///
+    /// 锁已从 CAS 自旋迁移为 `std.Io.Mutex`（真阻塞的 futex 锁，见 `TokenMutex`）：
+    /// 临界区含 HTTP 往返时，等待者在内核 futex 上睡眠而不是空转烧 CPU。
+    /// 持锁跨 HTTP 的语义**没有变**——只是等待方式从「自旋」变成「阻塞」。
+    /// `io`（futex 等待 / 唤醒）在锁自身字段上：`token_mutex.io`，
+    /// 需要注入宿主运行时 Io 时写 `.token_mutex = .{ .io = my_io }`。
+    token_mutex: TokenMutex = .{},
 
     /// 写入新的 component_access_token。
     ///
@@ -235,4 +274,26 @@ test "Context.getComponentAccessToken 需要 cache" {
     };
     const result = ctx.getComponentAccessToken(std.testing.allocator, "ticket");
     try std.testing.expectError(error.CacheUnavailable, result);
+}
+
+test "TokenMutex 已迁移为 std.Io.Mutex：持锁期间同线程 tryLock 返回 false" {
+    // 取证：`token_mutex` 不再自旋——底层是 `std.Io.Mutex`，`tryLock` 无参数；
+    // 持锁时同线程再取锁会阻塞，这里用 tryLock 断言替代死锁测试。
+    var m: TokenMutex = .{};
+    m.lock();
+    try std.testing.expect(!m.tryLock());
+    m.unlock();
+
+    try std.testing.expect(m.tryLock());
+    m.unlock();
+
+    // `io` 可注入（默认 `global_single_threaded`）。
+    var injected: TokenMutex = .{ .io = std.Io.Threaded.global_single_threaded.io() };
+    injected.lock();
+    injected.unlock();
+
+    // Context 上的字段也走同一实现（零参数 `lock()` / `unlock()` 调用点不变）。
+    var ctx = Context{ .config = .{} };
+    ctx.token_mutex.lock();
+    ctx.token_mutex.unlock();
 }
