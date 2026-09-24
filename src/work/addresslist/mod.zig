@@ -1237,16 +1237,29 @@ test "getUser 解析含 extattr/external_profile 的真实响应" {
     var parsed = try al.getUser("zhangsan");
     defer parsed.deinit();
 
-    try std.testing.expectEqualStrings("zhangsan", parsed.value.userid);
-    try std.testing.expectEqual(@as(usize, 2), parsed.value.department.len);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.extattr.attrs.len);
-    try std.testing.expectEqualStrings("爱好", parsed.value.extattr.attrs[0].name);
-    try std.testing.expectEqualStrings("打球", parsed.value.extattr.attrs[0].text.value);
-    try std.testing.expectEqualStrings("示例公司", parsed.value.external_profile.external_corp_name);
-    try std.testing.expectEqualStrings("视频号", parsed.value.external_profile.wechat_channels.nickname);
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.external_profile.wechat_channels.status);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.external_profile.external_attr.len);
-    try std.testing.expectEqualStrings("值", parsed.value.external_profile.external_attr[0].text.value);
+    // 期望值里的切片字段是可变切片（`[]i64` / `[]ExtattrItem`），
+    // 用局部 var 数组承载，避免 const 字面量无法强转。
+    var departments = [_]i64{ 1, 2 };
+    var attrs = [_]ExtattrItem{
+        .{ .type = 2, .name = "爱好", .text = .{ .value = "打球" } },
+    };
+    var profile_attrs = [_]ExtattrItem{
+        .{ .type = 0, .name = "文本", .text = .{ .value = "值" } },
+    };
+
+    // 整体比较：一次覆盖 UserGetResponse 全部字段（响应里未下发的字段须保持默认值）。
+    try std.testing.expectEqualDeep(UserGetResponse{
+        .errmsg = "ok",
+        .userid = "zhangsan",
+        .name = "张三",
+        .department = &departments,
+        .extattr = .{ .attrs = &attrs },
+        .external_profile = .{
+            .external_corp_name = "示例公司",
+            .wechat_channels = .{ .nickname = "视频号", .status = 1 },
+            .external_attr = &profile_attrs,
+        },
+    }, parsed.value);
 }
 
 test "getDepartmentUsers 请求 URL 与响应解析" {
@@ -1653,11 +1666,26 @@ test "getDepartmentList 不带 id 的 URL 与响应解析" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("https://qyapi.weixin.qq.com/cgi-bin/department/list?access_token=token-abc", cap.uri);
-    try std.testing.expectEqual(@as(usize, 2), parsed.value.department.len);
-    try std.testing.expectEqualStrings("子部门", parsed.value.department[1].name);
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.department[1].parentid);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.department[1].department_leader.len);
-    try std.testing.expectEqualStrings("u1", parsed.value.department[1].department_leader[0]);
+
+    // 期望值里的切片字段是可变切片（`[]Department` / `[][]const u8`），
+    // 用局部 var 数组承载，避免 const 字面量无法强转。
+    var sub_leaders = [_][]const u8{"u1"};
+    var departments = [_]Department{
+        .{ .id = 1, .name = "根部门" },
+        .{
+            .id = 2,
+            .name = "子部门",
+            .name_en = "Sub",
+            .department_leader = &sub_leaders,
+            .parentid = 1,
+            .order = 5,
+        },
+    };
+    // 整体比较：一次覆盖两个部门的全部字段（未下发的字段须保持默认值）。
+    try std.testing.expectEqualDeep(DepartmentListResponse{
+        .errmsg = "ok",
+        .department = &departments,
+    }, parsed.value);
 }
 
 test "getDepartmentListByID 带 id 的 URL 与响应解析" {
@@ -1702,9 +1730,21 @@ test "getDepartment 请求 URL 与详情解析" {
         "https://qyapi.weixin.qq.com/cgi-bin/department/get?access_token=token-abc&id=2",
         cap.uri,
     );
-    try std.testing.expectEqual(@as(i64, 2), parsed.value.department.id);
-    try std.testing.expectEqualStrings("Sub", parsed.value.department.name_en);
-    try std.testing.expectEqual(@as(i64, 5), parsed.value.department.order);
+    // 期望值里的 department_leader 是可变切片（`[][]const u8`），
+    // 用局部 var 数组承载，避免 const 字面量无法强转。
+    var leaders = [_][]const u8{"u1"};
+    // 整体比较：一次覆盖 Department 全部字段（未下发的字段须保持默认值）。
+    try std.testing.expectEqualDeep(DepartmentGetResponse{
+        .errmsg = "ok",
+        .department = .{
+            .id = 2,
+            .name = "子部门",
+            .name_en = "Sub",
+            .department_leader = &leaders,
+            .parentid = 1,
+            .order = 5,
+        },
+    }, parsed.value);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1789,11 +1829,16 @@ test "getTag 请求 URL 与响应解析" {
         "https://qyapi.weixin.qq.com/cgi-bin/tag/get?access_token=token-abc&tagid=12",
         cap.uri,
     );
-    try std.testing.expectEqualStrings("标签一", parsed.value.tagname);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.userlist.len);
-    try std.testing.expectEqualStrings("u1", parsed.value.userlist[0].userid);
-    try std.testing.expectEqual(@as(usize, 2), parsed.value.partylist.len);
-    try std.testing.expectEqual(@as(i64, 3), parsed.value.partylist[1]);
+    // 期望值里的 userlist / partylist 是可变切片，用局部 var 数组承载。
+    var users = [_]GetTagUser{.{ .userid = "u1", .name = "张三" }};
+    var parties = [_]i64{ 2, 3 };
+    // 整体比较：一次覆盖 GetTagResponse 全部字段（用户与部门 id 全部元素）。
+    try std.testing.expectEqualDeep(GetTagResponse{
+        .errmsg = "ok",
+        .tagname = "标签一",
+        .userlist = &users,
+        .partylist = &parties,
+    }, parsed.value);
 }
 
 test "addTagUsers 请求 body 与响应解析" {

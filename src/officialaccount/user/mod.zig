@@ -701,10 +701,15 @@ test "getUserInfo 正常响应解析成功" {
 
     const parsed = try u.getUserInfo("oABC");
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.subscribe);
-    try std.testing.expectEqualStrings("oABC", parsed.value.openid);
-    try std.testing.expectEqualStrings("测试", parsed.value.nickname);
-    try std.testing.expectEqualSlices(i64, &.{ 1, 2 }, parsed.value.tagid_list);
+    // 整体比较：一次覆盖 UserInfo 全部字段（响应里未下发的字段须保持默认值）。
+    try std.testing.expectEqualDeep(UserInfo{
+        .subscribe = 1,
+        .openid = "oABC",
+        .nickname = "测试",
+        .sex = 1,
+        .city = "深圳",
+        .tagid_list = &.{ 1, 2 },
+    }, parsed.value);
 }
 
 test "getOpenidList errcode 非 0 返回 ApiError" {
@@ -739,11 +744,13 @@ test "getOpenidList 正常响应解析成功" {
 
     const parsed = try u.getOpenidList("");
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(i64, 2), parsed.value.total);
-    try std.testing.expectEqual(@as(i64, 2), parsed.value.count);
-    try std.testing.expectEqualStrings("oB", parsed.value.next_openid);
-    try std.testing.expectEqual(@as(usize, 2), parsed.value.data.openid.len);
-    try std.testing.expectEqualStrings("oA", parsed.value.data.openid[0]);
+    // 整体比较：一次覆盖 OpenidList 全部字段（含 data.openid 的全部元素）。
+    try std.testing.expectEqualDeep(OpenidList{
+        .total = 2,
+        .count = 2,
+        .next_openid = "oB",
+        .data = .{ .openid = &.{ "oA", "oB" } },
+    }, parsed.value);
 }
 
 // —— 标签 / 黑名单 / 批量查询 mock 测试 ——
@@ -861,9 +868,16 @@ test "getTag 解析 tags 列表" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/tags/get?access_token=token-abc", stub.lastUri());
-    try std.testing.expectEqual(@as(usize, 2), parsed.value.tags.len);
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.tags[0].id);
-    try std.testing.expectEqualStrings("b", parsed.value.tags[1].name);
+
+    // 期望值的 tags 是可变切片（`[]TagInfo`），用局部 var 数组承载。
+    var tags = [_]TagInfo{
+        .{ .id = 1, .name = "a", .count = 10 },
+        .{ .id = 2, .name = "b" },
+    };
+    // 整体比较：一次覆盖 TagListResponse 与两个标签的全部字段。
+    try std.testing.expectEqualDeep(TagListResponse{
+        .tags = &tags,
+    }, parsed.value);
 }
 
 test "getTag errcode 非 0 返回 ApiError" {
@@ -1090,9 +1104,13 @@ test "batchGetUserInfo 请求体与解析" {
 
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/user/info/batchget?access_token=token-abc", stub.lastUri());
     try std.testing.expectEqualStrings("{\"user_list\":[{\"openid\":\"oA\",\"lang\":\"zh_CN\"},{\"openid\":\"oB\",\"lang\":\"en\"}]}", stub.lastPayload());
-    try std.testing.expectEqual(@as(usize, 2), parsed.value.user_info_list.len);
-    try std.testing.expectEqualStrings("小明", parsed.value.user_info_list[0].nickname);
-    try std.testing.expectEqual(@as(i64, 0), parsed.value.user_info_list[1].subscribe);
+    // 整体比较：一次覆盖 InfoList 与两个 UserInfo 的全部字段。
+    try std.testing.expectEqualDeep(InfoList{
+        .user_info_list = &.{
+            .{ .subscribe = 1, .openid = "oA", .nickname = "小明" },
+            .{ .openid = "oB", .nickname = "小红" },
+        },
+    }, parsed.value);
 }
 
 test "batchGetUserInfo 参数个数校验" {

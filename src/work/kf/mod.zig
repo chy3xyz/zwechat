@@ -2401,6 +2401,20 @@ fn dropMock(client: *util_http.HttpClient) void {
     util_http.deinitDefaultClient();
 }
 
+/// 把 `msg_list` 拷进 `out` 并抹掉每条消息的 `origin_data`，返回可整体比较的切片。
+///
+/// `origin_data` 是 `jsonParse` 挂载的原始 JSON 树（内容由 OriginData 专项用例覆盖），
+/// 解析类用例只关心强类型字段，故比较前统一置空——这样仍可用
+/// `expectEqualDeep` 整体比较，失败时能打印出具体字段路径。
+fn typedOnlyList(out: []SyncMessage, in: []const SyncMessage) []SyncMessage {
+    std.debug.assert(out.len >= in.len);
+    for (in, out[0..in.len]) |msg, *slot| {
+        slot.* = msg;
+        slot.origin_data = null;
+    }
+    return out[0..in.len];
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 测试
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2747,21 +2761,44 @@ test "syncMsg POST sync_msg 游标与 has_more 解析" {
     defer parsed.deinit();
 
     // 游标机制：next_cursor 出参供下次增量拉取。
-    try std.testing.expectEqualStrings("cursor_next_456", parsed.value.next_cursor);
-    try std.testing.expectEqual(@as(u32, 1), parsed.value.has_more);
-    try std.testing.expectEqual(@as(usize, 2), parsed.value.msg_list.len);
+    // 整体比较覆盖每条 SyncMessage 的全部字段（消息级 origin_data 由 typedOnlyList 抹掉）。
+    var want = [_]SyncMessage{
+        .{
+            .msgid = "msg_1",
+            .open_kfid = "wkf_1",
+            .external_userid = "wm_ext_1",
+            .servicer_userid = "zhangsan",
+            .send_time = 1700000000,
+            .origin = 3,
+            .msgtype = "text",
+            .text = .{ .content = "你好" },
+        },
+        .{
+            .msgid = "evt_1",
+            .send_time = 1700000001,
+            .origin = 4,
+            .msgtype = "event",
+            .event = .{
+                // 事件消息不返回顶层 open_kfid / external_userid（应为默认空串）。
+                .event_type = "enter_session",
+                .open_kfid = "wkf_1",
+                .external_userid = "wm_ext_1",
+                .welcome_code = "wc_1",
+            },
+        },
+    };
+    try std.testing.expectEqual(@as(usize, want.len), parsed.value.msg_list.len);
 
-    const text_msg = parsed.value.msg_list[0];
-    try std.testing.expectEqualStrings("msg_1", text_msg.msgid);
-    try std.testing.expectEqualStrings("text", text_msg.msgtype);
-    try std.testing.expectEqual(@as(u64, 1700000000), text_msg.send_time);
-    try std.testing.expectEqual(@as(u32, 3), text_msg.origin);
-
-    const event_msg = parsed.value.msg_list[1];
-    try std.testing.expectEqualStrings("event", event_msg.msgtype);
-    try std.testing.expectEqualStrings("enter_session", event_msg.event.event_type);
-    // 事件消息不返回 open_kfid / external_userid（顶层字段留空）。
-    try std.testing.expectEqualStrings("", event_msg.open_kfid);
+    // 实际值：把 origin_data 抹掉的副本（expected/actual 的参数顺序不能颠倒）。
+    var got_buf: [want.len]SyncMessage = undefined;
+    var got = parsed.value;
+    got.msg_list = typedOnlyList(&got_buf, parsed.value.msg_list);
+    try std.testing.expectEqualDeep(SyncMsgResponse{
+        .errmsg = "ok",
+        .next_cursor = "cursor_next_456",
+        .has_more = 1,
+        .msg_list = &want,
+    }, got);
 }
 
 test "syncMsg limit 超过 1000 返回 InvalidArgument" {
@@ -3110,45 +3147,108 @@ test "syncMsg 富媒体消息强类型解析" {
     var parsed = try k.syncMsg(.{ .limit = 100 });
     defer parsed.deinit();
 
-    const list = parsed.value.msg_list;
-    try std.testing.expectEqual(@as(usize, 9), list.len);
+    var want = [_]SyncMessage{
+        .{
+            .msgid = "m_t",
+            .open_kfid = "kf_1",
+            .external_userid = "wm_1",
+            .servicer_userid = "zhangsan",
+            .send_time = 1700000000,
+            .origin = 3,
+            .msgtype = "text",
+            .text = .{ .content = "你好", .menu_id = "menu_1" },
+        },
+        .{
+            .msgid = "m_i",
+            .open_kfid = "kf_1",
+            .external_userid = "wm_1",
+            .send_time = 1700000001,
+            .origin = 3,
+            .msgtype = "image",
+            .image = .{ .media_id = "media_i" },
+        },
+        .{
+            .msgid = "m_v",
+            .open_kfid = "kf_1",
+            .external_userid = "wm_1",
+            .send_time = 1700000002,
+            .origin = 3,
+            .msgtype = "voice",
+            .voice = .{ .media_id = "media_v" },
+        },
+        .{
+            .msgid = "m_vid",
+            .open_kfid = "kf_1",
+            .external_userid = "wm_1",
+            .send_time = 1700000003,
+            .origin = 3,
+            .msgtype = "video",
+            .video = .{ .media_id = "media_vid" },
+        },
+        .{
+            .msgid = "m_f",
+            .open_kfid = "kf_1",
+            .external_userid = "wm_1",
+            .send_time = 1700000004,
+            .origin = 3,
+            .msgtype = "file",
+            .file = .{ .media_id = "media_f" },
+        },
+        .{
+            .msgid = "m_l",
+            .open_kfid = "kf_1",
+            .external_userid = "wm_1",
+            .send_time = 1700000005,
+            .origin = 3,
+            .msgtype = "location",
+            // f32 按位比较：std.json 直接解析为 f32，与字面量一致（无 f64 中转）。
+            .location = .{ .latitude = 39.9042, .longitude = 116.4074, .name = "天安门", .address = "北京市东城区" },
+        },
+        .{
+            .msgid = "m_k",
+            .open_kfid = "kf_1",
+            .external_userid = "wm_1",
+            .send_time = 1700000006,
+            .origin = 3,
+            .msgtype = "link",
+            .link = .{ .title = "标题", .desc = "描述", .url = "https://example.com", .pic_url = "http://a/1.png" },
+        },
+        .{
+            .msgid = "m_b",
+            .open_kfid = "kf_1",
+            .external_userid = "wm_1",
+            .send_time = 1700000007,
+            .origin = 3,
+            .msgtype = "business_card",
+            .business_card = .{ .userid = "zhangsan" },
+        },
+        .{
+            .msgid = "m_p",
+            .open_kfid = "kf_1",
+            .external_userid = "wm_1",
+            .send_time = 1700000008,
+            .origin = 3,
+            .msgtype = "miniprogram",
+            .miniprogram = .{
+                .appid = "wx_mp_1",
+                .title = "小程序标题",
+                .thumb_media_id = "media_t",
+                .pagepath = "pages/index",
+            },
+        },
+    };
+    try std.testing.expectEqual(@as(usize, want.len), parsed.value.msg_list.len);
 
-    try std.testing.expectEqualStrings("text", list[0].msgtype);
-    try std.testing.expectEqualStrings("你好", list[0].text.content);
-    try std.testing.expectEqualStrings("menu_1", list[0].text.menu_id);
-
-    try std.testing.expectEqualStrings("image", list[1].msgtype);
-    try std.testing.expectEqualStrings("media_i", list[1].image.media_id);
-
-    try std.testing.expectEqualStrings("voice", list[2].msgtype);
-    try std.testing.expectEqualStrings("media_v", list[2].voice.media_id);
-
-    try std.testing.expectEqualStrings("video", list[3].msgtype);
-    try std.testing.expectEqualStrings("media_vid", list[3].video.media_id);
-
-    try std.testing.expectEqualStrings("file", list[4].msgtype);
-    try std.testing.expectEqualStrings("media_f", list[4].file.media_id);
-
-    try std.testing.expectEqualStrings("location", list[5].msgtype);
-    try std.testing.expectApproxEqAbs(@as(f32, 39.9042), list[5].location.latitude, 0.0001);
-    try std.testing.expectApproxEqAbs(@as(f32, 116.4074), list[5].location.longitude, 0.0001);
-    try std.testing.expectEqualStrings("天安门", list[5].location.name);
-    try std.testing.expectEqualStrings("北京市东城区", list[5].location.address);
-
-    try std.testing.expectEqualStrings("link", list[6].msgtype);
-    try std.testing.expectEqualStrings("标题", list[6].link.title);
-    try std.testing.expectEqualStrings("描述", list[6].link.desc);
-    try std.testing.expectEqualStrings("https://example.com", list[6].link.url);
-    try std.testing.expectEqualStrings("http://a/1.png", list[6].link.pic_url);
-
-    try std.testing.expectEqualStrings("business_card", list[7].msgtype);
-    try std.testing.expectEqualStrings("zhangsan", list[7].business_card.userid);
-
-    try std.testing.expectEqualStrings("miniprogram", list[8].msgtype);
-    try std.testing.expectEqualStrings("wx_mp_1", list[8].miniprogram.appid);
-    try std.testing.expectEqualStrings("小程序标题", list[8].miniprogram.title);
-    try std.testing.expectEqualStrings("media_t", list[8].miniprogram.thumb_media_id);
-    try std.testing.expectEqualStrings("pages/index", list[8].miniprogram.pagepath);
+    // 整体比较：一次覆盖每条消息的全部字段——除本用例显式断言过的负载外，
+    // 「不该出现的其他负载」与未下发字段也一并断言为默认值。
+    var got_buf: [want.len]SyncMessage = undefined;
+    var got = parsed.value;
+    got.msg_list = typedOnlyList(&got_buf, parsed.value.msg_list);
+    try std.testing.expectEqualDeep(SyncMsgResponse{
+        .errmsg = "ok",
+        .next_cursor = "nc_1",
+        .msg_list = &want,
+    }, got);
 }
 
 test "syncMsg 事件消息强类型解析" {
@@ -3171,33 +3271,78 @@ test "syncMsg 事件消息强类型解析" {
     var parsed = try k.syncMsg(.{ .cursor = "c0", .limit = 10 });
     defer parsed.deinit();
 
-    const list = parsed.value.msg_list;
-    try std.testing.expectEqual(@as(usize, 4), list.len);
-    try std.testing.expectEqual(@as(u32, 1), parsed.value.has_more);
+    // 整体比较：一次覆盖每条事件消息的全部字段——含四类事件各自的完整 SyncEvent
+    // （未下发字段须保持默认值，如 msg_send_fail 的 servicer_userid / status）。
+    var want = [_]SyncMessage{
+        .{
+            .msgid = "e_1",
+            .send_time = 1700000100,
+            .origin = 4,
+            .msgtype = "event",
+            // enter_session：欢迎语 code / 场景值 / 事件内层 open_kfid。
+            .event = .{
+                .event_type = "enter_session",
+                .open_kfid = "kf_1",
+                .external_userid = "wm_1",
+                .scene = "s1",
+                .scene_param = "sp1",
+                .welcome_code = "wc_1",
+            },
+        },
+        .{
+            .msgid = "e_2",
+            .send_time = 1700000101,
+            .origin = 4,
+            .msgtype = "event",
+            // msg_send_fail：失败消息 id / 失败类型。
+            .event = .{
+                .event_type = "msg_send_fail",
+                .open_kfid = "kf_1",
+                .external_userid = "wm_1",
+                .fail_msgid = "m_t",
+                .fail_type = 4,
+            },
+        },
+        .{
+            .msgid = "e_3",
+            .send_time = 1700000102,
+            .origin = 4,
+            .msgtype = "event",
+            // servicer_status_change：客服 userid / 状态。
+            .event = .{
+                .event_type = "servicer_status_change",
+                .open_kfid = "kf_1",
+                .servicer_userid = "zhangsan",
+                .status = 2,
+            },
+        },
+        .{
+            .msgid = "e_4",
+            .send_time = 1700000103,
+            .origin = 4,
+            .msgtype = "event",
+            // session_status_change：变更类型 / 原客服 / 响应 code。
+            .event = .{
+                .event_type = "session_status_change",
+                .open_kfid = "kf_1",
+                .external_userid = "wm_1",
+                .change_type = 3,
+                .old_servicer_userid = "zhangsan",
+                .msg_code = "mc_1",
+            },
+        },
+    };
+    try std.testing.expectEqual(@as(usize, want.len), parsed.value.msg_list.len);
 
-    // enter_session：欢迎语 code / 场景值 / 事件内层 open_kfid。
-    try std.testing.expectEqualStrings("enter_session", list[0].event.event_type);
-    try std.testing.expectEqualStrings("kf_1", list[0].event.open_kfid);
-    try std.testing.expectEqualStrings("wm_1", list[0].event.external_userid);
-    try std.testing.expectEqualStrings("s1", list[0].event.scene);
-    try std.testing.expectEqualStrings("sp1", list[0].event.scene_param);
-    try std.testing.expectEqualStrings("wc_1", list[0].event.welcome_code);
-
-    // msg_send_fail：失败消息 id / 失败类型。
-    try std.testing.expectEqualStrings("msg_send_fail", list[1].event.event_type);
-    try std.testing.expectEqualStrings("m_t", list[1].event.fail_msgid);
-    try std.testing.expectEqual(@as(u32, 4), list[1].event.fail_type);
-
-    // servicer_status_change：客服 userid / 状态。
-    try std.testing.expectEqualStrings("servicer_status_change", list[2].event.event_type);
-    try std.testing.expectEqualStrings("zhangsan", list[2].event.servicer_userid);
-    try std.testing.expectEqual(@as(u32, 2), list[2].event.status);
-
-    // session_status_change：变更类型 / 原客服 / 响应 code。
-    try std.testing.expectEqualStrings("session_status_change", list[3].event.event_type);
-    try std.testing.expectEqual(@as(u32, 3), list[3].event.change_type);
-    try std.testing.expectEqualStrings("zhangsan", list[3].event.old_servicer_userid);
-    try std.testing.expectEqualStrings("mc_1", list[3].event.msg_code);
+    var got_buf: [want.len]SyncMessage = undefined;
+    var got = parsed.value;
+    got.msg_list = typedOnlyList(&got_buf, parsed.value.msg_list);
+    try std.testing.expectEqualDeep(SyncMsgResponse{
+        .errmsg = "ok",
+        .next_cursor = "nc_2",
+        .has_more = 1,
+        .msg_list = &want,
+    }, got);
 }
 
 // ── 消息拉取（syncMsg）OriginData 原始 JSON 回捕 ───────────────────────────

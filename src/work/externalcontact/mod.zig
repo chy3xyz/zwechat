@@ -2887,19 +2887,33 @@ test "getExternalContact 解析含 tags/remark_mobiles/wechat_channels 的真实
     var parsed = try ec.getExternalContact("wmAAA", "");
     defer parsed.deinit();
 
-    try std.testing.expectEqualStrings("wmAAA", parsed.value.external_contact.external_userid);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.follow_user.len);
-    const fu = parsed.value.follow_user[0];
-    try std.testing.expectEqualStrings("zhangsan", fu.userid);
-    try std.testing.expectEqualStrings("客户A", fu.remark);
-    try std.testing.expectEqual(@as(usize, 1), fu.tags.len);
-    try std.testing.expectEqualStrings("标签", fu.tags[0].tag_name);
-    try std.testing.expectEqualStrings("etAAA", fu.tags[0].tag_id);
-    try std.testing.expectEqual(@as(i64, 2), fu.tags[0].type);
-    try std.testing.expectEqual(@as(usize, 1), fu.remark_mobiles.len);
-    try std.testing.expectEqualStrings("13800000000", fu.remark_mobiles[0]);
-    try std.testing.expectEqualStrings("视频号", fu.wechat_channels.nickname);
-    try std.testing.expectEqual(@as(i64, 2), fu.wechat_channels.source);
+    // 期望值里的切片字段是可变切片（`[]FollowUser` / `[]Tag`），
+    // 用局部 var 数组承载，避免 const 字面量无法强转。
+    var follow_tags = [_]Tag{
+        .{ .group_name = "分组", .tag_name = "标签", .type = 2, .tag_id = "etAAA" },
+    };
+    var follow_users = [_]FollowUser{
+        .{
+            .userid = "zhangsan",
+            .remark = "客户A",
+            .tags = &follow_tags,
+            .remark_mobiles = &.{"13800000000"},
+            .wechat_channels = .{ .nickname = "视频号", .source = 2 },
+            .state = "st",
+        },
+    };
+
+    // 整体比较：一次覆盖 ExternalUserDetailResponse 全部字段
+    // （响应里未下发的字段须保持默认值，如 follow_user[0].description / add_way）。
+    try std.testing.expectEqualDeep(ExternalUserDetailResponse{
+        .errmsg = "ok",
+        .external_contact = .{
+            .external_userid = "wmAAA",
+            .name = "张三",
+            .external_profile = .{ .external_corp_name = "示例公司" },
+        },
+        .follow_user = &follow_users,
+    }, parsed.value);
 }
 
 test "getExternalContact 解析 external_profile 含三类 external_attr" {
@@ -2922,32 +2936,34 @@ test "getExternalContact 解析 external_profile 含三类 external_attr" {
     var parsed = try ec.getExternalContact("wmCorp", "");
     defer parsed.deinit();
 
-    const profile = parsed.value.external_contact.external_profile;
-    try std.testing.expectEqualStrings("示例公司", profile.external_corp_name);
-    try std.testing.expectEqualStrings("绑定视频号", profile.wechat_channels.nickname);
-    try std.testing.expectEqual(@as(i64, 1), profile.wechat_channels.status);
-    try std.testing.expectEqual(@as(usize, 3), profile.external_attr.len);
+    // 期望值里的切片字段是可变切片（`[]ExternalAttr` / `[]FollowUser`），
+    // 用局部 var 数组承载，避免 const 字面量无法强转。
+    var attrs = [_]ExternalAttr{
+        .{ .type = 0, .name = "文本属性", .text = .{ .value = "文本值" } },
+        .{ .type = 1, .name = "网页属性", .web = .{ .url = "https://example.com", .title = "网页标题" } },
+        .{
+            .type = 2,
+            .name = "小程序属性",
+            .miniprogram = .{ .appid = "wx-app", .pagepath = "pages/index", .title = "小程序标题" },
+        },
+    };
+    var follow_users = [_]FollowUser{.{ .userid = "lisi" }};
 
-    const text_attr = profile.external_attr[0];
-    try std.testing.expectEqual(@as(i64, 0), text_attr.type);
-    try std.testing.expectEqualStrings("文本属性", text_attr.name);
-    try std.testing.expectEqualStrings("文本值", text_attr.text.value);
-
-    const web_attr = profile.external_attr[1];
-    try std.testing.expectEqual(@as(i64, 1), web_attr.type);
-    try std.testing.expectEqualStrings("网页属性", web_attr.name);
-    try std.testing.expectEqualStrings("https://example.com", web_attr.web.url);
-    try std.testing.expectEqualStrings("网页标题", web_attr.web.title);
-
-    const mp_attr = profile.external_attr[2];
-    try std.testing.expectEqual(@as(i64, 2), mp_attr.type);
-    try std.testing.expectEqualStrings("小程序属性", mp_attr.name);
-    try std.testing.expectEqualStrings("wx-app", mp_attr.miniprogram.appid);
-    try std.testing.expectEqualStrings("pages/index", mp_attr.miniprogram.pagepath);
-    try std.testing.expectEqualStrings("小程序标题", mp_attr.miniprogram.title);
-
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.follow_user.len);
-    try std.testing.expectEqualStrings("lisi", parsed.value.follow_user[0].userid);
+    // 整体比较：一次覆盖 ExternalUserDetailResponse 全部字段——三类 external_attr
+    // 各自的未用分支（text/web/miniprogram）也一并断言为默认值。
+    try std.testing.expectEqualDeep(ExternalUserDetailResponse{
+        .errmsg = "ok",
+        .external_contact = .{
+            .external_userid = "wmCorp",
+            .name = "企业客户",
+            .external_profile = .{
+                .external_corp_name = "示例公司",
+                .wechat_channels = .{ .nickname = "绑定视频号", .status = 1 },
+                .external_attr = &attrs,
+            },
+        },
+        .follow_user = &follow_users,
+    }, parsed.value);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3016,14 +3032,28 @@ test "batchGetExternalUserDetails 批量获取客户详情" {
     var parsed = try ec.batchGetExternalUserDetails(.{ .userid_list = &.{"zhangsan"}, .cursor = "", .limit = 100 });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.external_contact_list.len);
-    const item = parsed.value.external_contact_list[0];
-    try std.testing.expectEqualStrings("wmAAA", item.external_contact.external_userid);
-    try std.testing.expectEqualStrings("张三", item.external_contact.name);
-    try std.testing.expectEqualStrings("zhangsan", item.follow_info.userid);
-    try std.testing.expectEqualStrings("et1", item.follow_info.tag_id[0]);
-    try std.testing.expectEqual(@as(i64, 3), item.follow_info.add_way);
-    try std.testing.expectEqualStrings("CURS", parsed.value.next_cursor);
+    // 期望值里的切片字段是可变切片（`[]ExternalUserForBatch` / `[][]const u8`），
+    // 用局部 var 数组承载，避免 const 字面量无法强转。
+    var tag_ids = [_][]const u8{"et1"};
+    var items = [_]ExternalUserForBatch{
+        .{
+            .external_contact = .{ .external_userid = "wmAAA", .name = "张三", .type = 1 },
+            .follow_info = .{
+                .userid = "zhangsan",
+                .remark = "客户A",
+                .tag_id = &tag_ids,
+                .remark_mobiles = &.{"13800000000"},
+                .add_way = 3,
+            },
+        },
+    };
+    // 整体比较：一次覆盖响应全部字段（含单个条目内 external_profile 原文、
+    // follow_info 未下发字段的默认值）。
+    try std.testing.expectEqualDeep(ExternalUserDetailListResponse{
+        .errmsg = "ok",
+        .external_contact_list = &items,
+        .next_cursor = "CURS",
+    }, parsed.value);
     try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"userid_list\":[\"zhangsan\"]") != null);
 }
 
@@ -3295,18 +3325,36 @@ test "getGroupChatDetail 获取客户群详情" {
     var parsed = try ec.getGroupChatDetail(.{ .chat_id = "wrAAA", .need_name = 1 });
     defer parsed.deinit();
 
-    const gc = parsed.value.group_chat;
-    try std.testing.expectEqualStrings("wrAAA", gc.chat_id);
-    try std.testing.expectEqualStrings("客户群", gc.name);
-    try std.testing.expectEqual(@as(usize, 1), gc.member_list.len);
-    const m = gc.member_list[0];
-    try std.testing.expectEqual(@as(i64, 2), m.type);
-    try std.testing.expectEqual(@as(i64, 3), m.join_scene);
-    try std.testing.expectEqualStrings("zhangsan", m.invitor.userid);
-    try std.testing.expectEqualStrings("uni", m.unionid);
-    try std.testing.expectEqualStrings("st", m.state);
-    try std.testing.expectEqualStrings("lisi", gc.admin_list[0].userid);
-    try std.testing.expectEqualStrings("mv1", gc.member_version);
+    // 期望值里的成员/管理员列表是可变切片，用局部 var 数组承载。
+    var members = [_]GroupChatMember{
+        .{
+            .userid = "wmEXT",
+            .type = 2,
+            .join_time = 1600000100,
+            .join_scene = 3,
+            .invitor = .{ .userid = "zhangsan" },
+            .group_nickname = "昵称",
+            .name = "名字",
+            .unionid = "uni",
+            .state = "st",
+        },
+    };
+    var admins = [_]GroupChatAdmin{.{ .userid = "lisi" }};
+
+    // 整体比较：一次覆盖客户群详情的全部字段。
+    try std.testing.expectEqualDeep(GroupChatDetailResponse{
+        .errmsg = "ok",
+        .group_chat = .{
+            .chat_id = "wrAAA",
+            .name = "客户群",
+            .owner = "zhangsan",
+            .create_time = 1600000000,
+            .notice = "公告",
+            .member_list = &members,
+            .admin_list = &admins,
+            .member_version = "mv1",
+        },
+    }, parsed.value);
     try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"need_name\":1") != null);
 }
 
