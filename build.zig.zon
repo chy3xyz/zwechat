@@ -1,6 +1,6 @@
 .{
     .name = .zwechat,
-    .version = "0.4.5",
+    .version = "0.5.0",
     .fingerprint = 0xd658b8e96476550b,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{},
