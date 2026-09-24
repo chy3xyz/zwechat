@@ -43,7 +43,8 @@ pub const XmlDoc = struct {
 /// 把 XML 字符串解析为 `XmlDoc`。
 ///
 /// 只支持单层结构（root 标签 + 一组子元素）。每个子元素必须有匹配的 `</key>` 结束标签。
-/// value 可以是 `<![CDATA[...]]>` 或纯文本。
+/// value 可以是 `<![CDATA[...]]>` 或纯文本。root 与子元素的**标签名不能为空**
+/// （`<>` / `<></>` 一律 `MalformedXml`）。
 ///
 /// 错误集：`Allocator.Error || error{MalformedXml}`。
 pub fn parse(allocator: std.mem.Allocator, input: []const u8) (std.mem.Allocator.Error || error{MalformedXml})!XmlDoc {
@@ -62,6 +63,9 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8) (std.mem.Allocator
     if (pos >= input.len or input[pos] != '<') return error.MalformedXml;
     pos += 1;
     const root_name = readUntil(input, &pos, &[_]u8{ '>', ' ', '\t', '\n', '\r' }) orelse return error.MalformedXml;
+    // 空的标签名不是标签名（`<>` / `< >`）——否则 `parse` 会在 `<>` 这种垃圾上
+    // "解析成功"，返回一个 root_name 为空的文档。
+    if (root_name.len == 0) return error.MalformedXml;
     skipToGt(input, &pos);
     if (pos >= input.len) return error.MalformedXml;
     pos += 1; // consume '>'
@@ -82,6 +86,7 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8) (std.mem.Allocator
 
         // 子元素开始标签
         const key = readUntil(input, &pos, &[_]u8{ '>', ' ', '\t', '\n', '\r' }) orelse return error.MalformedXml;
+        if (key.len == 0) return error.MalformedXml;
         skipToGt(input, &pos);
         if (pos >= input.len) return error.MalformedXml;
         pos += 1; // consume '>'
@@ -212,4 +217,70 @@ test "get 不存在的 key 返回 null" {
     var doc = try parse(allocator, xml);
     defer doc.deinit();
     try std.testing.expect(doc.get("B") == null);
+}
+
+test "parse 拒绝空标签名（fuzz 发现：`<>` 曾被当成合法文档）" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.MalformedXml, parse(allocator, "<>"));
+    try std.testing.expectError(error.MalformedXml, parse(allocator, "< >"));
+    try std.testing.expectError(error.MalformedXml, parse(allocator, "<></>"));
+    try std.testing.expectError(error.MalformedXml, parse(allocator, "<xml><></></xml>"));
+    try std.testing.expectError(error.MalformedXml, parse(allocator, "<xml> <></> </xml>"));
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// fuzz（`zig build test --fuzz=<N>` 才真正变异；普通 `zig build test` 只跑空输入冒烟）
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// 传给 `parse` 的切片必须落在输入缓冲区之内——手写扫描器最危险的失败模式是
+/// 「返回了输入之外/之后的切片」，而它在没有断言的地方不会 panic。
+fn fuzzSliceInside(input: []const u8, slice: []const u8) bool {
+    const base = @intFromPtr(input.ptr);
+    const p = @intFromPtr(slice.ptr);
+    return p >= base and p + slice.len <= base + input.len;
+}
+
+/// 性质：
+/// 1. 不 panic / 不越界 / 不死循环（决定性条件是「每轮至少吃掉 5 字节」的下界）；
+/// 2. 失败只能是 `error.MalformedXml`（内部错误不得外泄）；
+/// 3. 成功时 `root_name` 与全部 key/value 都指向输入内部，且元素数受输入长度约束。
+fn testXmlParseProperties(allocator: std.mem.Allocator, smith: *std.testing.Smith) anyerror!void {
+    var buf: [256]u8 = undefined;
+    const weights = [_]std.testing.Smith.Weight{
+        .rangeAtMost(u8, 'a', 'z', 8),
+        .value(u8, '<', 6),
+        .value(u8, '>', 6),
+        .value(u8, '/', 4),
+        .value(u8, '!', 3),
+        .value(u8, '[', 2),
+        .value(u8, ']', 2),
+        .value(u8, '?', 2),
+        .value(u8, ' ', 3),
+        .value(u8, '=', 2),
+        .value(u8, '"', 2),
+        .rangeAtMost(u8, 0x00, 0x7f, 2),
+        .rangeAtMost(u8, 0x80, 0xff, 1),
+    };
+    const len = smith.sliceWeightedBytes(&buf, &weights);
+    const input = buf[0..len];
+
+    var doc = parse(allocator, input) catch |err| {
+        try std.testing.expectEqual(error.MalformedXml, err);
+        return;
+    };
+    defer doc.deinit();
+
+    try std.testing.expect(doc.root_name.len > 0);
+    try std.testing.expect(fuzzSliceInside(input, doc.root_name));
+    for (doc.elements) |el| {
+        try std.testing.expect(el.key.len > 0);
+        try std.testing.expect(fuzzSliceInside(input, el.key));
+        try std.testing.expect(fuzzSliceInside(input, el.value));
+    }
+    // 最小元素是 `<></>`（5 字节）——这同时说明了主循环必然收敛。
+    try std.testing.expect(doc.count() <= input.len / 5);
+}
+
+test "fuzz: parse 不 panic / 不越界 / 不死循环" {
+    try std.testing.fuzz(std.testing.allocator, testXmlParseProperties, .{});
 }

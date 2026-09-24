@@ -13,14 +13,15 @@ const signature = @import("signature.zig");
 const xml = @import("xml.zig");
 const time = @import("time.zig");
 
-fn getNanoTS() i96 {
-    return std.Io.Clock.now(.real, std.Options.debug_io).toNanoseconds();
+fn getNanoTS(io: std.Io) i96 {
+    return std.Io.Clock.now(.real, io).toNanoseconds();
 }
 
-pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+pub fn main(init: std.process.Init) !void {
+    // 单进程一次性工具：临时分配统一走进程级 arena（`init.arena`），
+    // 计时用宿主注入的 `Io`（`init.io`），不读全局单例。
+    const allocator = init.arena.allocator();
+    const io = init.io;
 
     std.debug.print("=========================================\n", .{});
     std.debug.print("       zwechat Benchmark Suite           \n", .{});
@@ -31,13 +32,13 @@ pub fn main() !void {
         const params = [_][]const u8{ "token_secret_key_123456", "1721641869", "239847192", "nonce_str_random" };
         const iterations: usize = 100000;
 
-        const start = getNanoTS();
+        const start = getNanoTS(io);
         var i: usize = 0;
         while (i < iterations) : (i += 1) {
             const sig = try signature.signature(allocator, &params);
             allocator.free(sig);
         }
-        const elapsed_ns = getNanoTS() - start;
+        const elapsed_ns = getNanoTS(io) - start;
         const avg_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
         std.debug.print("[SHA1 Sign] {} iterations, total: {d:.2} ms, avg: {d:.2} ns/op\n", .{
             iterations,
@@ -55,7 +56,7 @@ pub fn main() !void {
         defer allocator.free(encrypted);
 
         const iterations: usize = 50000;
-        const start = getNanoTS();
+        const start = getNanoTS(io);
         var i: usize = 0;
         while (i < iterations) : (i += 1) {
             const res = try crypto.aesDecryptMsg(allocator, encrypted, aes_key);
@@ -63,7 +64,7 @@ pub fn main() !void {
             allocator.free(res.raw_xml_msg);
             allocator.free(res.app_id);
         }
-        const elapsed_ns = getNanoTS() - start;
+        const elapsed_ns = getNanoTS(io) - start;
         const avg_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
         std.debug.print("[AES-256-CBC Decrypt] {} iterations, total: {d:.2} ms, avg: {d:.2} ns/op\n", .{
             iterations,
@@ -86,13 +87,13 @@ pub fn main() !void {
         ;
 
         const iterations: usize = 100000;
-        const start = getNanoTS();
+        const start = getNanoTS(io);
         var i: usize = 0;
         while (i < iterations) : (i += 1) {
             var doc = try xml.parse(allocator, xml_data);
             doc.deinit();
         }
-        const elapsed_ns = getNanoTS() - start;
+        const elapsed_ns = getNanoTS(io) - start;
         const avg_ns = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iterations));
         std.debug.print("[XML Parse] {} iterations, total: {d:.2} ms, avg: {d:.2} ns/op\n", .{
             iterations,

@@ -14,6 +14,7 @@ pub const param = @import("param.zig");
 pub const util = @import("util.zig");
 pub const error_mod = @import("error.zig");
 pub const rsa = @import("rsa.zig");
+pub const mtls = @import("mtls.zig");
 pub const asn1 = @import("asn1.zig");
 pub const pkcs12 = @import("pkcs12.zig");
 pub const xml = @import("xml.zig");
@@ -31,6 +32,8 @@ test "util 模块全部导出" {
     try std.testing.expect(@hasDecl(time, "getCurrTS"));
     try std.testing.expect(@hasDecl(param, "orderParam"));
     try std.testing.expect(@hasDecl(rsa, "parseP12"));
+    try std.testing.expect(@hasDecl(mtls, "postXML"));
+    try std.testing.expect(@hasDecl(mtls, "parseHttpsUri"));
     try std.testing.expect(@hasDecl(asn1, "Reader"));
     try std.testing.expect(@hasDecl(asn1, "Tag"));
     try std.testing.expect(@hasDecl(pkcs12, "parse"));

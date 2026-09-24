@@ -297,16 +297,30 @@ pub const Ed25519Error = error{
     SigningFailed,
 };
 
-/// 生成 Ed25519 密钥对。
+/// Ed25519 密钥对：64 字节 secret key + 32 字节 public key。
 ///
-/// `secret_key` 是 32 字节随机种子（用 `std.Io.Threaded.global_single_threaded` 生成）。
-/// 返回 64 字节的 secret key bytes + 32 字节的 public key bytes。
-pub fn ed25519GenerateKeyPair(_: std.mem.Allocator) !struct {
+/// 私有具名类型——原先是匿名结构体字面量，具名后两个入口（默认 / 注入 `Io`）
+/// 才是同一个类型，同时**不新增公开 API 面**（字段访问方式与原先完全一致）。
+const Ed25519KeyPair = struct {
     secret_key: [ed25519.SecretKey.encoded_length]u8,
     public_key: [ed25519.PublicKey.encoded_length]u8,
-} {
+};
+
+/// 生成 Ed25519 密钥对。
+///
+/// **deprecated**：请改用 [`ed25519GenerateKeyPairWithIo`] 显式传入宿主的 `Io`
+/// （种子取自 OS 随机源）；本函数保留为等价的默认实现，行为不变。
+pub fn ed25519GenerateKeyPair(allocator: std.mem.Allocator) !Ed25519KeyPair {
+    return ed25519GenerateKeyPairWithIo(allocator, std.Io.Threaded.global_single_threaded.io());
+}
+
+/// 生成 Ed25519 密钥对，由调用方注入提供熵源的 `Io`。
+///
+/// `secret_key` 是 32 字节随机种子（由 `io.random` 生成）。
+/// 返回 64 字节的 secret key bytes + 32 字节的 public key bytes。
+pub fn ed25519GenerateKeyPairWithIo(_: std.mem.Allocator, io: std.Io) !Ed25519KeyPair {
     var seed: [32]u8 = undefined;
-    std.Io.Threaded.global_single_threaded.io().random(&seed);
+    io.random(&seed);
 
     const kp = try ed25519.KeyPair.generateDeterministic(seed);
     return .{
@@ -346,7 +360,7 @@ pub fn ed25519Verify(
 
 test "Ed25519 sign + verify round-trip" {
     const allocator = std.testing.allocator;
-    const kp = try ed25519GenerateKeyPair(allocator);
+    const kp = try ed25519GenerateKeyPairWithIo(allocator, std.testing.io);
 
     const msg = "hello, ed25519!";
     const sig = try ed25519Sign(allocator, kp.secret_key, msg);
@@ -359,6 +373,19 @@ test "Ed25519 sign + verify round-trip" {
     // 篡改消息后应验签失败
     const bad = try ed25519Verify(sig, "hello, ed25519?", kp.public_key);
     try std.testing.expect(!bad);
+}
+
+test "Ed25519 默认路径（无注入 io）仍可用" {
+    const allocator = std.testing.allocator;
+    const kp = try ed25519GenerateKeyPair(allocator);
+    const msg = "default io path";
+    const sig = try ed25519Sign(allocator, kp.secret_key, msg);
+    defer allocator.free(sig);
+    try std.testing.expect(try ed25519Verify(sig, msg, kp.public_key));
+
+    // 两次生成的密钥对必须不同（熵源真实生效）。
+    const kp2 = try ed25519GenerateKeyPair(allocator);
+    try std.testing.expect(!std.mem.eql(u8, &kp.secret_key, &kp2.secret_key));
 }
 
 test "Ed25519 用公开 RFC 8032 测试向量" {

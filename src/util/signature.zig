@@ -11,8 +11,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Sha1 = std.crypto.hash.Sha1;
 
-const hex_lower = "0123456789abcdef";
-
 /// 微信 SHA1 签名：参数排序 → 拼接 → SHA1 → 小写 hex。
 ///
 /// 错误集：`error{OutOfMemory}`。
@@ -38,13 +36,7 @@ pub fn signature(allocator: Allocator, params: []const []const u8) Allocator.Err
     Sha1.hash(buf.items, &digest, .{});
 
     // 4. 小写 hex
-    const hex = try allocator.alloc(u8, digest.len * 2);
-    errdefer allocator.free(hex);
-    for (digest, 0..) |b, i| {
-        hex[i * 2] = hex_lower[b >> 4];
-        hex[i * 2 + 1] = hex_lower[b & 0x0F];
-    }
-    return hex;
+    return allocator.dupe(u8, &std.fmt.bytesToHex(&digest, .lower));
 }
 
 fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {

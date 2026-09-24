@@ -9,6 +9,7 @@
 //! 不支持（返回 UnsupportedPbe）：
 //! - 3DES/RC2 等 legacy PBE
 //! - 无密码（空字符串）P12
+//! - 迭代次数超过 `max_pbkdf2_iterations` 的 P12（见该常量的 DoS 说明）
 //! - MAC 校验（当前忽略 macData，只解析内容）
 
 const std = @import("std");
@@ -38,6 +39,22 @@ const OID_KEY_BAG = &[_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x0c, 0x0a
 const OID_PKCS8_SHROUDED_KEY_BAG = &[_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x0c, 0x0a, 0x01, 0x02 };
 const OID_CERT_BAG = &[_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x0c, 0x0a, 0x01, 0x03 };
 const OID_X509_CERTIFICATE = &[_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x16, 0x01 };
+
+/// PBKDF2 迭代次数上限（DoS 防护）。
+///
+/// PBKDF2 的参数 `iterationCount` 完全取自 P12 文件，标准本身只要求它是正整数：
+/// 一个损坏或恶意的文件可以写上 u32 的最大值（约 4.3e9），让 `deriveKey` 在
+/// PBKDF2-HMAC-SHA256 上算上**小时级**的时间——解析线程被钉住、fuzz 也会卡死
+/// （本文件的 fuzz 用例一直不敢喂真实 P12 语料，正是因为这个）。
+///
+/// 阈值取 5_000_000 的依据与余量：
+/// - OpenSSL 导出 P12 时的默认迭代次数是 2048（`PKCS12_create`），微信支付商户平台
+///   导出的证书同样是这个量级；本文件测试用的真实 P12 也是 2048；
+/// - 5_000_000 是 OpenSSL 默认值的约 2400 倍、是「常见高配」（10 万量级）的 50 倍，
+///   即使用户自建的文件把迭代次数调得很高也不会被误拒；
+/// - 反过来，被拒的最坏情况也只是「注定要跑几百毫秒~数秒的派生」，而对 4.3e9
+///   这种不可信取值则一律直接拒绝。
+const max_pbkdf2_iterations: u32 = 5_000_000;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // 公共入口
@@ -346,6 +363,27 @@ fn decryptPbes2(state: *ParseState, alg: []const u8, encrypted_data: []const u8)
     return try decryptWithScheme(state, enc, key, encrypted_data);
 }
 
+/// 解析 PBKDF2 的迭代次数（INTEGER，大端；PKCS#12/PKCS#5 按 ASN.1 1988 约定，
+/// 正整数最高位为 1 时会补一个前导 `0x00`）。
+///
+/// **安全**：迭代次数完全取自文件内容。若不设上限，一个畸形/恶意 P12 只要把该字段
+/// 写成很大的值（最大 u32），`deriveKey` 就会让 PBKDF2 长时间占用 CPU（DoS）。
+/// 因此这里对 `> max_pbkdf2_iterations` 直接返回 `error.UnsupportedPbe`。
+fn parseIterationCount(bytes: []const u8) Error!u32 {
+    if (bytes.len == 0 or bytes.len > 5) return error.InvalidP12File;
+    var i: usize = 0;
+    // 允许一个前导 0x00（正数补位）；其后的字节按大端累加。
+    if (bytes.len > 1 and bytes[0] == 0) i = 1;
+    var value: u64 = 0;
+    while (i < bytes.len) : (i += 1) {
+        value = (value << 8) | bytes[i];
+    }
+    if (value > std.math.maxInt(u32)) return error.InvalidP12File;
+    const count: u32 = @intCast(value);
+    if (count > max_pbkdf2_iterations) return error.UnsupportedPbe;
+    return count;
+}
+
 fn deriveKey(state: *ParseState, kdf: []const u8) Error![]u8 {
     var r = asn1.Reader.init(kdf);
     const kdf_oid = try r.readObjectIdentifier();
@@ -358,11 +396,7 @@ fn deriveKey(state: *ParseState, kdf: []const u8) Error![]u8 {
     var p = asn1.Reader.init(params);
 
     const salt = try p.readOctetString();
-    const iteration_count_bytes = try p.readInteger();
-    var iteration_count: u32 = 0;
-    for (iteration_count_bytes) |b| {
-        iteration_count = (iteration_count << 8) | b;
-    }
+    const iteration_count = try parseIterationCount(try p.readInteger());
 
     // 默认 keyLength 由加密方案决定；这里先读可选 prf。
     var prf_oid: ?[]const u8 = null;
@@ -572,4 +606,195 @@ test "parseP12 空密码返回 BadPassword" {
     const allocator = std.testing.allocator;
     const result = parse(allocator, &[_]u8{0}, "");
     try std.testing.expectError(error.BadPassword, result);
+}
+
+test "parse 对真实 P12 的任意前缀都安静失败（长度字段越界回归）" {
+    const allocator = std.testing.allocator;
+    const decoder = std.base64.standard.Decoder;
+    const size = try decoder.calcSizeForSlice(TEST_P12_B64);
+    const p12_bytes = try allocator.alloc(u8, size);
+    defer allocator.free(p12_bytes);
+    try decoder.decode(p12_bytes, TEST_P12_B64);
+
+    // 逐字节截断：每个严格前缀都必须失败，且失败路径不得泄漏/越界。
+    // （这是「长度字段比实际数据大」这一类 bug 最直接的回归网）
+    for (1..p12_bytes.len) |n| {
+        const result = parse(allocator, p12_bytes[0..n], "testpwd");
+        if (result) |ok| {
+            var parsed_ok = ok;
+            parsed_ok.deinit(allocator);
+            std.debug.print("前缀 {d} 字节竟然解析成功\n", .{n});
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// PBKDF2 迭代次数上限（DoS 防护）
+// ──────────────────────────────────────────────────────────────────────────────
+
+test "parseIterationCount 边界与错误变体（5_000_000 通过 / 更大拒绝）" {
+    // 真实 P12 里的取值（本文件 TEST_P12_B64 是 OpenSSL 默认的 2048 次）
+    try std.testing.expectEqual(@as(u32, 2048), try parseIterationCount(&[_]u8{ 0x08, 0x00 }));
+    // 恰好等于上限：放行（上限是「超过才拒绝」，留足余量给高迭代次数的合法文件）
+    try std.testing.expectEqual(
+        max_pbkdf2_iterations,
+        try parseIterationCount(&[_]u8{ 0x00, 0x4c, 0x4b, 0x40 }),
+    );
+    // 上限 + 1：拒绝
+    try std.testing.expectError(
+        error.UnsupportedPbe,
+        parseIterationCount(&[_]u8{ 0x00, 0x4c, 0x4b, 0x41 }),
+    );
+    // u32 最大值（约 4.3e9 次派生 = 小时级）：拒绝，而不是交给 PBKDF2 慢慢算
+    try std.testing.expectError(
+        error.UnsupportedPbe,
+        parseIterationCount(&[_]u8{ 0x00, 0xff, 0xff, 0xff, 0xff }),
+    );
+    // 0 次迭代不在本函数的职责里：照原样放行，交给 PBKDF2 判 WeakParameters
+    // → 上层映射成 `BadPassword`（保持旧行为，不改既有错误语义）
+    try std.testing.expectEqual(@as(u32, 0), try parseIterationCount(&[_]u8{0x00}));
+}
+
+test "parseIterationCount 对畸形/超长 INTEGER 不溢出、不 panic" {
+    // 5 字节且最高位非 0：值超出 u32，判文件畸形。
+    // （旧实现按 u32 逐字节 `<<8`：超过 4 字节的高位会被**静默丢弃**，等于把畸形值
+    //  猜成一个数；这里改成显式拒绝。）
+    try std.testing.expectError(
+        error.InvalidP12File,
+        parseIterationCount(&[_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff }),
+    );
+    // 任意超长 INTEGER（> 5 字节）：一律拒绝，不做逐字节累加
+    try std.testing.expectError(
+        error.InvalidP12File,
+        parseIterationCount(&[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1 }),
+    );
+    // 空 INTEGER（DER 里长度 0 的 `02 00`）：畸形文件
+    try std.testing.expectError(error.InvalidP12File, parseIterationCount(&[_]u8{}));
+}
+
+/// 构造一份「PBES2 的 keyDerivationFunc」DER（`deriveKey` 收到的正是这段字节）：
+///   SEQUENCE {
+///       OID 1.2.840.113549.1.5.12 (PBKDF2)
+///       SEQUENCE { OCTET STRING salt="salt0123", INTEGER iteration_count }
+///   }
+/// `iteration_count` 按大端写在 `count_digits` 里（4 字节足够表达 u32 全量）。
+/// 总长固定 29 = OID(11) + SEQUENCE 头(2) + salt TLV(10) + INTEGER TLV(6)，
+/// 尾部不留未定义字节——否则 `deriveKey` 会去读「可选的 prf」并读到垃圾。
+fn pbkdf2KdfWithIterationCount(count_digits: [4]u8) [29]u8 {
+    const oid = [_]u8{ 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x05, 0x0c };
+    const params = [_]u8{
+        0x30, 0x10, // SEQUENCE，长度 16
+        0x04, 0x08, 's', 'a', 'l', 't', '0', '1', '2', '3', // salt
+        0x02, 0x04, // INTEGER，长度 4
+    };
+
+    var buf: [oid.len + params.len + 4]u8 = undefined;
+    @memcpy(buf[0..oid.len], &oid);
+    @memcpy(buf[oid.len..][0..params.len], &params);
+    @memcpy(buf[oid.len + params.len ..][0..4], &count_digits);
+    return buf;
+}
+
+test "deriveKey 对超限迭代次数快速返回 UnsupportedPbe（不卡住）" {
+    const allocator = std.testing.allocator;
+    var state = ParseState{
+        .allocator = allocator,
+        .password = "testpwd",
+        .cert_der = null,
+        .key_der = null,
+    };
+
+    // 迭代次数 = 0xFFFFFFFF：真去算 PBKDF2-HMAC-SHA256 是小时级，必须在派生之前就拒绝。
+    const kdf = pbkdf2KdfWithIterationCount([_]u8{ 0xff, 0xff, 0xff, 0xff });
+    const started_ns = std.Io.Clock.now(.real, std.Options.debug_io).toNanoseconds();
+    try std.testing.expectError(error.UnsupportedPbe, deriveKey(&state, &kdf));
+    const elapsed_ns = std.Io.Clock.now(.real, std.Options.debug_io).toNanoseconds() - started_ns;
+
+    // 时间断言只是把「没有卡住」钉死：上限内最慢的合法文件也只有几百毫秒级，
+    // 而 4.29e9 轮 PBKDF2 需要小时级，10 秒的余量足以区分且不会误报。
+    if (elapsed_ns > 10 * std.time.ns_per_s) {
+        std.debug.print("deriveKey 超限迭代次数耗时 {d} ns，疑似真的在做派生\n", .{elapsed_ns});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "deriveKey 接受上限内的迭代次数（合法文件不被误拒）" {
+    const allocator = std.testing.allocator;
+    var state = ParseState{
+        .allocator = allocator,
+        .password = "testpwd",
+        .cert_der = null,
+        .key_der = null,
+    };
+
+    // 2048 次（OpenSSL 默认）：正常派生出一个 32 字节的 AES-256 key。
+    const kdf = pbkdf2KdfWithIterationCount([_]u8{ 0x00, 0x00, 0x08, 0x00 });
+    const key = try deriveKey(&state, &kdf);
+    defer allocator.free(key);
+    try std.testing.expectEqual(@as(usize, 32), key.len);
+
+    // 与直接调用 PBKDF2 的结果一致（确认迭代次数确实被按原值使用，没有被改写成别的值）
+    var expected: [32]u8 = undefined;
+    try std.crypto.pwhash.pbkdf2(
+        &expected,
+        "testpwd",
+        "salt0123",
+        2048,
+        std.crypto.auth.hmac.sha2.HmacSha256,
+    );
+    try std.testing.expectEqualSlices(u8, &expected, key);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// fuzz（`zig build test --fuzz=<N>` 才真正变异；普通 `zig build test` 跑语料 + 空输入冒烟）
+// ──────────────────────────────────────────────────────────────────────────────
+const fuzz_byte_weights = [_]std.testing.Smith.Weight{
+    .value(u8, 0x30, 6), // SEQUENCE
+    .value(u8, 0x02, 4), // INTEGER
+    .value(u8, 0x04, 4), // OCTET STRING
+    .value(u8, 0x06, 4), // OBJECT IDENTIFIER
+    .value(u8, 0xa0, 4), // [0] constructed
+    .rangeAtMost(u8, 0x00, 0x1f, 3), // 短长度 / 常见 tag
+    .value(u8, 0x80, 3), // 长格式长度，num_bytes = 0（非法）
+    .rangeAtMost(u8, 0x81, 0x84, 4), // 长格式长度，num_bytes = 1..4（合法边界）
+    .rangeAtMost(u8, 0x85, 0xff, 2), // 长格式长度，num_bytes > 4（必须拒绝）
+    .rangeAtMost(u8, 0x00, 0xff, 2),
+};
+
+/// 性质：任意字节 + 任意密码都不 panic（不越界、不整数溢出）、不泄漏；失败只允许
+/// 是声明的错误变体；成功时的 PEM 头尾必须齐全（`derToPem` 的输出契约）。
+///
+/// **本轮仍不提供 corpus**：过去不敢喂真实 P12 语料，是因为变异器很快能走到
+/// `deriveKey`，而那里的 `iteration_count` 完全取自文件、没有任何上限——变异出
+/// 2^32 次迭代就会让这次 fuzz 长时间卡住。这个上限已经补上
+/// （`max_pbkdf2_iterations`，超限直接 `error.UnsupportedPbe`），也就是说语料
+/// 现在可以安全地加（`zig build test --fuzz` 的语料目录里放真实 P12 即可）；
+/// 加语料要新增文件、并考虑内存体积，留作后续独立改动。
+fn testPkcs12ParseNeverPanics(allocator: std.mem.Allocator, smith: *std.testing.Smith) anyerror!void {
+    var buf: [512]u8 = undefined;
+    const len = smith.sliceWeightedBytes(&buf, &fuzz_byte_weights);
+    const data = buf[0..len];
+    // 密码也取自输入：空密码会走 `BadPassword` 早退路径。
+    const password = data[0..@min(data.len, 8)];
+
+    var result = parse(allocator, data, password) catch |err| switch (err) {
+        error.InvalidP12File,
+        error.BadPassword,
+        error.UnsupportedPbe,
+        error.InvalidDer,
+        error.UnsupportedTag,
+        error.OutOfMemory,
+        => return,
+    };
+    defer result.deinit(allocator);
+
+    try std.testing.expect(std.mem.startsWith(u8, result.cert_pem, "-----BEGIN CERTIFICATE-----"));
+    try std.testing.expect(std.mem.endsWith(u8, result.cert_pem, "-----END CERTIFICATE-----\n"));
+    try std.testing.expect(std.mem.startsWith(u8, result.key_pem, "-----BEGIN PRIVATE KEY-----"));
+    try std.testing.expect(std.mem.endsWith(u8, result.key_pem, "-----END PRIVATE KEY-----\n"));
+}
+
+test "fuzz: parse 不 panic / 不泄漏（长度字段边界）" {
+    try std.testing.fuzz(std.testing.allocator, testPkcs12ParseNeverPanics, .{});
 }

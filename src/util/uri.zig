@@ -22,19 +22,36 @@ pub fn queryEscape(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocato
     const hex_upper = "0123456789ABCDEF";
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
-    try buf.ensureTotalCapacity(allocator, s.len);
+    // 最坏情况：每个字节都编码成 `%XX`，输出是输入的 3 倍长。这里只是省掉重复
+    // 扩容的预估——下面的写入一律走会自动扩容的 `append`，所以即便估少了也不会
+    // 越界（历史上这里用 `appendAssumeCapacity` 配 `s.len` 的容量，超过分配器
+    // 「1.5 倍 + 64 字节」余量就会越界写：Debug 下 panic、ReleaseFast 下堆溢出）。
+    try buf.ensureTotalCapacity(allocator, 3 *| s.len);
     for (s) |c| {
         switch (c) {
             'A'...'Z', 'a'...'z', '0'...'9', '-', '_', '.', '~' => try buf.append(allocator, c),
             ' ' => try buf.append(allocator, '+'),
             else => {
-                buf.appendAssumeCapacity('%');
-                buf.appendAssumeCapacity(hex_upper[c >> 4]);
-                buf.appendAssumeCapacity(hex_upper[c & 0x0F]);
+                try buf.append(allocator, '%');
+                try buf.append(allocator, hex_upper[c >> 4]);
+                try buf.append(allocator, hex_upper[c & 0x0F]);
             },
         }
     }
     return buf.toOwnedSlice(allocator);
+}
+
+test "queryEscape 长「最坏情况」输入不越界（容量估算回归）" {
+    const allocator = std.testing.allocator;
+    // 每个字节都编码成 `%XX`（3 倍长）时，输出长度会超过分配器给的
+    // 「1.5 倍 + 64 字节」余量。旧实现只预留 `s.len` 却用 `appendAssumeCapacity`，
+    // 在这里会越界写（Debug/ReleaseSafe 下 panic，ReleaseFast 下堆溢出）。
+    var input: [256]u8 = undefined;
+    @memset(&input, 0xff);
+    const escaped = try queryEscape(allocator, &input);
+    defer allocator.free(escaped);
+    try std.testing.expectEqual(@as(usize, input.len * 3), escaped.len);
+    for (escaped) |c| try std.testing.expect(c == '%' or c == 'F');
 }
 
 test "queryEscape 保留 Go 的 unreserved 字符集" {
@@ -84,4 +101,88 @@ test "queryEscape 高字节逐字节编码（UTF-8 多字节）" {
     const esc = try queryEscape(allocator, "\xff\x00");
     defer allocator.free(esc);
     try std.testing.expectEqualStrings("%FF%00", esc);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// fuzz（`zig build test --fuzz=<N>` 才真正变异；普通 `zig build test` 只跑空输入冒烟）
+// ──────────────────────────────────────────────────────────────────────────────
+
+const fuzz_byte_weights = [_]std.testing.Smith.Weight{
+    .rangeAtMost(u8, 'A', 'Z', 3),
+    .rangeAtMost(u8, 'a', 'z', 3),
+    .rangeAtMost(u8, '0', '9', 3),
+    .value(u8, ' ', 6),
+    .value(u8, '%', 6),
+    .value(u8, '+', 5),
+    .value(u8, '&', 4),
+    .value(u8, '=', 4),
+    .value(u8, '?', 4),
+    .value(u8, '#', 4),
+    .value(u8, '/', 4),
+    .value(u8, ':', 4),
+    .value(u8, '-', 3),
+    .value(u8, '_', 3),
+    .value(u8, '.', 3),
+    .value(u8, '~', 3),
+    .rangeAtMost(u8, 0x00, 0x1f, 1),
+    .rangeAtMost(u8, 0x7f, 0xff, 2), // UTF-8 多字节 / 高位字节
+};
+
+/// `%XX` 的 hex 位元（非法字符返回 `null`）。
+fn fuzzHexDigit(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
+/// 性质：
+/// 1. 输出字符集 ⊆ `[0-9A-Za-z\-_.~+%]`；
+/// 2. 每个 `%` 之后必然紧跟两位 hex（不存在孤立 `%`，也不会越界读）；
+/// 3. percent-decode（`+` 还原成空格）必须逐字节还原出原输入——即转义无损、
+///    且 `&` `=` `?` `#` 这些分隔符不会以原形漏进 query。
+fn testQueryEscapeProperties(allocator: std.mem.Allocator, smith: *std.testing.Smith) anyerror!void {
+    var buf: [256]u8 = undefined;
+    const len = smith.sliceWeightedBytes(&buf, &fuzz_byte_weights);
+    const input = buf[0..len];
+
+    const escaped = try queryEscape(allocator, input);
+    defer allocator.free(escaped);
+
+    var i: usize = 0;
+    while (i < escaped.len) {
+        const c = escaped[i];
+        if (c == '%') {
+            try std.testing.expect(i + 2 < escaped.len);
+            try std.testing.expect(fuzzHexDigit(escaped[i + 1]) != null);
+            try std.testing.expect(fuzzHexDigit(escaped[i + 2]) != null);
+            i += 3;
+            continue;
+        }
+        const plain = std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~' or c == '+';
+        try std.testing.expect(plain);
+        i += 1;
+    }
+
+    var decoded: std.ArrayListUnmanaged(u8) = .empty;
+    defer decoded.deinit(allocator);
+    i = 0;
+    while (i < escaped.len) {
+        if (escaped[i] == '%') {
+            const hi = fuzzHexDigit(escaped[i + 1]).?;
+            const lo = fuzzHexDigit(escaped[i + 2]).?;
+            try decoded.append(allocator, hi * 16 + lo);
+            i += 3;
+        } else {
+            try decoded.append(allocator, if (escaped[i] == '+') ' ' else escaped[i]);
+            i += 1;
+        }
+    }
+    try std.testing.expectEqualSlices(u8, input, decoded.items);
+}
+
+test "fuzz: queryEscape 的字符集与 percent 解码可逆" {
+    try std.testing.fuzz(std.testing.allocator, testQueryEscapeProperties, .{});
 }

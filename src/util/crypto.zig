@@ -25,34 +25,6 @@ const WechatError = @import("error.zig").WechatError;
 pub const SignTypeMD5 = "MD5";
 pub const SignTypeHMACSHA256 = "HMAC-SHA256";
 
-const hex_upper = "0123456789ABCDEF";
-
-// -----------------------------------------------------------------------------
-// 通用：字节 ↔ hex
-// -----------------------------------------------------------------------------
-
-fn toUpperHex(allocator: Allocator, bytes: []const u8) Allocator.Error![]u8 {
-    const out = try allocator.alloc(u8, bytes.len * 2);
-    errdefer allocator.free(out);
-    for (bytes, 0..) |b, i| {
-        out[i * 2] = hex_upper[b >> 4];
-        out[i * 2 + 1] = hex_upper[b & 0x0F];
-    }
-    return out;
-}
-
-const hex_lower = "0123456789abcdef";
-
-fn toLowerHex(allocator: Allocator, bytes: []const u8) Allocator.Error![]u8 {
-    const out = try allocator.alloc(u8, bytes.len * 2);
-    errdefer allocator.free(out);
-    for (bytes, 0..) |b, i| {
-        out[i * 2] = hex_lower[b >> 4];
-        out[i * 2 + 1] = hex_lower[b & 0x0F];
-    }
-    return out;
-}
-
 /// 计算 `content` 的 MD5 摘要并返回**小写** hex 字符串。
 ///
 /// 与 `calculateSign`（大写 hex，用于签名）不同，本函数用于构造加解密密钥
@@ -63,7 +35,7 @@ fn toLowerHex(allocator: Allocator, bytes: []const u8) Allocator.Error![]u8 {
 pub fn md5HexLower(allocator: Allocator, content: []const u8) Allocator.Error![]u8 {
     var digest: [Md5.digest_length]u8 = undefined;
     Md5.hash(content, &digest, .{});
-    return toLowerHex(allocator, &digest);
+    return allocator.dupe(u8, &std.fmt.bytesToHex(&digest, .lower));
 }
 
 // -----------------------------------------------------------------------------
@@ -82,12 +54,12 @@ pub fn calculateSign(
     if (std.mem.eql(u8, sign_type, SignTypeHMACSHA256)) {
         var mac: [Sha256.digest_length]u8 = undefined;
         HmacSha256.create(&mac, content, key);
-        return toUpperHex(allocator, &mac);
+        return allocator.dupe(u8, &std.fmt.bytesToHex(&mac, .upper));
     }
     // 默认走 MD5（与上游 Go 行为一致：未匹配时落到 MD5 分支）。
     var digest: [Md5.digest_length]u8 = undefined;
     Md5.hash(content, &digest, .{});
-    return toUpperHex(allocator, &digest);
+    return allocator.dupe(u8, &std.fmt.bytesToHex(&digest, .upper));
 }
 
 // -----------------------------------------------------------------------------
@@ -232,6 +204,11 @@ pub fn pkcs7Pad(
     block_size: usize,
 ) (Allocator.Error || error{InvalidArgument})![]u8 {
     if (block_size == 0 or block_size > 255) return error.InvalidArgument;
+    return pkcs7PadUnchecked(allocator, data, block_size);
+}
+
+/// 不做块大小校验的补位内核；调用方必须先保证 `block_size` 合法。
+fn pkcs7PadUnchecked(allocator: Allocator, data: []const u8, block_size: usize) Allocator.Error![]u8 {
     const pad = block_size - (data.len % block_size);
     var out = try allocator.alloc(u8, data.len + pad);
     errdefer allocator.free(out);
@@ -250,7 +227,7 @@ pub fn pkcs7Unpad(data: []const u8) []const u8 {
 
 /// `PKCS5Padding`：与 PKCS#7 在块大小 = 8 时一致；上游 Go 版固定使用 8。
 pub fn pkcs5Pad(allocator: Allocator, data: []const u8) Allocator.Error![]u8 {
-    return pkcs7Pad(allocator, data, 8);
+    return pkcs7PadUnchecked(allocator, data, 8);
 }
 
 /// `PKCS5UnPadding`：去 PKCS#5 补位（与 `pkcs7Unpad` 等价，因为去补位只看最后一个字节）。

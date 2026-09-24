@@ -169,3 +169,89 @@ test "Reader 拒绝非零 unused_bits 的 BIT STRING" {
     const result = r.readBitString();
     try std.testing.expectError(error.InvalidDer, result);
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// fuzz（`zig build test --fuzz=<N>` 才真正变异；普通 `zig build test` 只跑空输入冒烟）
+// ──────────────────────────────────────────────────────────────────────────────
+
+const FuzzOp = enum {
+    read_tag,
+    read_length,
+    read_sequence,
+    read_integer,
+    read_octet_string,
+    read_bit_string,
+    read_oid,
+    read_null,
+    read_raw_value,
+};
+
+const fuzz_byte_weights = [_]std.testing.Smith.Weight{
+    .rangeAtMost(u8, 0x00, 0x0f, 4), // 常见 tag 号
+    .value(u8, 0x30, 4), // SEQUENCE
+    .value(u8, 0x02, 4), // INTEGER
+    .value(u8, 0x04, 4), // OCTET STRING
+    .value(u8, 0x03, 3), // BIT STRING
+    .value(u8, 0x06, 3), // OBJECT IDENTIFIER
+    .value(u8, 0x05, 3), // NULL
+    .rangeAtMost(u8, 0x20, 0x2f, 3), // constructed 位
+    .rangeAtMost(u8, 0x80, 0x87, 4), // 长格式长度（num_bytes = 1..8）
+    .value(u8, 0xff, 2),
+    .rangeAtMost(u8, 0x00, 0xff, 2),
+};
+
+/// 性质（`readLength` 的 `num_bytes <= 4` 边界是本模块最关键的检查）：
+/// 1. 任意字节序列驱动任意操作序列都不 panic、不越界：
+///    `pos` 永不越过 `data.len`，返回的切片始终落在输入内；
+/// 2. 成功的 `readLength` 结果必然装得进 u32（长格式只接受 1..4 字节）；
+/// 3. 循环有界收敛（每个成功操作至少吃掉 1 字节，失败操作不卡死调用方）。
+fn testAsn1ReaderInvariants(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [512]u8 = undefined;
+    const len = smith.sliceWeightedBytes(&buf, &fuzz_byte_weights);
+    const data = buf[0..len];
+    var r = Reader.init(data);
+
+    for (0..64) |_| {
+        if (r.remaining() == 0) break;
+        const op = smith.value(FuzzOp);
+        const arg = smith.value(u32);
+        var got: ?[]const u8 = null;
+
+        switch (op) {
+            .read_tag => {
+                const tag = r.readTag() catch continue;
+                try std.testing.expect(tag.number <= 0x1f);
+            },
+            .read_length => {
+                const l = r.readLength() catch continue;
+                try std.testing.expect(l <= std.math.maxInt(u32));
+            },
+            .read_sequence => {
+                // 直接给长度：包含 usize 上界，专打越界检查这条分支。
+                const l: usize = if (arg == 0) std.math.maxInt(usize) else arg;
+                got = r.readSequenceContent(l) catch null;
+            },
+            .read_integer => got = r.readInteger() catch null,
+            .read_octet_string => got = r.readOctetString() catch null,
+            .read_bit_string => got = r.readBitString() catch null,
+            .read_oid => got = r.readObjectIdentifier() catch null,
+            .read_null => r.readNull() catch continue,
+            .read_raw_value => {
+                const v = r.readRawValue() catch continue;
+                got = v.content;
+            },
+        }
+
+        try std.testing.expect(r.pos <= data.len);
+        try std.testing.expectEqual(data.len - r.pos, r.remaining());
+        if (got) |slice| {
+            const base = @intFromPtr(data.ptr);
+            const p = @intFromPtr(slice.ptr);
+            try std.testing.expect(p >= base and p + slice.len <= base + data.len);
+        }
+    }
+}
+
+test "fuzz: Reader 的任意操作序列不越界（含长格式长度边界）" {
+    try std.testing.fuzz({}, testAsn1ReaderInvariants, .{});
+}
