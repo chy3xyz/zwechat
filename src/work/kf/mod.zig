@@ -2586,9 +2586,16 @@ test "getAccountPage POST account/list 带 offset/limit 分页" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.getAccountPage(.{ .offset = 10, .limit = 20 });
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.account_list.len);
-    try std.testing.expectEqualStrings("wkf_p1", parsed.value.account_list[0].open_kfid);
-    try std.testing.expect(parsed.value.account_list[0].manage_privilege);
+    var want_accounts = [_]AccountInfo{.{
+        .open_kfid = "wkf_p1",
+        .name = "分页账号",
+        .avatar = "http://a/1.png",
+        .manage_privilege = true,
+    }};
+    try std.testing.expectEqualDeep(AccountListResponse{
+        .errmsg = "ok",
+        .account_list = &want_accounts,
+    }, parsed.value);
 }
 
 test "addContactWay POST add_contact_way 并解析 url" {
@@ -2669,9 +2676,14 @@ test "getServicerList GET servicer/list 拼 open_kfid query" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.getServicerList("wkf_1");
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 2), parsed.value.servicer_list.len);
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.servicer_list[1].status);
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.servicer_list[1].stop_type);
+    var want_servicers = [_]ServicerInfo{
+        .{ .userid = "zhangsan" },
+        .{ .userid = "lisi", .status = 1, .department_id = 2, .stop_type = 1 },
+    };
+    try std.testing.expectEqualDeep(ServicerListResponse{
+        .errmsg = "ok",
+        .servicer_list = &want_servicers,
+    }, parsed.value);
 }
 
 // ── 会话状态 ──────────────────────────────────────────────────────────────────
@@ -3505,11 +3517,20 @@ test "customerBatchGet POST customer/batchget 并解析客户列表" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.customerBatchGet(.{ .external_userid_list = &.{ "wm_ext_1", "wm_bad" } });
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.customer_list.len);
-    try std.testing.expectEqualStrings("小明", parsed.value.customer_list[0].nickname);
-    try std.testing.expectEqualStrings("union_x", parsed.value.customer_list[0].unionid);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.invalid_external_userid.len);
-    try std.testing.expectEqualStrings("wm_bad", parsed.value.invalid_external_userid[0]);
+    // 整体比较：一次覆盖响应全部字段（含此前未断言的 external_userid / avatar / gender）。
+    var want_customers = [_]CustomerInfo{.{
+        .external_userid = "wm_ext_1",
+        .nickname = "小明",
+        .avatar = "http://a/1.png",
+        .gender = 1,
+        .unionid = "union_x",
+    }};
+    var want_invalid = [_][]const u8{"wm_bad"};
+    try std.testing.expectEqualDeep(CustomerBatchGetResponse{
+        .errmsg = "ok",
+        .customer_list = &want_customers,
+        .invalid_external_userid = &want_invalid,
+    }, parsed.value);
 }
 
 // ── 升级服务 ──────────────────────────────────────────────────────────────────
@@ -3528,9 +3549,15 @@ test "getUpgradeServiceConfig GET 并解析专员与客户群范围" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.getUpgradeServiceConfig();
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.member_range.userid_list.len);
-    try std.testing.expectEqualStrings("zhangsan", parsed.value.member_range.userid_list[0]);
-    try std.testing.expectEqualStrings("gc_1", parsed.value.groupchat_range.chat_id_list[0]);
+    // 整体比较：此前漏断言的 department_id_list 也一并覆盖。
+    var want_userids = [_][]const u8{"zhangsan"};
+    var want_dept_ids = [_][]const u8{"2"};
+    var want_chats = [_][]const u8{"gc_1"};
+    try std.testing.expectEqualDeep(UpgradeServiceConfigResponse{
+        .errmsg = "ok",
+        .member_range = .{ .userid_list = &want_userids, .department_id_list = &want_dept_ids },
+        .groupchat_range = .{ .chat_id_list = &want_chats },
+    }, parsed.value);
 }
 
 test "upgradeService POST upgrade_service（member + groupchat 全字段）" {
@@ -3684,9 +3711,11 @@ test "listKnowledgeGroup POST knowledge/list_group 游标分页" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.listKnowledgeGroup(.{ .cursor = "", .limit = 100, .group_id = "" });
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(i64, 0), parsed.value.has_more);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.group_list.len);
-    try std.testing.expectEqualStrings("常见问题", parsed.value.group_list[0].name);
+    var want_groups = [_]KnowledgeGroup{.{ .group_id = "grp_1", .name = "常见问题" }};
+    try std.testing.expectEqualDeep(KnowledgeGroupListResponse{
+        .errmsg = "ok",
+        .group_list = &want_groups,
+    }, parsed.value);
 }
 
 // ── 知识库：问答 ──────────────────────────────────────────────────────────────
@@ -3772,20 +3801,34 @@ test "listKnowledgeIntent POST knowledge/list_intent 解析嵌套问答" {
     var parsed = try k.listKnowledgeIntent(.{ .cursor = "", .limit = 10, .group_id = "grp_1", .intent_id = "" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.has_more);
-    try std.testing.expectEqualStrings("cur_2", parsed.value.next_cursor);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.intent_list.len);
-    const intent = parsed.value.intent_list[0];
-    try std.testing.expectEqualStrings("intent_1", intent.intent_id);
-    try std.testing.expectEqualStrings("如何退款", intent.question.text.content);
-    try std.testing.expectEqual(@as(usize, 1), intent.similar_questions.items.len);
-    try std.testing.expectEqualStrings("怎么退货", intent.similar_questions.items[0].text.content);
-    try std.testing.expectEqual(@as(usize, 1), intent.answers.len);
-    try std.testing.expectEqualStrings("请在订单页申请退款", intent.answers[0].text.content);
-    const att = intent.answers[0].attachments[0];
-    try std.testing.expectEqualStrings("link", att.msgtype);
-    try std.testing.expectEqualStrings("退款政策", att.link.title);
-    try std.testing.expectEqualStrings("https://example.com/r", att.link.url);
+    // 整体比较：覆盖 14 个叶子字段，并把未下发的 image/video/miniprogram 附件子树断言为默认值。
+    var want_similar = [_]IntentQuestion{.{ .text = .{ .content = "怎么退货" } }};
+    var want_atts = [_]IntentAttachmentRes{.{
+        .msgtype = "link",
+        .link = .{
+            .title = "退款政策",
+            .picurl = "http://a/1.png",
+            .desc = "详见",
+            .url = "https://example.com/r",
+        },
+    }};
+    var want_answers = [_]IntentAnswerRes{.{
+        .text = .{ .content = "请在订单页申请退款" },
+        .attachments = &want_atts,
+    }};
+    var want_intents = [_]KnowledgeIntent{.{
+        .group_id = "grp_1",
+        .intent_id = "intent_1",
+        .question = .{ .text = .{ .content = "如何退款" } },
+        .similar_questions = .{ .items = &want_similar },
+        .answers = &want_answers,
+    }};
+    try std.testing.expectEqualDeep(KnowledgeIntentListResponse{
+        .errmsg = "ok",
+        .next_cursor = "cur_2",
+        .has_more = 1,
+        .intent_list = &want_intents,
+    }, parsed.value);
 }
 
 // ── 统计 ────────────────────────────────────────────────────────────────────
@@ -3804,11 +3847,24 @@ test "getCorpStatistic POST get_corp_statistic 解析浮点字段" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.getCorpStatistic(.{ .open_kfid = "wkf_1", .start_time = 1699600000, .end_time = 1699800000 });
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.statistic_list.len);
-    const st = parsed.value.statistic_list[0].statistic;
-    try std.testing.expectEqual(@as(i64, 42), st.session_cnt);
-    try std.testing.expectEqual(@as(f64, 0.5), st.ai_transfer_rate);
-    try std.testing.expectEqual(@as(f64, 0.8), st.ai_knowledge_hit_rate);
+    // 浮点断言与原先同为「JSON 字面量解析值 vs 源码字面量」的精确比较。
+    var want_stats = [_]CorpStatisticItem{.{
+        .stat_time = 1699718400,
+        .statistic = .{
+            .session_cnt = 42,
+            .customer_cnt = 30,
+            .customer_msg_cnt = 120,
+            .upgrade_service_customer_cnt = 5,
+            .ai_session_reply_cnt = 10,
+            .ai_transfer_rate = 0.5,
+            .ai_knowledge_hit_rate = 0.8,
+            .msg_rejected_customer_cnt = 1,
+        },
+    }};
+    try std.testing.expectEqualDeep(CorpStatisticResponse{
+        .errmsg = "ok",
+        .statistic_list = &want_stats,
+    }, parsed.value);
 }
 
 test "getServicerStatistic POST get_servicer_statistic 解析明细" {
@@ -3830,10 +3886,31 @@ test "getServicerStatistic POST get_servicer_statistic 解析明细" {
         .end_time = 1699800000,
     });
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.statistic_list.len);
-    const st = parsed.value.statistic_list[0].statistic;
-    try std.testing.expectEqual(@as(f64, 30.5), st.first_reply_average_sec);
-    try std.testing.expectEqual(@as(i64, 4), st.upgrade_service_groupchat_invite_cnt);
+    var want_stats = [_]ServicerStatisticItem{.{
+        .stat_time = 1699718400,
+        .statistic = .{
+            .session_cnt = 20,
+            .customer_cnt = 15,
+            .customer_msg_cnt = 60,
+            .reply_rate = 0.9,
+            .first_reply_average_sec = 30.5,
+            .satisfaction_investgate_cnt = 10,
+            .satisfaction_participation_rate = 0.7,
+            .satisfied_rate = 0.6,
+            .middling_rate = 0.3,
+            .dissatisfied_rate = 0.1,
+            .upgrade_service_customer_cnt = 2,
+            .upgrade_service_member_invite_cnt = 3,
+            .upgrade_service_member_customer_cnt = 1,
+            .upgrade_service_groupchat_invite_cnt = 4,
+            .upgrade_service_groupchat_customer_cnt = 2,
+            .msg_rejected_customer_cnt = 0,
+        },
+    }};
+    try std.testing.expectEqualDeep(ServicerStatisticResponse{
+        .errmsg = "ok",
+        .statistic_list = &want_stats,
+    }, parsed.value);
 }
 
 // ── 其他 ────────────────────────────────────────────────────────────────────

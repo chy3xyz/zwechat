@@ -1282,9 +1282,18 @@ test "getDepartmentUsers 请求 URL 与响应解析" {
         "https://qyapi.weixin.qq.com/cgi-bin/user/simplelist?access_token=token-abc&department_id=2&fetch_child=1",
         cap.uri,
     );
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.userlist.len);
-    try std.testing.expectEqualStrings("u1", parsed.value.userlist[0].userid);
-    try std.testing.expectEqualStrings("ou1", parsed.value.userlist[0].open_userid);
+    // 整体比较：一次覆盖响应全部字段（department 为可变元素切片，期望值须用 var 数组）。
+    var want_depts = [_]i64{1};
+    var want_users = [_]UserList{.{
+        .userid = "u1",
+        .name = "张三",
+        .department = &want_depts,
+        .open_userid = "ou1",
+    }};
+    try std.testing.expectEqualDeep(UserSimpleListResponse{
+        .errmsg = "ok",
+        .userlist = &want_users,
+    }, parsed.value);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1645,9 +1654,11 @@ test "getDepartmentSimpleList 请求 URL 与响应解析" {
         "https://qyapi.weixin.qq.com/cgi-bin/department/simplelist?access_token=token-abc&id=1",
         cap.uri,
     );
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.department_id.len);
-    try std.testing.expectEqual(@as(i64, 2), parsed.value.department_id[0].id);
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.department_id[0].parentid);
+    var want_depts = [_]DepartmentID{.{ .id = 2, .parentid = 1, .order = 10 }};
+    try std.testing.expectEqualDeep(DepartmentSimpleListResponse{
+        .errmsg = "ok",
+        .department_id = &want_depts,
+    }, parsed.value);
 }
 
 test "getDepartmentList 不带 id 的 URL 与响应解析" {
@@ -1860,9 +1871,12 @@ test "addTagUsers 请求 body 与响应解析" {
     try expectContains(cap.payload.?, "\"tagid\":12");
     try expectContains(cap.payload.?, "\"userlist\":[\"u1\",\"u2\"]");
     try expectContains(cap.payload.?, "\"partylist\":[2]");
-    try std.testing.expectEqualStrings("u9", parsed.value.invalidlist);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.invalidparty.len);
-    try std.testing.expectEqual(@as(i64, 3), parsed.value.invalidparty[0]);
+    var want_invalidparty = [_]i64{3};
+    try std.testing.expectEqualDeep(TagUsersResponse{
+        .errmsg = "ok",
+        .invalidlist = "u9",
+        .invalidparty = &want_invalidparty,
+    }, parsed.value);
 }
 
 test "deleteTagUsers 请求 body 与响应解析" {
@@ -1884,7 +1898,8 @@ test "deleteTagUsers 请求 body 与响应解析" {
     try expectContains(cap.payload.?, "{\"tagid\":12,\"userlist\":[\"u1\"]}");
     // partylist 为空 slice 应被跳过。
     try std.testing.expect(std.mem.indexOf(u8, cap.payload.?, "partylist") == null);
-    try std.testing.expectEqual(@as(i64, 0), parsed.value.errcode);
+    // 整体比较：原先只断言 errcode，现覆盖 errmsg / invalidlist / invalidparty（空切片）。
+    try std.testing.expectEqualDeep(TagUsersResponse{ .errmsg = "ok" }, parsed.value);
 }
 
 test "listTags 请求 URL 与响应解析" {
@@ -1904,9 +1919,11 @@ test "listTags 请求 URL 与响应解析" {
 
     try std.testing.expectEqual(std.http.Method.GET, cap.method);
     try std.testing.expectEqualStrings("https://qyapi.weixin.qq.com/cgi-bin/tag/list?access_token=token-abc", cap.uri);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.taglist.len);
-    try std.testing.expectEqual(@as(i64, 12), parsed.value.taglist[0].tagid);
-    try std.testing.expectEqualStrings("标签一", parsed.value.taglist[0].tagname);
+    var want_tags = [_]Tag{.{ .tagid = 12, .tagname = "标签一" }};
+    try std.testing.expectEqualDeep(ListTagResponse{
+        .errmsg = "ok",
+        .taglist = &want_tags,
+    }, parsed.value);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1932,10 +1949,13 @@ test "batchInvite 请求 body 与响应解析" {
     try expectContains(cap.payload.?, "\"user\":[\"u1\",\"u2\"]");
     try expectContains(cap.payload.?, "\"party\":[2]");
     try expectContains(cap.payload.?, "\"tag\":[3]");
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.invaliduser.len);
-    try std.testing.expectEqualStrings("ghost", parsed.value.invaliduser[0]);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.invalidparty.len);
-    try std.testing.expectEqual(@as(i64, 99), parsed.value.invalidparty[0]);
+    var want_users = [_][]const u8{"ghost"};
+    var want_parties = [_]i64{99};
+    try std.testing.expectEqualDeep(BatchInviteResponse{
+        .errmsg = "ok",
+        .invaliduser = &want_users,
+        .invalidparty = &want_parties,
+    }, parsed.value);
 }
 
 test "getPermList POST 空 body 与响应解析" {
@@ -1959,9 +1979,13 @@ test "getPermList POST 空 body 与响应解析" {
         cap.uri,
     );
     try std.testing.expectEqualStrings("", cap.payload.?);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.userids.len);
-    try std.testing.expectEqualStrings("u1", parsed.value.userids[0]);
-    try std.testing.expectEqualStrings("LINKEDID1", parsed.value.department_ids[0]);
+    var want_userids = [_][]const u8{"u1"};
+    var want_dept_ids = [_][]const u8{"LINKEDID1"};
+    try std.testing.expectEqualDeep(GetPermListResponse{
+        .errmsg = "ok",
+        .userids = &want_userids,
+        .department_ids = &want_dept_ids,
+    }, parsed.value);
 }
 
 test "getLinkedCorpUser 请求 body 与响应解析" {
@@ -1981,12 +2005,27 @@ test "getLinkedCorpUser 请求 body 与响应解析" {
 
     try std.testing.expectEqualStrings("https://qyapi.weixin.qq.com/cgi-bin/linkedcorp/user/get?access_token=token-abc", cap.uri);
     try expectContains(cap.payload.?, "{\"userid\":\"zhangsan\"}");
-    try std.testing.expectEqualStrings("zhangsan", parsed.value.user_info.userid);
-    try std.testing.expectEqualStrings("ww-linked", parsed.value.user_info.corpid);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.user_info.department.len);
-    try std.testing.expectEqualStrings("LINKEDID1/D2", parsed.value.user_info.department[0]);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.user_info.extattr.attrs.len);
-    try std.testing.expectEqualStrings("打球", parsed.value.user_info.extattr.attrs[0].text.value);
+    // 整体比较：覆盖 user_info 全部 8 个直接字段 + extattr.attrs[0] 的 4 个字段。
+    var want_departments = [_][]const u8{"LINKEDID1/D2"};
+    var want_attrs = [_]LinkedCorpExtattrItem{.{
+        .name = "爱好",
+        .type = 2,
+        .text = .{ .value = "打球" },
+    }};
+    try std.testing.expectEqualDeep(GetLinkedCorpUserResponse{
+        .errmsg = "ok",
+        .user_info = .{
+            .userid = "zhangsan",
+            .name = "张三",
+            .department = &want_departments,
+            .mobile = "13800138000",
+            .telephone = "0755",
+            .email = "a@corp.com",
+            .position = "工程师",
+            .corpid = "ww-linked",
+            .extattr = .{ .attrs = &want_attrs },
+        },
+    }, parsed.value);
 }
 
 test "getLinkedCorpSimpleList 请求 body 与响应解析" {
@@ -2009,9 +2048,17 @@ test "getLinkedCorpSimpleList 请求 body 与响应解析" {
         cap.uri,
     );
     try expectContains(cap.payload.?, "{\"department_id\":\"LINKEDID1/D2\"}");
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.userlist.len);
-    try std.testing.expectEqualStrings("u1", parsed.value.userlist[0].userid);
-    try std.testing.expectEqualStrings("ww-linked", parsed.value.userlist[0].corpid);
+    var want_depts = [_][]const u8{"LINKEDID1/D2"};
+    var want_users = [_]LinkedCorpUser{.{
+        .userid = "u1",
+        .name = "张三",
+        .department = &want_depts,
+        .corpid = "ww-linked",
+    }};
+    try std.testing.expectEqualDeep(LinkedCorpSimpleListResponse{
+        .errmsg = "ok",
+        .userlist = &want_users,
+    }, parsed.value);
 }
 
 test "getLinkedCorpUserList 请求 body 与响应解析" {
@@ -2034,9 +2081,19 @@ test "getLinkedCorpUserList 请求 body 与响应解析" {
         cap.uri,
     );
     try expectContains(cap.payload.?, "{\"department_id\":\"LINKEDID1/D2\"}");
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.userlist.len);
-    try std.testing.expectEqualStrings("工程师", parsed.value.userlist[0].position);
-    try std.testing.expectEqualStrings("13800138000", parsed.value.userlist[0].mobile);
+    var want_depts = [_][]const u8{"LINKEDID1/D2"};
+    var want_users = [_]LinkedCorpUserInfo{.{
+        .userid = "u1",
+        .name = "张三",
+        .department = &want_depts,
+        .mobile = "13800138000",
+        .position = "工程师",
+        .corpid = "ww-linked",
+    }};
+    try std.testing.expectEqualDeep(LinkedCorpUserListResponse{
+        .errmsg = "ok",
+        .userlist = &want_users,
+    }, parsed.value);
 }
 
 test "getLinkedCorpDepartmentList 请求 body 与响应解析" {
@@ -2059,11 +2116,16 @@ test "getLinkedCorpDepartmentList 请求 body 与响应解析" {
         cap.uri,
     );
     try expectContains(cap.payload.?, "{\"department_id\":\"LINKEDID1\"}");
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.department_list.len);
-    try std.testing.expectEqualStrings("LINKEDID1/D2", parsed.value.department_list[0].department_id);
-    try std.testing.expectEqualStrings("互联子部门", parsed.value.department_list[0].department_name);
-    try std.testing.expectEqualStrings("LINKEDID1", parsed.value.department_list[0].parentid);
-    try std.testing.expectEqual(@as(i64, 10), parsed.value.department_list[0].order);
+    var want_depts = [_]LinkedCorpDepartment{.{
+        .department_id = "LINKEDID1/D2",
+        .department_name = "互联子部门",
+        .parentid = "LINKEDID1",
+        .order = 10,
+    }};
+    try std.testing.expectEqualDeep(LinkedCorpDepartmentListResponse{
+        .errmsg = "ok",
+        .department_list = &want_depts,
+    }, parsed.value);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

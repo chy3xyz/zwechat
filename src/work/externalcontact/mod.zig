@@ -3107,9 +3107,11 @@ test "getFollowUserList 获取配置了客户联系功能的成员列表" {
     var parsed = try ec.getFollowUserList();
     defer parsed.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), parsed.value.follow_user.len);
-    try std.testing.expectEqualStrings("zhangsan", parsed.value.follow_user[0]);
-    try std.testing.expectEqualStrings("lisi", parsed.value.follow_user[1]);
+    var want_list = [_][]const u8{ "zhangsan", "lisi" };
+    try std.testing.expectEqualDeep(FollowUserListResponse{
+        .errmsg = "ok",
+        .follow_user = &want_list,
+    }, parsed.value);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3170,14 +3172,30 @@ test "getContactWay 获取联系我方式" {
     var parsed = try ec.getContactWay(.{ .config_id = "42" });
     defer parsed.deinit();
 
-    const cw = parsed.value.contact_way;
-    try std.testing.expectEqualStrings("42", cw.config_id);
-    try std.testing.expectEqual(@as(i64, 2), cw.scene);
-    try std.testing.expectEqual(@as(i64, 86400), cw.expires_in);
-    try std.testing.expectEqualStrings("zhangsan", cw.user[0]);
-    try std.testing.expectEqual(@as(i64, 2), cw.party[0]);
-    try std.testing.expectEqualStrings("欢迎", cw.conclusions.text.content);
-    try std.testing.expectEqualStrings("https://pic", cw.conclusions.image.pic_url);
+    var want_user = [_][]const u8{"zhangsan"};
+    var want_party = [_]i64{2};
+    try std.testing.expectEqualDeep(GetContactWayResponse{
+        .errmsg = "ok",
+        .contact_way = .{
+            .config_id = "42",
+            .type = 1,
+            .scene = 2,
+            .style = 3,
+            .remark = "渠道A",
+            .skip_verify = true,
+            .state = "st",
+            .qr_code = "qr",
+            .user = &want_user,
+            .party = &want_party,
+            .expires_in = 86400,
+            .unionid = "uni",
+            .mark_source = true,
+            .conclusions = .{
+                .text = .{ .content = "欢迎" },
+                .image = .{ .pic_url = "https://pic" },
+            },
+        },
+    }, parsed.value);
     try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"config_id\":\"42\"") != null);
 }
 
@@ -3228,9 +3246,12 @@ test "listContactWay 获取联系我列表" {
     var parsed = try ec.listContactWay(.{ .start_time = 1600000000, .end_time = 1600086400, .cursor = "", .limit = 100 });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), parsed.value.contact_way.len);
-    try std.testing.expectEqualStrings("43", parsed.value.contact_way[1].config_id);
-    try std.testing.expectEqualStrings("NEXT", parsed.value.next_cursor);
+    var want_ways = [_]ContactWayForList{ .{ .config_id = "42" }, .{ .config_id = "43" } };
+    try std.testing.expectEqualDeep(ListContactWayResponse{
+        .errmsg = "ok",
+        .contact_way = &want_ways,
+        .next_cursor = "NEXT",
+    }, parsed.value);
     try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"limit\":100") != null);
 }
 
@@ -3991,10 +4012,20 @@ test "getUserBehaviorData 获取联系客户统计数据" {
     });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.behavior_data.len);
-    const bd = parsed.value.behavior_data[0];
-    try std.testing.expectEqual(@as(i64, 10), bd.chat_cnt);
-    try std.testing.expectEqual(@as(f64, 0.8), bd.reply_percentage);
+    var want_data = [_]BehaviorData{.{
+        .stat_time = 1600000000,
+        .chat_cnt = 10,
+        .message_cnt = 100,
+        .reply_percentage = 0.8,
+        .avg_reply_time = 30,
+        .negative_feedback_cnt = 0,
+        .new_apply_cnt = 5,
+        .new_contact_cnt = 3,
+    }};
+    try std.testing.expectEqualDeep(GetUserBehaviorResponse{
+        .errmsg = "ok",
+        .behavior_data = &want_data,
+    }, parsed.value);
     try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"userid\":[\"zhangsan\"]") != null);
 }
 
@@ -4024,9 +4055,25 @@ test "getGroupChatStat 获取群聊数据统计（按群主聚合）" {
     });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.total);
-    try std.testing.expectEqual(@as(i64, 500), parsed.value.items[0].data.msg_total);
-    try std.testing.expectEqualStrings("zhangsan", parsed.value.items[0].owner);
+    var want_items = [_]GroupChatStatItem{.{
+        .owner = "zhangsan",
+        .data = .{
+            .new_chat_cnt = 2,
+            .chat_total = 5,
+            .chat_has_msg = 4,
+            .new_member_cnt = 10,
+            .member_total = 50,
+            .member_has_msg = 40,
+            .msg_total = 500,
+            .migrate_trainee_chat_cnt = 0,
+        },
+    }};
+    try std.testing.expectEqualDeep(GetGroupChatStatResponse{
+        .errmsg = "ok",
+        .total = 1,
+        .next_offset = 1,
+        .items = &want_items,
+    }, parsed.value);
     try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"day_begin_time\":1600000000") != null);
 }
 
@@ -4052,8 +4099,23 @@ test "getGroupChatStatByDay 获取群聊数据统计（按自然日聚合）" {
     });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.items.len);
-    try std.testing.expectEqual(@as(i64, 200), parsed.value.items[0].data.msg_total);
+    var want_items = [_]GetGroupChatStatByDayItem{.{
+        .stat_time = 1600000000,
+        .data = .{
+            .new_chat_cnt = 1,
+            .chat_total = 3,
+            .chat_has_msg = 3,
+            .new_member_cnt = 5,
+            .member_total = 20,
+            .member_has_msg = 18,
+            .msg_total = 200,
+            .migrate_trainee_chat_cnt = 0,
+        },
+    }};
+    try std.testing.expectEqualDeep(GetGroupChatStatByDayResponse{
+        .errmsg = "ok",
+        .items = &want_items,
+    }, parsed.value);
     try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"owner_filter\":{\"userid_list\":[]}") != null);
 }
 
@@ -4408,10 +4470,13 @@ test "getMomentComments 获取朋友圈互动数据" {
     var parsed = try ec.getMomentComments(.{ .moment_id = "mom1", .userid = "zhangsan" });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.comment_list.len);
-    try std.testing.expectEqualStrings("wmAAA", parsed.value.comment_list[0].external_userid);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.like_list.len);
-    try std.testing.expectEqualStrings("wmBBB", parsed.value.like_list[0].external_userid);
+    var want_comments = [_]MomentComment{.{ .external_userid = "wmAAA", .create_time = 1600000000 }};
+    var want_likes = [_]MomentLike{.{ .external_userid = "wmBBB", .create_time = 1600000100 }};
+    try std.testing.expectEqualDeep(GetMomentCommentsResponse{
+        .errmsg = "ok",
+        .comment_list = &want_comments,
+        .like_list = &want_likes,
+    }, parsed.value);
 }
 
 test "listMomentStrategy 获取朋友圈规则组列表" {

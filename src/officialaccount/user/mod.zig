@@ -807,8 +807,9 @@ test "createTag 请求与响应解析" {
     try std.testing.expectEqual(std.http.Method.POST, stub.last_method);
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/tags/create?access_token=token-abc", stub.lastUri());
     try std.testing.expectEqualStrings("{\"tag\":{\"name\":\"测试标签\"}}", stub.lastPayload());
-    try std.testing.expectEqual(@as(i64, 100), parsed.value.tag.id);
-    try std.testing.expectEqualStrings("测试标签", parsed.value.tag.name);
+    try std.testing.expectEqualDeep(TagCreateResponse{
+        .tag = .{ .id = 100, .name = "测试标签" },
+    }, parsed.value);
 }
 
 test "createTag errcode 非 0 返回 ApiError" {
@@ -908,9 +909,12 @@ test "openIDListByTag 请求体与粉丝列表解析" {
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/user/tag/get?access_token=token-abc", stub.lastUri());
     try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"tagid\":1") != null);
     try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"next_openid\":\"oA\"") != null);
-    try std.testing.expectEqual(@as(i64, 2), parsed.value.count);
-    try std.testing.expectEqualStrings("oB", parsed.value.next_openid);
-    try std.testing.expectEqualStrings("oA", parsed.value.data.openid[0]);
+    var want_openids = [_][]const u8{ "oA", "oB" };
+    try std.testing.expectEqualDeep(TagOpenIDList{
+        .count = 2,
+        .data = .{ .openid = &want_openids },
+        .next_openid = "oB",
+    }, parsed.value);
 }
 
 test "openIDListByTag errcode 非 0 返回 ApiError" {
@@ -1016,8 +1020,13 @@ test "getBlackList 请求体与黑名单解析" {
     try std.testing.expectEqual(std.http.Method.POST, stub.last_method);
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/tags/members/getblacklist?access_token=token-abc", stub.lastUri());
     try std.testing.expectEqualStrings("{\"begin_openid\":\"oA\"}", stub.lastPayload());
-    try std.testing.expectEqual(@as(i64, 2), parsed.value.total);
-    try std.testing.expectEqualStrings("oB", parsed.value.data.openid[1]);
+    var want_openids = [_][]const u8{ "oA", "oB" };
+    try std.testing.expectEqualDeep(OpenidList{
+        .total = 2,
+        .count = 2,
+        .next_openid = "oB",
+        .data = .{ .openid = &want_openids },
+    }, parsed.value);
 }
 
 test "getBlackList errcode 非 0 返回 ApiError" {
