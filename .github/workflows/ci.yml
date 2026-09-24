@@ -46,17 +46,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-zig-
 
-      - name: Install System Dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
-
-      - name: Install System Dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install openssl@3 pkg-config
-
       - name: Check Formatting
         run: zig build fmt
 
@@ -68,6 +57,36 @@ jobs:
 
       - name: Build Library, CLI & Examples
         run: zig build
+
+      # 回归证明：默认构建零 C 依赖。默认配置不 link_libc、不 linkSystemLibrary，
+      # 因此产物不该出现 libssl / libcrypto（防止有人重新引入构建期 OpenSSL 依赖）。
+      - name: Prove default artifacts do not link OpenSSL
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          bins=(zig-out/bin/*)
+          if [ ${#bins[@]} -eq 0 ]; then
+            echo "没有找到 zig-out/bin 产物"; exit 1
+          fi
+          for f in "${bins[@]}"; do
+            if [ "$RUNNER_OS" = "Linux" ]; then
+              deps="$(ldd "$f" 2>&1 || true)"
+            else
+              deps="$(otool -L "$f")"
+            fi
+            if printf '%s\n' "$deps" | grep -qiE 'libssl|libcrypto'; then
+              echo "FAIL: $f 链接了 OpenSSL："
+              printf '%s\n' "$deps" | grep -iE 'libssl|libcrypto'
+              exit 1
+            fi
+          done
+          echo "OK: 默认产物未链接 libssl / libcrypto"
+          # 静态兜底：源码不得再 @import 第三方 zig 包（默认零包依赖）。
+          if grep -rn --include='*.zig' -e '@import("httpz")' src/ examples/; then
+            echo "FAIL: 源码仍在 @import(\"httpz\")"; exit 1
+          fi
+          echo "OK: 源码无第三方包 import"
 
   test-windows:
     name: Build & Test (windows-latest, GNU ABI)
@@ -92,13 +111,12 @@ jobs:
           "$HOME/zig/zig.exe" version
           echo "$HOME/zig" >> "$GITHUB_PATH"
 
-      - name: Setup MSYS2 + OpenSSL
+      - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           path-type: inherit
           update: true
-          install: mingw-w64-x86_64-openssl
 
       - name: Cache Zig
         uses: actions/cache@v4
@@ -117,13 +135,54 @@ jobs:
           zig build fmt
 
       - name: Run Unit Tests
-        run: |
-          # cygpath -w 把 MSYS 挂载点（/mingw64）转为原生 Win32 路径，
-          # 否则原生 zig.exe 会把 /mingw64/include 解析成盘符根。
-          export OPENSSL_DIR="$(cygpath -w "$MINGW_PREFIX")"
-          zig build -Dtarget=x86_64-windows-gnu test
+        run: zig build -Dtarget=x86_64-windows-gnu test
 
       - name: Build Library, CLI & Examples
+        run: zig build -Dtarget=x86_64-windows-gnu
+
+  # opt-in：验证 `-Dmtls=true` 也能编译（默认 job 完全不碰 OpenSSL）。
+  # 这里的 libssl-dev 只用于**运行时** dlopen 的库存在，不参与链接。
+  mtls-build:
+    name: Build with -Dmtls=true (ubuntu-latest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Zig
+        shell: bash
         run: |
-          export OPENSSL_DIR="$(cygpath -w "$MINGW_PREFIX")"
-          zig build -Dtarget=x86_64-windows-gnu
+          set -euo pipefail
+          ZIG_VERSION="0.17.0-dev.2151+2ec5523d5"
+          PLAT="x86_64-linux"
+          FILE="zig-${PLAT}-${ZIG_VERSION}.tar.xz"
+          curl -fL --retry 3 --retry-delay 2 -o "$FILE" "https://ziglang.org/builds/$FILE"
+          mkdir -p "$HOME/zig"
+          tar -xf "$FILE" -C "$HOME/zig" --strip-components=1
+          "$HOME/zig/zig" version
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+
+      - name: Cache Zig
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            .zig-cache
+          key: ${{ runner.os }}-zig-mtls-${{ hashFiles('build.zig.zon', 'build.zig') }}
+          restore-keys: |
+            ${{ runner.os }}-zig-
+
+      - name: Install OpenSSL runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev
+
+      - name: Build (mTLS enabled)
+        run: zig build -Dmtls=true
+
+      - name: Check Formatting
+        run: zig build fmt
+
+      - name: Run Unit Tests (mTLS enabled)
+        run: zig build -Dmtls=true test

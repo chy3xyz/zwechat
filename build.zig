@@ -1,93 +1,44 @@
 // SPDX-License-Identifier: Apache-2.0
 const std = @import("std");
 
-/// 探测 OpenSSL include 目录（与 setupOpenSSL 相同的优先级），
-/// 供 zhttp 依赖的 `-Dopenssl-include` 构建选项使用。
-fn resolveOpenSSLInclude(b_builder: *std.Build) []const u8 {
-    if (b_builder.graph.environ_map.get("OPENSSL_DIR")) |openssl_dir| {
-        return b_builder.pathJoin(&.{ openssl_dir, "include" });
-    }
-    const search_bases = [_][]const u8{
-        "/opt/homebrew/opt/openssl@3",
-        "/usr/local/opt/openssl@3",
-    };
-    for (search_bases) |base| {
-        const inc = b_builder.fmt("{s}/include", .{base});
-        if (std.Io.Dir.cwd().access(b_builder.graph.io, inc, .{})) |_| {
-            return inc;
-        } else |_| {}
-    }
-    // Linux / 其他平台默认系统 include。
-    return "/usr/include";
-}
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // zhttp（httpz.zig 延续仓库）依赖：v0.6.1，由 zig fetch 从
-    // https://github.com/chy3xyz/zhttp 拉取（build.zig.zon 声明 URL + hash）。
-    // - 关闭 h3：本项目不需要 HTTP/3，避免构建依赖 nghttp3/ngtcp2 系统库；
-    // - openssl-include：按 OPENSSL_DIR → Homebrew → 系统默认 探测后透传，
-    //   供上游 translateC 编译 openssl.h 使用。
-    const openssl_include = resolveOpenSSLInclude(b);
-    const httpz_dep = b.dependency("httpz", .{
-        .target = target,
-        .optimize = optimize,
-        .h3 = false,
-        .@"openssl-include" = openssl_include,
-    });
-    const httpz_mod = httpz_dep.module("zhttp");
+    // 微信支付 v2 的退款/转账/红包走 mTLS（客户端证书）。纯 Zig 的 std TLS 客户端
+    // 不支持客户端证书，因此仓库内自建 `src/util/mtls_openssl.zig`：运行时用
+    // `std.DynLib` dlopen OpenSSL，**构建期不链接任何 C 库**。
+    //
+    // - 默认 `-Dmtls=false`：源码用 `src/util/mtls.zig` 的 stub，不设置 link_libc、
+    //   不 linkSystemLibrary，产物零 C 依赖（CI 用 ldd/otool 回归证明）；
+    // - `-Dmtls=true`：仅为 dlopen 打开 `link_libc`（dlopen 需要 libc）；libssl /
+    //   libcrypto 仍在运行时加载，可用 ZWECHAT_SSL_LIB / ZWECHAT_CRYPTO_LIB
+    //   指定绝对路径。
+    const mtls_enabled = b.option(
+        bool,
+        "mtls",
+        "Enable WeChat Pay v2 mTLS via runtime-dlopen OpenSSL (default: off, zero C deps)",
+    ) orelse false;
 
-    // 辅助函数：配置 OpenSSL 与 System Library 链接
-    const setupOpenSSL = struct {
-        fn apply(b_builder: *std.Build, mod: *std.Build.Module) void {
-            mod.linkSystemLibrary("ssl", .{});
-            mod.linkSystemLibrary("crypto", .{});
-            mod.link_libc = true;
+    const mtls_options = b.addOptions();
+    mtls_options.addOption(bool, "enabled", mtls_enabled);
+    const mtls_options_mod = mtls_options.createModule();
 
-            // 1) 优先使用 OPENSSL_DIR 环境变量（跨平台通用，CI 可注入）。
-            //    期望布局：<OPENSSL_DIR>/include 与 <OPENSSL_DIR>/lib。
-            if (b_builder.graph.environ_map.get("OPENSSL_DIR")) |openssl_dir| {
-                mod.addIncludePath(.{ .cwd_relative = b_builder.pathJoin(&.{ openssl_dir, "include" }) });
-                mod.addLibraryPath(.{ .cwd_relative = b_builder.pathJoin(&.{ openssl_dir, "lib" }) });
-                return;
-            }
-
-            // 2) 回退：探测常见 Homebrew OpenSSL 3 路径（macOS）。
-            const search_bases = [_][]const u8{
-                "/opt/homebrew/opt/openssl@3",
-                "/usr/local/opt/openssl@3",
-            };
-
-            for (search_bases) |base| {
-                const inc = b_builder.fmt("{s}/include", .{base});
-                const lib = b_builder.fmt("{s}/lib", .{base});
-
-                if (std.Io.Dir.cwd().access(b_builder.graph.io, inc, .{})) |_| {
-                    mod.addIncludePath(.{ .cwd_relative = inc });
-                } else |_| {}
-                if (std.Io.Dir.cwd().access(b_builder.graph.io, lib, .{})) |_| {
-                    mod.addLibraryPath(.{ .cwd_relative = lib });
-                } else |_| {}
-            }
+    // 统一装配各 module：注入 mtls_options 开关；仅在 mTLS 模式下链接 libc。
+    const configure = struct {
+        fn apply(mod: *std.Build.Module, opts: *std.Build.Module, enabled: bool) void {
+            mod.addImport("mtls_options", opts);
+            if (enabled) mod.link_libc = true;
         }
     }.apply;
-
-    // httpz 模块内部已 linkSystemLibrary("ssl"/"crypto")，但 Windows/macOS 上
-    // OpenSSL 库不在 zig 默认搜索路径，需在此补 include/lib 路径。
-    setupOpenSSL(b, httpz_mod);
 
     // 顶层 lib 模块：暴露给下游包使用
     const lib_mod = b.addModule("zwechat", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{
-            .{ .name = "httpz", .module = httpz_mod },
-        },
     });
-    setupOpenSSL(b, lib_mod);
+    configure(lib_mod, mtls_options_mod, mtls_enabled);
 
     // 主 CLI 示例
     const exe_mod = b.createModule(.{
@@ -96,10 +47,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "zwechat", .module = lib_mod },
-            .{ .name = "httpz", .module = httpz_mod },
         },
     });
-    setupOpenSSL(b, exe_mod);
+    configure(exe_mod, mtls_options_mod, mtls_enabled);
 
     const exe = b.addExecutable(.{
         .name = "zwechat",
@@ -119,10 +69,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "zwechat", .module = lib_mod },
-            .{ .name = "httpz", .module = httpz_mod },
         },
     });
-    setupOpenSSL(b, test_mod);
+    configure(test_mod, mtls_options_mod, mtls_enabled);
 
     const tests = b.addTest(.{
         .root_module = test_mod,
@@ -140,7 +89,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zwechat", .module = lib_mod },
         },
     });
-    setupOpenSSL(b, bench_mod);
+    configure(bench_mod, mtls_options_mod, mtls_enabled);
     const bench_exe = b.addExecutable(.{
         .name = "benchmark",
         .root_module = bench_mod,
@@ -167,7 +116,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zwechat", .module = lib_mod },
         },
     });
-    setupOpenSSL(b, live_probe_mod);
+    configure(live_probe_mod, mtls_options_mod, mtls_enabled);
 
     const live_probe_exe = b.addExecutable(.{
         .name = "live-probe",
@@ -193,7 +142,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zwechat", .module = lib_mod },
         },
     });
-    setupOpenSSL(b, live_probe_test_mod);
+    configure(live_probe_test_mod, mtls_options_mod, mtls_enabled);
 
     const live_probe_tests = b.addTest(.{
         .root_module = live_probe_test_mod,
@@ -221,7 +170,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "zwechat", .module = lib_mod },
             },
         });
-        setupOpenSSL(b, example_mod);
+        configure(example_mod, mtls_options_mod, mtls_enabled);
         const example_exe = b.addExecutable(.{
             .name = ex.name,
             .root_module = example_mod,
@@ -233,6 +182,31 @@ pub fn build(b: *std.Build) void {
         const example_step = b.step(step_name, b.fmt("Run example {s}", .{ex.name}));
         example_step.dependOn(&run_example.step);
     }
+
+    // —— 公开 API 面提取（离线工具，不参与默认 `zig build`）——
+    //
+    // 与 `tools/api_surface_check.sh` 用的是同一个可执行文件（`zig run tools/api_surface.zig`
+    // 是脚本的调用方式；这里是给开发者直接看的入口）。它只打印条目，快照的前缀注释、
+    // 排序与落盘都由脚本负责；门禁对账逻辑不在 build.zig 里。
+    const api_surface_mod = b.createModule(.{
+        .root_source_file = b.path("tools/api_surface.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const api_surface_exe = b.addExecutable(.{
+        .name = "api-surface",
+        .root_module = api_surface_mod,
+    });
+    const run_api_surface = b.addRunArtifact(api_surface_exe);
+    // stdio 继承 + 视作有副作用：每次显式调用都真的跑一遍并直接打印到终端
+    // （默认的 `.infer_from_args` 会把 stdout 收走，看不到任何东西）。
+    run_api_surface.stdio = .inherit;
+    run_api_surface.addDirectoryArg(b.path("."));
+    const api_surface_step = b.step(
+        "api-surface",
+        "Print the public API surface of src/ (same extractor as tools/api_surface_check.sh)",
+    );
+    api_surface_step.dependOn(&run_api_surface.step);
 
     // —— 代码格式化检查（zig fmt --check 的封装）——
     const fmt_check = b.addFmt(.{
