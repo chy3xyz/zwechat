@@ -229,7 +229,8 @@ test "parse 拒绝空标签名（fuzz 发现：`<>` 曾被当成合法文档）"
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// fuzz（`zig build test --fuzz=<N>` 才真正变异；普通 `zig build test` 只跑空输入冒烟）
+// fuzz（`zig build test --fuzz=<N>` 才真正变异；普通 `zig build test` 会先跑
+// corpus 里的真实报文、再跑一次空输入冒烟 —— 见文件末尾的 `fuzz_corpus`）
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// 传给 `parse` 的切片必须落在输入缓冲区之内——手写扫描器最危险的失败模式是
@@ -240,28 +241,32 @@ fn fuzzSliceInside(input: []const u8, slice: []const u8) bool {
     return p >= base and p + slice.len <= base + input.len;
 }
 
+/// 变异时各字节的权重：XML 的结构字符（`<` `>` `/` `!` `[` `]`）给高权重，
+/// 末尾两条 `0x00-0x7f` / `0x80-0xff` 覆盖整个字节域（也因此 corpus 种子里的字节
+/// 会被**原样**保留，不会被替换成兜底值）。
+const fuzz_byte_weights = [_]std.testing.Smith.Weight{
+    .rangeAtMost(u8, 'a', 'z', 8),
+    .value(u8, '<', 6),
+    .value(u8, '>', 6),
+    .value(u8, '/', 4),
+    .value(u8, '!', 3),
+    .value(u8, '[', 2),
+    .value(u8, ']', 2),
+    .value(u8, '?', 2),
+    .value(u8, ' ', 3),
+    .value(u8, '=', 2),
+    .value(u8, '"', 2),
+    .rangeAtMost(u8, 0x00, 0x7f, 2),
+    .rangeAtMost(u8, 0x80, 0xff, 1),
+};
+
 /// 性质：
 /// 1. 不 panic / 不越界 / 不死循环（决定性条件是「每轮至少吃掉 5 字节」的下界）；
 /// 2. 失败只能是 `error.MalformedXml`（内部错误不得外泄）；
 /// 3. 成功时 `root_name` 与全部 key/value 都指向输入内部，且元素数受输入长度约束。
 fn testXmlParseProperties(allocator: std.mem.Allocator, smith: *std.testing.Smith) anyerror!void {
-    var buf: [256]u8 = undefined;
-    const weights = [_]std.testing.Smith.Weight{
-        .rangeAtMost(u8, 'a', 'z', 8),
-        .value(u8, '<', 6),
-        .value(u8, '>', 6),
-        .value(u8, '/', 4),
-        .value(u8, '!', 3),
-        .value(u8, '[', 2),
-        .value(u8, ']', 2),
-        .value(u8, '?', 2),
-        .value(u8, ' ', 3),
-        .value(u8, '=', 2),
-        .value(u8, '"', 2),
-        .rangeAtMost(u8, 0x00, 0x7f, 2),
-        .rangeAtMost(u8, 0x80, 0xff, 1),
-    };
-    const len = smith.sliceWeightedBytes(&buf, &weights);
+    var buf: [fuzz_max_len]u8 = undefined;
+    const len = smith.sliceWeightedBytes(&buf, &fuzz_byte_weights);
     const input = buf[0..len];
 
     var doc = parse(allocator, input) catch |err| {
@@ -282,5 +287,75 @@ fn testXmlParseProperties(allocator: std.mem.Allocator, smith: *std.testing.Smit
 }
 
 test "fuzz: parse 不 panic / 不越界 / 不死循环" {
-    try std.testing.fuzz(std.testing.allocator, testXmlParseProperties, .{});
+    try std.testing.fuzz(std.testing.allocator, testXmlParseProperties, .{
+        .corpus = &fuzz_corpus,
+    });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// corpus（真实输入种子）
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// 输入长度上限。微信回调报文整体通常在几百字节（带 `Encrypt` 的长一些也就 1 KiB 级），
+/// 512 足够装下下面两份真实语料，同时让变异仍然集中在短输入上。
+const fuzz_max_len: usize = 512;
+
+/// corpus 种子：`Smith` 的输入流布局 `[u32 小端长度][XML 字节]`。
+///
+/// 长度前缀不能省——`Smith` 的切片生成器就是按这个格式从 corpus 里取的，直接塞裸 XML
+/// 会被当成「长度 = 前 4 字节」而切出一段垃圾。
+///
+/// `std.testing.FuzzInputOptions.corpus` 是 Zig 官方的语料入口（见
+/// `lib/compiler/test_runner.zig` 的 `fuzz`）：语料**写在代码里**，没有目录约定、
+/// 也不需要 build.zig 接线。非 fuzz 模式下每个种子被**原样**跑一遍
+/// `testXmlParseProperties`（所以种子本身必须是完全合法的样本，断言不成立会让
+/// `zig build test` 直接变红），fuzz 模式下由 `fuzzer_new_input` 注册成变异起点。
+const fuzz_corpus = [_][]const u8{ &fuzz_corpus_text_msg, &fuzz_corpus_encrypted_msg };
+
+/// 公众号「文本消息」回调（2024 年的真实字段集：CDATA 值 + 纯文本的数字字段）。
+const fuzz_corpus_text_msg = fuzzCorpusSeed(
+    \\<xml>
+    \\  <ToUserName><![CDATA[gh_5f0b2c3d4e5f]]></ToUserName>
+    \\  <FromUserName><![CDATA[oGZUI0egBJY1zhBYw2KhdUfwVJJE]]></FromUserName>
+    \\  <CreateTime>1700000000</CreateTime>
+    \\  <MsgType><![CDATA[text]]></MsgType>
+    \\  <Content><![CDATA[hello 微信]]></Content>
+    \\  <MsgId>1234567890123456</MsgId>
+    \\</xml>
+);
+
+/// 企业微信「加密回调」（`Encrypt` 的值是 base64，含 `+` `/` `=` 三种字符）。
+const fuzz_corpus_encrypted_msg = fuzzCorpusSeed(
+    \\<xml>
+    \\  <ToUserName><![CDATA[ww1a2b3c4d5e6f7890]]></ToUserName>
+    \\  <Encrypt><![CDATA[RypEvHKD8QQKFhvQ6QleEB4J58tiPdvo+rtK1I9qca6aM/wvqnLSV5zEPeusUiX5L5X/0lWfrf0QADHHhGd3QczcdCUpj911L3vg3W/sYYvuJTs3TUUkSUXxaccAS0qhxchrRYt66wiSpGLYL42aM6A8dTT+6k4aSk==]]></Encrypt>
+    \\  <AgentID><![CDATA[1000002]]></AgentID>
+    \\</xml>
+);
+
+/// 给真实 XML 报文加上 `Smith` 要求的 u32 小端长度前缀（comptime 求值）。
+fn fuzzCorpusSeed(comptime xml: []const u8) [4 + xml.len]u8 {
+    var seed: [4 + xml.len]u8 = undefined;
+    std.mem.writeInt(u32, seed[0..4], xml.len, .little);
+    @memcpy(seed[4..], xml);
+    return seed;
+}
+
+// corpus 是「先过一遍断言」的，但那些断言只要求「失败必须是 `MalformedXml`」——
+// 一份错位的种子会解析失败、断言照旧通过，语料却已经退化成垃圾输入
+// （p12 那边就踩过一次：两段顺序写反，断言全绿而 seed 完全没用）。
+// 这个测试用**和 body 完全相同的 Smith 读取顺序与权重表**回放每个种子，钉住：
+// 取出来的就是那份真实报文，且它确实解析成功、拿到预期元素。
+test "fuzz corpus 布局：种子按 body 的读取顺序还原出真实报文" {
+    for (fuzz_corpus) |seed| {
+        var smith: std.testing.Smith = .{ .in = seed };
+        var buf: [fuzz_max_len]u8 = undefined;
+        const len = smith.sliceWeightedBytes(&buf, &fuzz_byte_weights);
+
+        var doc = try parse(std.testing.allocator, buf[0..len]);
+        defer doc.deinit();
+        try std.testing.expectEqualStrings("xml", doc.root_name);
+        try std.testing.expect(doc.get("ToUserName") != null);
+        try std.testing.expect(doc.count() >= 3);
+    }
 }

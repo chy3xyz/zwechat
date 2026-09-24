@@ -140,6 +140,84 @@ jobs:
       - name: Build Library, CLI & Examples
         run: zig build -Dtarget=x86_64-windows-gnu
 
+  # Windows 侧的 API 面门禁：只跑**提取器**（`zig run tools/api_surface.zig`），
+  # 把输出与 api/surface.txt 的条目集逐条对账 —— 这一半（std.zig.Ast 在 Windows 上
+  # 是否产出与 Linux/macOS 完全相同的公开 API 面：路径分隔符、文件遍历顺序、CRLF）
+  # 正是此前从未被验证过的部分。
+  #
+  # 为什么不直接在 test-windows（msys2）里跑 `bash tools/api_surface_check.sh`：
+  #   1) 脚本第 46 行硬编码 `export LC_ALL=C`，而本仓库已在上面 fmt 那一步记录过
+  #      「Windows 上 Zig 读中文注释需要 LC_ALL=C.UTF-8」——两者互相打架，
+  #      且脚本不接受外部覆盖 locale（改脚本不在本次授权范围内）；
+  #   2) 脚本还依赖 awk / comm / mktemp / sed 的 GNU 行为，msys2 的包集与 Git Bash
+  #      不同，一旦行为有差异就会让整个 windows job 误报变红。
+  # 所以这里用 Git Bash（locale 可控、只需 coreutils）做等价但更窄的校验；
+  # CHANGELOG 对账那一半与平台无关，已由 Linux/macOS 的 test job 覆盖。
+  api-surface-windows:
+    name: API Surface Extractor (windows-latest)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Zig
+        run: |
+          set -euo pipefail
+          ZIG_VERSION="0.17.0-dev.2151+2ec5523d5"
+          PLAT="x86_64-windows"
+          FILE="zig-${PLAT}-${ZIG_VERSION}.zip"
+          curl -fL --retry 3 --retry-delay 2 -o "$FILE" "https://ziglang.org/builds/$FILE"
+          python -m zipfile -e "$FILE" "$HOME"
+          mv "$HOME/zig-${PLAT}-${ZIG_VERSION}" "$HOME/zig"
+          "$HOME/zig/zig.exe" version
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+
+      - name: Cache Zig
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\zig
+            .zig-cache
+          key: windows-zig-surface-${{ hashFiles('build.zig.zon', 'build.zig') }}
+          restore-keys: |
+            windows-zig-
+
+      - name: Compare extractor output with api/surface.txt
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+
+          # 显式把 zig 目录放回 PATH：GITHUB_PATH 里存的是 POSIX 形式的 `$HOME/zig`
+          # （Git Bash / msys2 都会翻译成 Windows 路径），再兜一道避免依赖 runner 的转换。
+          export PATH="$HOME/zig:$PATH"
+
+          # `zig run` 要读全部 src/*.zig（含中文注释）：按本仓库在 Windows 上的既有经验，
+          # 给它 UTF-8 locale（fmt 那一步同理）。产出的字节内容与 locale 无关。
+          export LC_ALL=C.UTF-8
+          zig run tools/api_surface.zig > "$tmp/gen.txt"
+
+          # 对齐 `tools/api_surface_check.sh` 的口径：头部注释行（`^#`）两侧都去掉，
+          # 再统一 `LC_ALL=C sort -u`（快照就是这么生成的；C locale 下是字节序，
+          # 与 C.UTF-8 的 ASCII 排序一致，但显式写死免得踩 C.UTF-8 的排序差异）。
+          LC_ALL=C grep -v '^#' api/surface.txt | LC_ALL=C sort -u > "$tmp/snap.txt"
+          LC_ALL=C sort -u "$tmp/gen.txt" > "$tmp/gen-sorted.txt"
+
+          if ! LC_ALL=C cmp -s "$tmp/snap.txt" "$tmp/gen-sorted.txt"; then
+            echo "FAIL: Windows 上提取器的输出与 api/surface.txt 的条目集不一致。"
+            echo "      （常见原因：路径分隔符变成 \\\\、文件遍历顺序不同、换行被转成 CRLF）"
+            echo "      差异（- 快照 / + Windows 提取结果）："
+            LC_ALL=C diff -u "$tmp/snap.txt" "$tmp/gen-sorted.txt" | head -60 || true
+            exit 1
+          fi
+
+          n="$(LC_ALL=C wc -l < "$tmp/gen-sorted.txt" | tr -d ' ')"
+          echo "OK: Windows 上提取器输出与 api/surface.txt 条目集一致（$n 条）"
+
   # opt-in：验证 `-Dmtls=true` 也能编译（默认 job 完全不碰 OpenSSL）。
   # 这里的 libssl-dev 只用于**运行时** dlopen 的库存在，不参与链接。
   mtls-build:

@@ -747,7 +747,8 @@ test "deriveKey 接受上限内的迭代次数（合法文件不被误拒）" {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// fuzz（`zig build test --fuzz=<N>` 才真正变异；普通 `zig build test` 跑语料 + 空输入冒烟）
+// fuzz（`zig build test --fuzz=<N>` 才真正变异；普通 `zig build test` 会先跑 corpus 里
+// 的真实 P12、再跑一次空输入冒烟 —— 见文件末尾的 `fuzz_corpus`）
 // ──────────────────────────────────────────────────────────────────────────────
 const fuzz_byte_weights = [_]std.testing.Smith.Weight{
     .value(u8, 0x30, 6), // SEQUENCE
@@ -762,21 +763,44 @@ const fuzz_byte_weights = [_]std.testing.Smith.Weight{
     .rangeAtMost(u8, 0x00, 0xff, 2),
 };
 
+/// 输入的**长度**分布。真实 P12 有 1.6 KiB 级（本文件的 `TEST_P12_B64` 解出来 1683 字节），
+/// 但绝大多数迭代应当落在短输入上（每个迭代都要走一遍 ASN.1 扫描），所以大输入只给
+/// 1 份权重。
+///
+/// 这个分布同时决定 corpus 能否生效：`Smith` 只在「声明长度落在某个区间内」时才采用它，
+/// 否则把长度重置成 `weights[0].min`——1683 落在第二段里，因此真实语料不会被截成 0 字节。
+const fuzz_len_weights = [_]std.testing.Smith.Weight{
+    .rangeAtMost(u32, 0, 256, 100),
+    .rangeAtMost(u32, 257, fuzz_max_len, 1),
+};
+
+/// 输入长度上限：够装下本仓库的真实语料（1683 字节），又不必按真实商户证书
+/// （常见 2~4 KiB）再放大。
+const fuzz_max_len: usize = 2048;
+
 /// 性质：任意字节 + 任意密码都不 panic（不越界、不整数溢出）、不泄漏；失败只允许
 /// 是声明的错误变体；成功时的 PEM 头尾必须齐全（`derToPem` 的输出契约）。
 ///
-/// **本轮仍不提供 corpus**：过去不敢喂真实 P12 语料，是因为变异器很快能走到
-/// `deriveKey`，而那里的 `iteration_count` 完全取自文件、没有任何上限——变异出
-/// 2^32 次迭代就会让这次 fuzz 长时间卡住。这个上限已经补上
-/// （`max_pbkdf2_iterations`，超限直接 `error.UnsupportedPbe`），也就是说语料
-/// 现在可以安全地加（`zig build test --fuzz` 的语料目录里放真实 P12 即可）；
-/// 加语料要新增文件、并考虑内存体积，留作后续独立改动。
+/// 输入布局（= `Smith` 的输入流布局，也是 corpus 的布局）：
+/// `[P12 段 u32 小端长度][P12 字节][密码段 u32 小端长度][密码]`。
+///
+/// 密码与 P12 分成两段是刻意的：旧写法把密码取成 `data[0..8]`，而真实 P12 的头 8 字节
+/// 是 DER 头，永远不可能等于正确密码，于是真实语料只能覆盖到 `BadPassword` 早退。
+/// 分开之后「真实 P12 + 正确密码」既能被 corpus 原样跑通成功路径（下面 4 条 PEM 断言
+/// 因此第一次对真实文件生效），也让 fuzzer 有一个能走到 PBKDF2 → AES → PKCS#7 解包的
+/// 成功起点；两段各自独立变异，覆盖面不减（密码段缺失时长度为 0，即空密码）。
+///
+/// 段序必须与这里的读取顺序（先 `sliceWeighted` 取 P12、再 `sliceWeightedBytes` 取密码）
+/// 一致：顺序反了**不会报错**——两段会错位成「7 字节乱码 + 空密码」，语料悄悄退化成
+/// 垃圾输入而断言照旧通过。下面的 `fuzz corpus 布局` 测试把它钉住。
 fn testPkcs12ParseNeverPanics(allocator: std.mem.Allocator, smith: *std.testing.Smith) anyerror!void {
-    var buf: [512]u8 = undefined;
-    const len = smith.sliceWeightedBytes(&buf, &fuzz_byte_weights);
+    var buf: [fuzz_max_len]u8 = undefined;
+    const len = smith.sliceWeighted(&buf, &fuzz_len_weights, &fuzz_byte_weights);
     const data = buf[0..len];
-    // 密码也取自输入：空密码会走 `BadPassword` 早退路径。
-    const password = data[0..@min(data.len, 8)];
+
+    var pw_buf: [16]u8 = undefined;
+    const pw_len = smith.sliceWeightedBytes(&pw_buf, &fuzz_byte_weights);
+    const password = pw_buf[0..pw_len];
 
     var result = parse(allocator, data, password) catch |err| switch (err) {
         error.InvalidP12File,
@@ -796,5 +820,78 @@ fn testPkcs12ParseNeverPanics(allocator: std.mem.Allocator, smith: *std.testing.
 }
 
 test "fuzz: parse 不 panic / 不泄漏（长度字段边界）" {
-    try std.testing.fuzz(std.testing.allocator, testPkcs12ParseNeverPanics, .{});
+    try std.testing.fuzz(std.testing.allocator, testPkcs12ParseNeverPanics, .{
+        .corpus = &fuzz_corpus,
+    });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// corpus（真实输入种子）
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// corpus 种子：一份真实 P12（`TEST_P12_B64` 解出的 1683 字节）+ 它的正确密码 `testpwd`。
+///
+/// 布局同上面的输入流：`[P12 段长度][P12][密码段长度][testpwd]`。长度前缀不能省——
+/// `Smith` 的切片生成器就是按这个格式从 corpus 里读的，直接塞裸 P12 会被当成
+/// 「长度 = 前 4 字节」而切出一段垃圾。
+///
+/// `std.testing.FuzzInputOptions.corpus` 是 Zig 官方的语料入口（见
+/// `lib/compiler/test_runner.zig` 的 `fuzz`，那里对每个元素调 `fuzzer_new_input`）：
+/// 语料**写在代码里**，没有目录约定，也不需要 build.zig 接线。非 fuzz 模式下每个种子被
+/// **原样**跑一遍 `testPkcs12ParseNeverPanics`（即「真实样本先过一次断言」，断言不成立
+/// 会让 `zig build test` 直接变红——比放一个语料目录更能保证语料本身合法）；
+/// fuzz 模式下它成为变异起点。
+///
+/// 敢喂真实 P12 的前提是 `deriveKey` 的迭代次数上限（`max_pbkdf2_iterations`）：
+/// 没有它，变异出 2^32 次 PBKDF2 会让一次 fuzz 迭代跑几个小时。
+const fuzz_corpus = [_][]const u8{&fuzz_corpus_seed};
+
+/// 语料用的密码（与 `parseP12 解析 AES-256-CBC / PBKDF2-SHA256 P12` 测试里的那份一致）。
+const fuzz_corpus_password = "testpwd";
+
+const fuzz_corpus_seed = fuzzCorpusSeed(&fuzz_corpus_p12, fuzz_corpus_password);
+
+/// `TEST_P12_B64` 解码出的原始字节，comptime 求值。
+const fuzz_corpus_p12 = blk: {
+    const decoder = std.base64.standard.Decoder;
+    const size = decoder.calcSizeForSlice(TEST_P12_B64) catch
+        @compileError("TEST_P12_B64 不是合法 base64");
+    var bytes: [size]u8 = undefined;
+    decoder.decode(&bytes, TEST_P12_B64) catch
+        @compileError("TEST_P12_B64 解码失败");
+    break :blk bytes;
+};
+
+/// 拼出 `[数据段长度][数据][密码段长度][密码]` 的 corpus 种子（comptime 求值）。
+/// 段序与 fuzz body 的读取顺序一致，详见 body 的文档。
+fn fuzzCorpusSeed(comptime data: []const u8, comptime password: []const u8) [4 + data.len + 4 + password.len]u8 {
+    var seed: [4 + data.len + 4 + password.len]u8 = undefined;
+    std.mem.writeInt(u32, seed[0..4], data.len, .little);
+    @memcpy(seed[4..][0..data.len], data);
+    std.mem.writeInt(u32, seed[4 + data.len ..][0..4], password.len, .little);
+    @memcpy(seed[4 + data.len + 4 ..][0..password.len], password);
+    return seed;
+}
+
+// corpus 是「先过一遍断言」的，但断言只要求「失败必须是声明的错误变体」——
+// 一份错位的种子会被解析成 `BadPassword` 之类的合法失败，测试照旧全绿，
+// 语料却已经退化成垃圾输入（写这份语料时就踩过一次）。
+// 这个测试用**和 body 完全相同的 Smith 读取顺序与权重表**回放种子，钉住：
+// 取出的就是那份真实 P12、密码就是 `testpwd`，而且它确实能解析成功。
+test "fuzz corpus 布局：种子按 body 的读取顺序还原出真实 P12" {
+    const allocator = std.testing.allocator;
+    var smith: std.testing.Smith = .{ .in = &fuzz_corpus_seed };
+
+    var buf: [fuzz_max_len]u8 = undefined;
+    const len = smith.sliceWeighted(&buf, &fuzz_len_weights, &fuzz_byte_weights);
+    try std.testing.expectEqualSlices(u8, &fuzz_corpus_p12, buf[0..len]);
+
+    var pw_buf: [16]u8 = undefined;
+    const pw_len = smith.sliceWeightedBytes(&pw_buf, &fuzz_byte_weights);
+    try std.testing.expectEqualStrings(fuzz_corpus_password, pw_buf[0..pw_len]);
+
+    var result = try parse(allocator, buf[0..len], pw_buf[0..pw_len]);
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.startsWith(u8, result.cert_pem, "-----BEGIN CERTIFICATE-----"));
+    try std.testing.expect(std.mem.startsWith(u8, result.key_pem, "-----BEGIN PRIVATE KEY-----"));
 }
