@@ -630,53 +630,51 @@ mock server 绑定失败 → 测试失败。（`findFreePort` 的 20 次重试�
 
 ---
 
-## 13. `zig build test` 打印 `failed command: …--listen=-`（但构建仍然成功）
+## 13. `zig build test` 打印 `failed command: …--listen=-`（**根因已查明：工具链展示口径**）
 
 **决策（现状）**
-**已定性为 Zig 0.17-dev 构建运行器的"上报不一致"，非本仓缺陷**；按 CI 判据（退出码）无影响，暂不修。
+**已定性为 Zig 0.17-dev 构建运行器的展示问题，与本仓代码无关**；按 CI 判据（退出码）无影响，不修。
 
-**现象**
-- `zig build test`（只要测试步骤真的执行、非缓存命中）会打印一行
-  `failed command: ./.zig-cache/o/<hash>/test --cache-dir=./.zig-cache --seed=… --listen=-`，
-  并且**在它之前会把测试进程的 stderr 整段转储**（本仓里就是 redis/memcache 的 `std.log.warn` 若干行）。
-- 同一份输出里同时有 `Build Summary: N/N steps succeeded; 1087/1087 tests passed` 与 `test success`，
-  且 **`zig build test` 自身退出码为 0**。
+**根因（读工具链源码 + 实测，已独立复核）**
+`lib/compiler/Maker.zig:2698-2702`：
 
-**已实测确认（本轮新增，逐一可复核）**
-1. **测试进程是以状态 0 退出的**：用 lldb 附加到子进程并 `continue` 到结束，输出 `Process … exited with status = 0`；
-   在 `abort` / `debug.defaultPanic` / SIGABRT 上设断点**均未命中** ⇒ 既没有崩溃也没有 panic。
-   （本文件早先记录的 `test-*.ips` SIGABRT 与"偶发 abort"是**早前阶段**的观测，当前已不复现。）
-2. **一次 `zig build test` 只启动一次测试二进制**（`--verbose` 实测 spawn 计数 = 1），构建系统没有重试机制
-   （`compiler/Maker/Step/Run.zig` 里只有目录重命名的 retry）。此前观测到的"多个测试进程"是**并发的其它构建调用**的残留。
-3. **不是缓存陈旧**：把源码 rsync 到 `/tmp` 的干净副本（无 `.zig-cache`）后依旧复现。
-4. **不是日志噪声**：把 cache 里的 `std.log.warn` 全降为 `debug` 后**仍复现**。
-5. **不是 fuzz 测试引起**：给最小项目加一个 `std.testing.fuzz` 用例后**不出现**该行。
-6. **最小项目不复现**（单测试 + 官方默认 test runner + 同样的 `addTest`/`addRunArtifact` 写法）。
+```zig
+// No matter the result, we want to display error/warning messages.
+if (make_step.result_error_bundle.errorMessageCount() > 0 or
+    make_step.result_error_msgs.items.len > 0 or
+    make_step.result_stderr.len > 0)
+{
+    ... printErrorMessages(maker, step_index, ...);
+}
+```
 
-**机制分析（读工具链源码）**
-该行由 `lib/compiler/Maker.zig:3198` 打印，所在函数接收 `failing_step_index`，且同一函数内
-`Maker.zig:3094-3096` 对 `.success` / `.failure` / `.skipped` 三种状态写作 `unreachable`
-——即**该上报路径按设计只对"失败步骤"可达**。所以当前状态是：**运行器认定某步骤失败并打印了失败上报，
-最终却把整次构建判为成功**（这是工具链内部的不一致）。
+即：**只要某步骤产生了任何 stderr（哪怕该步骤完全成功），就调用 `printErrorMessages`**；
+而该函数在 verbose 上下文里会**无条件**打印 `failed command: <argv>`（同文件 `:3198`）。
+本仓的测试二进制会向 stderr 写**约 102 KB**（test runner 的告警 + 各超时/连接池用例的 `std.log.warn`），
+因此每次真正执行测试步骤都会看到那一行。
 
-**最可能的触发条件（未最终证实）**
-`test_runner.zig:23` 用 `Io.Threaded.global_single_threaded.io()` 承载**运行器的 stdio 协议**；
-而本仓大量生产路径（`cache.*`、`credential.*`、`officialaccount.*`、`pay.*` 的 `io` 字段默认值）
-在**测试进程内也从同一个全局单例取 io**，且部分用例会在**派生线程**里用它做 IO。
-`global_single_threaded` 并非线程安全 —— 并发使用可能让运行器的协议流出现一次异常，
-从而走一次失败上报（而测试结果本身都已经如实上报，故汇总仍是全通过）。
-这与"终端模式直接跑测试二进制稳定通过（非 0 次失败）"一致。
+**支持该结论的实测（可复核）**
+1. 步骤**缓存命中**（没有 spawn 子进程）时该行**不出现**；
+2. 直接执行测试二进制：stdout 0 字节、stderr 约 102 KB；
+3. 天然对照组 `zig build live-probe-test`（8 个用例、不写 stderr）**不出现**该行；
+4. 汇总始终是 `N/N tests passed` + `test success`，`zig build test` 退出码 0。
+
+**曾被怀疑但已排除的原因**
+- ~~"测试进程以非零码退出/崩溃"~~：lldb 附加实测 `exited with status = 0`，`abort`/`debug.defaultPanic`/SIGABRT 断点均未命中；早前记录过的 `test-*.ips` SIGABRT 属更早阶段的现象，现已不复现。
+- ~~"多个测试进程/构建系统重试"~~：`--verbose` 实测一次构建只 spawn 一次；构建系统对 run 步骤无重试机制。
+- ~~"陈旧缓存 / 日志噪声 / fuzz 用例"~~：干净缓存副本、把 `std.log.warn` 降为 `debug`、最小项目（含 fuzz 用例）逐一排除。
+- ~~"库代码与 test runner 共用 `Io.Threaded.global_single_threaded`（非线程安全）"~~：**2026-09 按此假设做了实测**——把全仓 59 处默认 io 换成本仓私有的进程级单例后，该行**仍然每次出现（10/10）**，假设被证伪。
+
+**顺带的实际收益（虽不修 #13，但值得保留）**
+前述 Io 私有化改动本身是一处**合理加固**：`std.Io.Threaded.global_single_threaded` 与 `std.Options.debug_io` 的默认值指向**同一个非线程安全实例**，而 test runner 用它承载 stdio 协议；库代码不再共用它，可降低"库与运行器互相干扰"的隐患。见 `src/util/default_io.zig`（文件头写明了动机、与本条的关系，以及"不要把 #13 当作本文件的修复目标"）。
 
 **影响**
-- CI 按退出码判定 → **不受影响**；本地看到该行时也不必惊慌，判断真结论看
-  `--summary all` 里的 `N/N tests passed` 与 `test success`。
+- CI 按退出码判定 → 不受影响；本地看到该行时按 `--summary all` 的 `N/N tests passed` 与 `test success` 判断真结论。
 - 唯一实质影响：日志噪声 + 容易被误读为"测试失败"。
 
 **缓解**
-- 需要干净输出时直接运行测试二进制：
-  `BIN=$(ls -t .zig-cache/o/*/test | head -1) && "$BIN"`（终端模式无协议，实测稳定）。
-- 长期缓解路径（若将来要彻底消掉）：把**测试进程内**的 Io 使用全部收敛到每实例私有实例
-  （即让除运行器之外没有任何代码从 `global_single_threaded` 取 io），或等工具链修好该上报路径。
+- 需要干净输出时直接运行测试二进制：`BIN=$(ls -t .zig-cache/o/*/test | head -1) && "$BIN"`。
+- 若将来希望彻底没有这行：让测试步骤**不写 stderr**（本仓测试刻意走 `std.log.warn` 超时路径，且 test runner 强制 `testing.log_level = .warn`，库侧没有干净的抑制手段）；或等上游调整该打印口径。
 
 **触发再评估的条件**
 Zig 工具链升级后；或该行**伴随** `zig build test` 退出码非 0（那才代表真实失败）。

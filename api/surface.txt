@@ -4385,6 +4385,8 @@ src/util/crypto.zig: sig pkcs5Pad(Allocator, []const u8) Allocator.Error![]u8
 src/util/crypto.zig: sig pkcs5Unpad([]const u8) []const u8
 src/util/crypto.zig: sig pkcs7Pad(Allocator, []const u8, usize) (Allocator.Error || error{InvalidArgument})![]u8
 src/util/crypto.zig: sig pkcs7Unpad([]const u8) []const u8
+src/util/default_io.zig: pub fn io
+src/util/default_io.zig: sig io() std.Io
 src/util/error.zig: field CommonError._allocator: ?std.mem.Allocator
 src/util/error.zig: field CommonError.api_name: []const u8
 src/util/error.zig: field CommonError.errcode: i64
