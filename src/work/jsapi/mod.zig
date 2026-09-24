@@ -54,6 +54,10 @@ pub const Js = struct {
     /// agent 类型 JsTicket handle；未初始化时 `getAgentConfig` 返回 `error.JsTicketHandleNotSet`。
     agent_ticket_handle: ?credential.JsTicketHandle = null,
 
+    /// `getConfig` / `getAgentConfig` 取当前时间戳 / 生成 `nonceStr` 所用的 `Io` 句柄。
+    /// 默认 `global_single_threaded`（与历史行为一致），宿主可用 `.io = ...` 注入。
+    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+
     const Self = @This();
 
     pub fn init(ctx: *Context) Self {
@@ -76,7 +80,8 @@ pub const Js = struct {
     /// 1. 若 `ticket_handle == null`，返回 `error.JsTicketHandleNotSet`。
     /// 2. 通过 `ctx.getAccessToken` 拿到 access_token。
     /// 3. 通过 `ticket_handle.getTicket` 拿到 jsapi_ticket。
-    /// 4. 生成 16 字节随机 `nonce_str`、调用 `util_time.getCurrTS` 拿 timestamp。
+    /// 4. 用注入的 `io` 生成 16 字节随机 `nonce_str`、取 timestamp
+    ///    （`util.util.randomStrWithIo` / `util.time.getCurrTSWithIo`）。
     /// 5. 拼 `jsapi_ticket=X&noncestr=Y&timestamp=Z&url=W`，SHA1 取小写 hex 作为 signature。
     /// 6. 返回 `Config`。
     ///
@@ -106,7 +111,7 @@ pub const Js = struct {
         const ticket = try h.getTicket(allocator, access_token);
         defer allocator.free(ticket);
 
-        return computeConfig(allocator, self.ctx.config.corp_id, ticket, uri);
+        return computeConfig(allocator, self.io, self.ctx.config.corp_id, ticket, uri);
     }
 };
 
@@ -116,20 +121,21 @@ pub const Js = struct {
 
 /// 计算 JS-SDK 配置的核心算法。
 ///
-/// `app_id` 通常传入 `corp_id`；`ticket` 是已经获取的 jsapi_ticket；
-/// `uri` 是当前页面 URL（不含 `#fragment`）。
+/// `io` 驱动 `timestamp` / `nonceStr` 的取值；`app_id` 通常传入 `corp_id`；
+/// `ticket` 是已经获取的 jsapi_ticket；`uri` 是当前页面 URL（不含 `#fragment`）。
 ///
 /// 错误集：`Allocator.Error`。
 fn computeConfig(
     allocator: std.mem.Allocator,
+    io: std.Io,
     app_id: []const u8,
     ticket: []const u8,
     uri: []const u8,
 ) !Config {
-    const nonce_str = try util_util.randomStr(allocator, 16);
+    const nonce_str = try util_util.randomStrWithIo(allocator, io, 16);
     errdefer allocator.free(nonce_str);
 
-    const timestamp = util_time.getCurrTS();
+    const timestamp = util_time.getCurrTSWithIo(io);
 
     // 拼接签名字符串（与 Go 一致：jsapi_ticket=X&noncestr=Y&timestamp=Z&url=W）。
     const to_sign = try std.fmt.allocPrint(
@@ -201,6 +207,7 @@ test "computeConfig 输出 40 字符小写 hex 的 signature" {
     const allocator = std.testing.allocator;
     var cfg = try computeConfig(
         allocator,
+        std.testing.io,
         "ww-test",
         "ticket_xyz",
         "https://example.com/page?x=1",
@@ -315,4 +322,47 @@ test "Js.getAgentConfig 未设置 agent handle 时返回 JsTicketHandleNotSet" {
 
     const result = j.getAgentConfig(allocator, "https://example.com/");
     try std.testing.expectError(error.JsTicketHandleNotSet, result);
+}
+
+// —— io 注入：timestamp / nonceStr 不再直接访问全局单例 ——
+
+/// 冻结时钟的可观测 `Io`：`now` 恒定返回 `frozen_ns`。
+const FixedIo = struct {
+    vtable: std.Io.VTable = undefined,
+
+    const frozen_ns: i96 = 1_700_000_000 * std.time.ns_per_s;
+
+    fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        return .{ .nanoseconds = frozen_ns };
+    }
+
+    fn io(self: *FixedIo) std.Io {
+        self.vtable = std.Io.Threaded.global_single_threaded.io().vtable.*;
+        self.vtable.now = now;
+        return .{ .userdata = null, .vtable = &self.vtable };
+    }
+};
+
+test "Js.getConfig 的 timestamp / nonceStr 取自注入的 io" {
+    const allocator = std.testing.allocator;
+    var fixed = FixedIo{};
+    var ak_state = FakeAccessTokenState{ .token = "ak-io" };
+    var corp_state = FakeTicketState{ .ticket = "corp-ticket" };
+
+    var ctx = Context{
+        .config = .{ .corp_id = "ww-io" },
+        .access_token_handle = makeFakeAccessTokenHandle(&ak_state),
+    };
+    var j = Js.init(&ctx);
+    j.io = fixed.io();
+    j.setJsTicketHandle(makeFakeTicketHandle(&corp_state));
+
+    var cfg = try j.getConfig(allocator, "https://example.com/");
+    defer cfg.deinit(allocator);
+    try std.testing.expectEqual(@as(i64, 1_700_000_000), cfg.timestamp);
+
+    // 冻结时钟播种的 PRNG 可复现；若仍走全局单例（真实时间）两次结果不会相同。
+    var cfg2 = try j.getConfig(allocator, "https://example.com/");
+    defer cfg2.deinit(allocator);
+    try std.testing.expectEqualStrings(cfg.nonce_str, cfg2.nonce_str);
 }

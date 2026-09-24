@@ -47,7 +47,9 @@ test "version 与 build.zig.zon 保持一致" {
     // 从 build.zig.zon 源码中提取 `.version = "X.Y.Z"` 做对账，
     // 防止常量与包清单再次漂移（历史上曾停留在 0.0.1 而 zon 已升到 0.4.x）。
     const allocator = std.testing.allocator;
-    const io = std.Options.debug_io;
+    // 测试由 test runner 托管一个 `Io` 实例（`std.testing.io`），
+    // 库代码不应访问 `std.Options.debug_io`（那是给 `std.debug` 用的）。
+    const io = std.testing.io;
     const zon = try std.Io.Dir.cwd().readFileAlloc(io, "build.zig.zon", allocator, .limited(64 * 1024));
     defer allocator.free(zon);
 

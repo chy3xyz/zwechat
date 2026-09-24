@@ -95,6 +95,10 @@ pub const Server = struct {
     handler: ?MessageHandler = null,
     handler_ctx: ?*anyopaque = null,
 
+    /// 回复的 `CreateTime` 与加密 IV 的随机源由该 `Io` 驱动。
+    /// 默认 `global_single_threaded`（与历史行为一致），宿主可用 `.io = ...` 注入。
+    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+
     const Self = @This();
 
     pub fn init(ctx: *Context, allocator: std.mem.Allocator) Self {
@@ -205,7 +209,7 @@ pub const Server = struct {
 
     /// 构造明文回复 XML（用于不加密模式，或作为加密前的内部 XML）。
     pub fn buildReplyXml(self: *Self, to_user: []const u8, from_user: []const u8, msg_type: []const u8, content: []const u8) ![]u8 {
-        const ts_str = try std.fmt.allocPrint(self.allocator, "{d}", .{util_time.getCurrTS()});
+        const ts_str = try std.fmt.allocPrint(self.allocator, "{d}", .{util_time.getCurrTSWithIo(self.io)});
         defer self.allocator.free(ts_str);
 
         var elements = [_]util_xml.XmlElement{
@@ -236,7 +240,7 @@ pub const Server = struct {
 
         // 16 字节随机 IV（AES-CBC PKCS#7 填充所需）
         var random: [16]u8 = undefined;
-        std.Io.Threaded.global_single_threaded.io().random(&random);
+        self.io.random(&random);
 
         // AES 加密（key 从 EncodingAESKey base64 解码而来）
         const key = try work_server.decodeAesKey(self.ctx.config.encoding_aes_key);
@@ -295,7 +299,7 @@ pub const Server = struct {
         if (self.handler) |handler| {
             if (try handler(self.handler_ctx orelse undefined, &inbound)) |reply| {
                 // 与 Go 参考（officialaccount server）一致：回复时间戳取当前时间。
-                const reply_ts = util_time.getCurrTS();
+                const reply_ts = util_time.getCurrTSWithIo(self.io);
                 return try self.buildEncryptedReply(
                     inbound.from_user, // 回复的 ToUserName 是原始发送者
                     inbound.corp_id, // 回复的 FromUserName 是 corp_id
@@ -531,7 +535,8 @@ test "smartbot serve POST 全流程：解密 → handler → 加密回复可再�
     var good = q;
     good.msg_signature = sig;
 
-    const reply_opt = try server.serve(good, true);    const reply = reply_opt orelse return error.TestUnexpectedResult;
+    const reply_opt = try server.serve(good, true);
+    const reply = reply_opt orelse return error.TestUnexpectedResult;
     defer allocator.free(reply);
     try std.testing.expect(handler_state.called);
 
@@ -585,4 +590,76 @@ test "smartbot serve GET 握手验签通过返回 echostr 明文" {
     var bad = q;
     bad.msg_signature = "0000000000000000000000000000000000000000";
     try std.testing.expect((try server.serve(bad, false)) == null);
+}
+
+// —— io 注入：CreateTime / 加密 IV 不再直接访问全局单例 ——
+
+/// 冻结时钟的可观测 `Io`：`now` 恒定返回 `frozen_ns`，`random` 填固定字节。
+const FixedIo = struct {
+    vtable: std.Io.VTable = undefined,
+
+    const frozen_ns: i96 = 1_700_000_000 * std.time.ns_per_s;
+
+    fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        return .{ .nanoseconds = frozen_ns };
+    }
+
+    fn random(_: ?*anyopaque, buf: []u8) void {
+        @memset(buf, 0xAB);
+    }
+
+    fn io(self: *FixedIo) std.Io {
+        self.vtable = std.Io.Threaded.global_single_threaded.io().vtable.*;
+        self.vtable.now = now;
+        self.vtable.random = random;
+        return .{ .userdata = null, .vtable = &self.vtable };
+    }
+};
+
+test "smartbot buildReplyXml 的 CreateTime 取自注入的 io（冻结时钟 → 固定时间戳）" {
+    const allocator = std.testing.allocator;
+    var fixed = FixedIo{};
+    var ctx = makeTestCtx();
+    var server = Server.init(&ctx, allocator);
+    server.io = fixed.io();
+
+    const xml = try server.buildReplyXml("lisi", test_corp_id, "text", "pong");
+    defer allocator.free(xml);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<CreateTime><![CDATA[1700000000]]></CreateTime>") != null);
+}
+
+test "smartbot serve 回复的 TimeStamp 与加密 IV 取自注入的 io（冻结 io → 回复可复现）" {
+    const allocator = std.testing.allocator;
+    var fixed = FixedIo{};
+    var ctx = makeTestCtx();
+    var server = Server.init(&ctx, allocator);
+    server.io = fixed.io();
+
+    var handler_state = ServeHandlerState{};
+    server.setMessageHandler(serveTestHandler, &handler_state);
+
+    const inner_xml = "<xml><ToUserName>ww1234567890abcdef</ToUserName><FromUserName>lisi</FromUserName><CreateTime>1721641800</CreateTime><MsgType>text</MsgType><Content>ping</Content></xml>";
+    const body = try makeEncryptedBody(allocator, inner_xml);
+    defer allocator.free(body);
+    server.setRawBody(body);
+
+    const q = Query{ .timestamp = "1721641800", .nonce = "nonce_io" };
+    var doc = try util_xml.parse(allocator, body);
+    defer doc.deinit();
+    const sig = try server.computeSignature(&[_][]const u8{ test_token, q.timestamp, q.nonce, doc.get("Encrypt").? });
+    defer allocator.free(sig);
+    var good = q;
+    good.msg_signature = sig;
+
+    const first = (try server.serve(good, true)).?;
+    defer allocator.free(first);
+    const second = (try server.serve(good, true)).?;
+    defer allocator.free(second);
+
+    // 回复时间戳取注入 io 的冻结时间；IV 取注入 io 的固定随机源，
+    // 两次回复因此逐字节一致（若走全局单例，IV 与时间戳都会不同）。
+    var rdoc = try util_xml.parse(allocator, first);
+    defer rdoc.deinit();
+    try std.testing.expectEqualStrings("1700000000", rdoc.get("TimeStamp").?);
+    try std.testing.expectEqualStrings(first, second);
 }

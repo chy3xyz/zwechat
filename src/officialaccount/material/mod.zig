@@ -107,6 +107,9 @@ pub const AddMaterialResult = struct {
 pub const Material = struct {
     ctx: *Context,
     allocator: std.mem.Allocator,
+    /// 文件系统操作（错误体回读 / 删除）所用的 `Io` 句柄。
+    /// 默认 `global_single_threaded`，宿主可注入自己的 `Io` 实例。
+    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
 
     const Self = @This();
 
@@ -427,7 +430,7 @@ pub const Material = struct {
     fn rejectJsonErrorFile(self: *Self, file_path: []const u8, written: u64, api_name: []const u8) !void {
         const peek_bytes: usize = 4096;
         if (written == 0 or written > peek_bytes) return;
-        const io = std.Io.Threaded.global_single_threaded.io();
+        const io = self.io;
         const body = std.Io.Dir.cwd().readFileAlloc(io, file_path, self.allocator, .limited(peek_bytes)) catch return;
         defer self.allocator.free(body);
         _ = util_error.handleFileResponse(body, api_name) catch |err| {
@@ -849,7 +852,7 @@ test "Material.addVideoFromBytes multipart 含 media 与 description 字段" {
 }
 
 test "Material.addVideo 从临时文件读取视频内容" {
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = std.testing.io;
     const tmp_path = "zwechat_oa_material_addvideo_test.bin";
     const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{});
     defer {
@@ -932,7 +935,7 @@ test "Material.getMediaWithLimit 超限返回 ResponseTooLarge、限内正常" {
 }
 
 test "Material.getMediaToFile 落盘、超限清文件、JSON 错误体清文件" {
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = std.testing.io;
     const tmp_path = "zwechat_oa_material_getmedia_tofile_test.bin";
     defer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
 
@@ -950,6 +953,8 @@ test "Material.getMediaToFile 落盘、超限清文件、JSON 错误体清文件
     var state = TestTokenState{ .token = "stub-ak" };
     var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
     var m = Material.init(&ctx, alloc);
+    // 注入宿主 `Io`：错误体回读 / 删除落盘文件都走这个句柄（默认值是同一实例的兜底）。
+    m.io = io;
 
     const written = try m.getMediaToFile("MEDIA_DL_1", tmp_path);
     try std.testing.expectEqual(@as(u64, 18), written);
@@ -1053,7 +1058,7 @@ test "Material.addMaterialFromBytes 图片上传：URL type=image 且 multipart 
 }
 
 test "Material.addMaterial 语音素材：type=voice、文件名取路径末段" {
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = std.testing.io;
     const tmp_path = "zwechat_oa_material_addvoice_test.bin";
     const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{});
     defer {

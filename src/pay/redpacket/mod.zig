@@ -48,6 +48,10 @@ pub const Redpacket = struct {
     transport: ?util_http.HttpClient.Transport = null,
     transport_ctx: ?*anyopaque = null,
 
+    /// 请求 `nonce_str` 由该 `Io` 驱动。默认 `global_single_threaded`
+    /// （与历史行为一致），宿主可用 `.io = ...` 注入。
+    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+
     const Self = @This();
 
     pub fn init(cfg: Config) Self {
@@ -61,7 +65,7 @@ pub const Redpacket = struct {
     }
 
     pub fn sendNormal(self: *Self, allocator: std.mem.Allocator, p: RedpacketParams) !RedpacketResult {
-        const nonce_str = try util_util.randomStr(allocator, 32);
+        const nonce_str = try util_util.randomStrWithIo(allocator, self.io, 32);
         defer allocator.free(nonce_str);
 
         const amount_str = try std.fmt.allocPrint(allocator, "{d}", .{p.total_amount});
@@ -113,6 +117,8 @@ pub const Redpacket = struct {
         var client = util_http.HttpClient.init(allocator);
         defer client.deinit();
         if (self.transport) |t| client.setTransport(t, self.transport_ctx);
+        // 发红包需要 TLS 双向认证（PKCS#12）：走仓库内自建的 mTLS 通道，需要
+        // `zig build -Dmtls=true` 构建（默认构建会返回 error.MtlsNotEnabled）。
         const url = "https://api.mch.weixin.qq.com/mmpaymkttransfers/sendredpack";
         const body = if (self.cfg.root_ca.len > 0)
             try client.postXMLWithTLS(url, xml_body, self.cfg.root_ca, self.cfg.mch_id)
@@ -183,4 +189,91 @@ test "sendNormal 返回值字段指向内部缓冲区（UAF 回归）" {
     try std.testing.expectEqualStrings("OK", result.return_msg);
     try std.testing.expectEqualStrings("SUCCESS", result.result_code);
     try std.testing.expectEqualStrings("bill-1", result.mch_billno);
+}
+
+// —— io 注入：nonce_str 不再直接访问全局单例 ——
+
+/// 冻结时钟的可观测 `Io`：`now` 恒定返回 `frozen_ns`。
+const FixedIo = struct {
+    vtable: std.Io.VTable = undefined,
+
+    const frozen_ns: i96 = 1_700_000_000 * std.time.ns_per_s;
+
+    fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        return .{ .nanoseconds = frozen_ns };
+    }
+
+    fn io(self: *FixedIo) std.Io {
+        self.vtable = std.Io.Threaded.global_single_threaded.io().vtable.*;
+        self.vtable.now = now;
+        return .{ .userdata = null, .vtable = &self.vtable };
+    }
+};
+
+/// 捕获请求 payload 的 transport，并从中取出实际发送的 `<nonce_str>`。
+const NonceCapture = struct {
+    payload: ?[]u8 = null,
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *NonceCapture) void {
+        if (self.payload) |p| self.allocator.free(p);
+    }
+
+    fn dispatch(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        method: std.http.Method,
+        payload: []const u8,
+        content_type: ?[]const u8,
+    ) anyerror![]u8 {
+        _ = uri;
+        _ = method;
+        _ = content_type;
+        const self: *NonceCapture = @ptrCast(@alignCast(ctx));
+        if (self.payload) |p| self.allocator.free(p);
+        self.payload = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, "<xml><return_code>SUCCESS</return_code><result_code>SUCCESS</result_code></xml>");
+    }
+
+    fn nonce(self: *const NonceCapture, allocator: std.mem.Allocator) ![]u8 {
+        var doc = try util_xml.parse(allocator, self.payload.?);
+        defer doc.deinit();
+        return allocator.dupe(u8, doc.get("nonce_str") orelse "");
+    }
+};
+
+test "sendNormal 的 nonce_str 取自注入的 io（冻结时钟 → 可复现）" {
+    const allocator = std.testing.allocator;
+    var fixed = FixedIo{};
+    var cap = NonceCapture{ .allocator = allocator };
+    defer cap.deinit();
+
+    var r = Redpacket.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "test_key" });
+    r.io = fixed.io();
+    r.setTransport(NonceCapture.dispatch, &cap);
+
+    const p = RedpacketParams{
+        .mch_billno = "bill-1",
+        .send_name = "x",
+        .act_name = "a",
+        .re_openid = "ox",
+        .total_amount = 100,
+        .total_num = 1,
+        .wishing = "w",
+    };
+
+    var r1 = try r.sendNormal(allocator, p);
+    defer r1.deinit();
+    const n1 = try cap.nonce(allocator);
+    defer allocator.free(n1);
+
+    var r2 = try r.sendNormal(allocator, p);
+    defer r2.deinit();
+    const n2 = try cap.nonce(allocator);
+    defer allocator.free(n2);
+
+    try std.testing.expectEqual(@as(usize, 32), n1.len);
+    // 冻结时钟播种的 PRNG 可复现；若仍走全局单例（真实时间）两次结果不会相同。
+    try std.testing.expectEqualStrings(n1, n2);
 }

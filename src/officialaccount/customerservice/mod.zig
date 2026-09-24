@@ -463,7 +463,7 @@ test "onlineList 解析 kf_online_list" {
 }
 
 test "uploadHeadImg multipart 上传头像文件" {
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = std.testing.io;
     const tmp_path = "zwechat_oa_cs_headimg_test.png";
     const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{});
     defer {
@@ -594,7 +594,7 @@ test "listAccounts 40001 自愈：作废缓存 → 换新 token 重试一次并�
 
 test "uploadHeadImg 40001 自愈：重试后成功且第二次请求带新 token" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = std.testing.io;
     const tmp_path = "zwechat_oa_cs_heal_headimg_test.png";
     const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{});
     defer {

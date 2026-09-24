@@ -134,6 +134,10 @@ pub const Order = struct {
     transport: ?util_http.HttpClient.Transport = null,
     transport_ctx: ?*anyopaque = null,
 
+    /// 下单 / 查询 / 关闭 / 拉起支付所需的 `nonce_str` 与 `timestamp` 由该 `Io` 驱动。
+    /// 默认 `global_single_threaded`（与历史行为一致），宿主可用 `.io = ...` 注入。
+    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+
     const Self = @This();
 
     pub fn init(cfg: Config) Self {
@@ -148,7 +152,7 @@ pub const Order = struct {
 
     /// 统一下单（POST XML）。
     pub fn prePayOrder(self: *Self, allocator: std.mem.Allocator, p: Params) !PreOrder {
-        const nonce_str = try util_util.randomStr(allocator, 32);
+        const nonce_str = try util_util.randomStrWithIo(allocator, self.io, 32);
         defer allocator.free(nonce_str);
 
         // 构造签名：参与签名的参数必须与 XML 请求体完全一致
@@ -209,7 +213,7 @@ pub const Order = struct {
 
     /// 查询订单（POST XML）。
     pub fn queryOrder(self: *Self, allocator: std.mem.Allocator, out_trade_no: []const u8) !QueryOrderResult {
-        const nonce_str = try util_util.randomStr(allocator, 32);
+        const nonce_str = try util_util.randomStrWithIo(allocator, self.io, 32);
         defer allocator.free(nonce_str);
 
         const params = [_]util_param.Param{
@@ -255,7 +259,7 @@ pub const Order = struct {
 
     /// 关闭订单（POST XML）。
     pub fn closeOrder(self: *Self, allocator: std.mem.Allocator, out_trade_no: []const u8) !CloseOrderResult {
-        const nonce_str = try util_util.randomStr(allocator, 32);
+        const nonce_str = try util_util.randomStrWithIo(allocator, self.io, 32);
         defer allocator.free(nonce_str);
 
         const params = [_]util_param.Param{
@@ -304,10 +308,10 @@ pub const Order = struct {
 
     /// 构造 APP 拉起支付参数。
     pub fn bridgeAppConfig(self: *Self, allocator: std.mem.Allocator, pre_order: PreOrder) !AppConfig {
-        const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{util_time.getCurrTS()});
+        const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{util_time.getCurrTSWithIo(self.io)});
         defer allocator.free(timestamp);
 
-        const nonce_str = try util_util.randomStr(allocator, 32);
+        const nonce_str = try util_util.randomStrWithIo(allocator, self.io, 32);
         defer allocator.free(nonce_str);
 
         var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -336,10 +340,10 @@ pub const Order = struct {
     ///
     /// 签名算法由 `p.sign_type` 决定（与上游 Go 版一致，修复前恒为 MD5）。
     pub fn bridgeConfig(self: *Self, allocator: std.mem.Allocator, p: Params, pre_order: PreOrder) !BridgeConfig {
-        const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{util_time.getCurrTS()});
+        const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{util_time.getCurrTSWithIo(self.io)});
         defer allocator.free(timestamp);
 
-        const nonce_str = try util_util.randomStr(allocator, 32);
+        const nonce_str = try util_util.randomStrWithIo(allocator, self.io, 32);
         defer allocator.free(nonce_str);
 
         const sign_md5 = try bridgeJsPaySign(
@@ -697,4 +701,106 @@ test "bridgeConfig 透传 sign_type（修复前恒为 MD5）" {
         allocator.free(@constCast(cfg.pay_sign));
     }
     try std.testing.expectEqualStrings("HMAC-SHA256", cfg.sign_type);
+}
+
+// —— io 注入：nonce_str / timestamp 不再直接访问全局单例 ——
+
+/// 冻结时钟的可观测 `Io`：`now` 恒定返回 `frozen_ns`。
+const FixedIo = struct {
+    vtable: std.Io.VTable = undefined,
+
+    const frozen_ns: i96 = 1_700_000_000 * std.time.ns_per_s;
+
+    fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        return .{ .nanoseconds = frozen_ns };
+    }
+
+    fn io(self: *FixedIo) std.Io {
+        self.vtable = std.Io.Threaded.global_single_threaded.io().vtable.*;
+        self.vtable.now = now;
+        return .{ .userdata = null, .vtable = &self.vtable };
+    }
+};
+
+test "bridgeConfig / bridgeAppConfig 的 timestamp 与 nonce_str 取自注入的 io" {
+    const allocator = std.testing.allocator;
+    var fixed = FixedIo{};
+    const params = Params{
+        .total_fee = "100",
+        .create_ip = "127.0.0.1",
+        .body = "test",
+        .out_trade_no = "t-1",
+        .open_id = "ox",
+        .trade_type = "JSAPI",
+        .notify_url = "https://example.com/cb",
+    };
+
+    var o = Order.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "key" });
+    o.io = fixed.io();
+    var pre: PreOrder = .{ .prepay_id = "p1" };
+    defer pre.deinit();
+
+    const cfg = try o.bridgeConfig(allocator, params, pre);
+    defer {
+        allocator.free(@constCast(cfg.timestamp));
+        allocator.free(@constCast(cfg.nonce_str));
+        allocator.free(@constCast(cfg.package));
+        allocator.free(@constCast(cfg.pay_sign));
+    }
+    try std.testing.expectEqualStrings("1700000000", cfg.timestamp);
+
+    // 冻结时钟播种的 PRNG：两次调用得到的 nonce_str 完全一致，
+    // 证明 randomStr 走的是注入的 io 而不是全局单例（后者取真实时间，几乎不可能重复）。
+    const cfg2 = try o.bridgeConfig(allocator, params, pre);
+    defer {
+        allocator.free(@constCast(cfg2.timestamp));
+        allocator.free(@constCast(cfg2.nonce_str));
+        allocator.free(@constCast(cfg2.package));
+        allocator.free(@constCast(cfg2.pay_sign));
+    }
+    try std.testing.expectEqualStrings(cfg.nonce_str, cfg2.nonce_str);
+
+    const app = try o.bridgeAppConfig(allocator, pre);
+    defer {
+        allocator.free(@constCast(app.appid));
+        allocator.free(@constCast(app.partnerid));
+        allocator.free(@constCast(app.prepayid));
+        allocator.free(@constCast(app.nonce_str));
+        allocator.free(@constCast(app.timestamp));
+        allocator.free(@constCast(app.sign));
+    }
+    try std.testing.expectEqualStrings("1700000000", app.timestamp);
+}
+
+test "Order.io 默认值可用（未注入时 nonce_str 每次不同）" {
+    const allocator = std.testing.allocator;
+    var o = Order.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "key" });
+    var pre: PreOrder = .{ .prepay_id = "p1" };
+    defer pre.deinit();
+    const params = Params{
+        .total_fee = "100",
+        .create_ip = "127.0.0.1",
+        .body = "test",
+        .out_trade_no = "t-1",
+        .open_id = "ox",
+        .trade_type = "JSAPI",
+        .notify_url = "https://example.com/cb",
+    };
+
+    const a = try o.bridgeConfig(allocator, params, pre);
+    defer {
+        allocator.free(@constCast(a.timestamp));
+        allocator.free(@constCast(a.nonce_str));
+        allocator.free(@constCast(a.package));
+        allocator.free(@constCast(a.pay_sign));
+    }
+    const b = try o.bridgeConfig(allocator, params, pre);
+    defer {
+        allocator.free(@constCast(b.timestamp));
+        allocator.free(@constCast(b.nonce_str));
+        allocator.free(@constCast(b.package));
+        allocator.free(@constCast(b.pay_sign));
+    }
+    try std.testing.expect(!std.mem.eql(u8, a.nonce_str, b.nonce_str));
+    try std.testing.expectEqual(@as(usize, 32), a.nonce_str.len);
 }

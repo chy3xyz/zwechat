@@ -46,6 +46,7 @@ test "pay/v3 模块导出" {
     // （否则其 inline test 在懒分析下可能被整文件丢弃）。
     var transfer_v3 = TransferV3.init(.{ .app_id = "wx-demo", .mch_id = "1900000109" });
     transfer_v3.setTransport(null, null);
+    transfer_v3.setHeaderTransport(null, null);
     try std.testing.expectEqualStrings("wx-demo", transfer_v3.cfg.app_id);
     _ = TransferParams;
     _ = TransferSceneReportInfo;

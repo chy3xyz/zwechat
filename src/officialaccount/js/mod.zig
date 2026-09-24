@@ -36,6 +36,10 @@ pub const Js = struct {
     /// JsTicket handle；未初始化时 `getConfig` 返回 `error.JsTicketHandleNotSet`。
     ticket_handle: ?credential.JsTicketHandle = null,
 
+    /// `getConfig` 取当前时间戳 / 生成 `nonceStr` 所用的 `Io` 句柄。
+    /// 默认 `global_single_threaded`（与历史行为一致），宿主可用 `.io = ...` 注入。
+    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+
     const Self = @This();
 
     pub fn init(ctx: *Context) Self {
@@ -60,9 +64,9 @@ pub const Js = struct {
         const ticket = try handle.getTicket(allocator, access_token);
         defer allocator.free(ticket);
 
-        const nonce_str = try util_util.randomStr(allocator, 16);
+        const nonce_str = try util_util.randomStrWithIo(allocator, self.io, 16);
         errdefer allocator.free(nonce_str);
-        const timestamp = util_time.getCurrTS();
+        const timestamp = util_time.getCurrTSWithIo(self.io);
 
         // 与 Go 对齐：signature = SHA1("jsapi_ticket=..&noncestr=..&timestamp=..&url=..")
         // （Go 侧 util.Signature 以单个字符串入参，排序不影响结果，即对整个拼接串做 SHA1）。
@@ -88,14 +92,7 @@ pub const Js = struct {
 fn sha1Hex(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]u8 {
     var digest: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
     std.crypto.hash.Sha1.hash(s, &digest, .{});
-    const hex = try allocator.alloc(u8, digest.len * 2);
-    errdefer allocator.free(hex);
-    const hex_lower = "0123456789abcdef";
-    for (digest, 0..) |b, i| {
-        hex[i * 2] = hex_lower[b >> 4];
-        hex[i * 2 + 1] = hex_lower[b & 0x0F];
-    }
-    return hex;
+    return allocator.dupe(u8, &std.fmt.bytesToHex(&digest, .lower));
 }
 
 test "Js.init 持有 ctx" {
@@ -185,4 +182,41 @@ test "getConfig 未注入 ticket handle 返回 JsTicketHandleNotSet" {
     var ctx = makeCtx("wx-js-sig");
     var j = Js.init(&ctx);
     try std.testing.expectError(error.JsTicketHandleNotSet, j.getConfig(allocator, "https://example.com/"));
+}
+
+// —— io 注入：timestamp / nonceStr 不再直接访问全局单例 ——
+
+/// 冻结时钟的可观测 `Io`：`now` 恒定返回 `frozen_ns`。
+const FixedIo = struct {
+    vtable: std.Io.VTable = undefined,
+
+    const frozen_ns: i96 = 1_700_000_000 * std.time.ns_per_s;
+
+    fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        return .{ .nanoseconds = frozen_ns };
+    }
+
+    fn io(self: *FixedIo) std.Io {
+        self.vtable = std.Io.Threaded.global_single_threaded.io().vtable.*;
+        self.vtable.now = now;
+        return .{ .userdata = null, .vtable = &self.vtable };
+    }
+};
+
+test "getConfig 的 timestamp / nonceStr 取自注入的 io" {
+    const allocator = std.testing.allocator;
+    var fixed = FixedIo{};
+    var ctx = makeCtx("wx-js-io");
+    var j = Js.init(&ctx);
+    j.io = fixed.io();
+    j.setJsTicketHandle(.{ .ptr = undefined, .vtable = &ticket_vtable });
+
+    var cfg = try j.getConfig(allocator, "https://example.com/page");
+    defer cfg.deinit(allocator);
+    try std.testing.expectEqual(@as(i64, 1_700_000_000), cfg.timestamp);
+
+    // 注入 io 后 nonceStr 由冻结时钟播种，两次调用可复现（证明走的是注入的 io）。
+    var cfg2 = try j.getConfig(allocator, "https://example.com/page");
+    defer cfg2.deinit(allocator);
+    try std.testing.expectEqualStrings(cfg.nonce_str, cfg2.nonce_str);
 }

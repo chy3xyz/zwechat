@@ -12,6 +12,7 @@ const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
 const util_xml = @import("../../util/xml.zig");
+const util_time = @import("../../util/time.zig");
 
 /// 消息类型（与 Go `MsgType` 一一对应）。
 pub const MsgType = enum {
@@ -189,6 +190,10 @@ pub const Reply = struct {
     /// 载荷 — 根据 msg_type 选择对应的具体类型。
     data: ReplyData,
 
+    /// `format` 构造被动回复 XML 时取 `CreateTime` 所用的 `Io` 句柄。
+    /// 默认 `global_single_threaded`（与历史行为一致），宿主可用 `.io = ...` 注入。
+    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+
     pub const ReplyData = union(enum) {
         text: TextReply,
         image: ImageReply,
@@ -209,22 +214,27 @@ pub const Reply = struct {
 
     pub fn format(self: Reply, allocator: std.mem.Allocator, to_user: []const u8, from_user: []const u8) ![]u8 {
         return switch (self.data) {
-            .text => |t| formatText(allocator, to_user, from_user, t.content),
-            .image => |i| formatImage(allocator, to_user, from_user, i.media_id),
-            .voice => |v| formatVoice(allocator, to_user, from_user, v.media_id),
-            .video => |v| formatVideo(allocator, to_user, from_user, v.media_id, v.title, v.description),
-            .music => |m| formatMusic(allocator, to_user, from_user, m),
-            .news => |n| formatNews(allocator, to_user, from_user, n.articles),
-            .miniprogrampage => |mp| formatMiniprogramPage(allocator, to_user, from_user, mp),
-            .transfer => |ti| formatTransfer(allocator, to_user, from_user, ti),
+            .text => |t| formatText(allocator, self.io, to_user, from_user, t.content),
+            .image => |i| formatImage(allocator, self.io, to_user, from_user, i.media_id),
+            .voice => |v| formatVoice(allocator, self.io, to_user, from_user, v.media_id),
+            .video => |v| formatVideo(allocator, self.io, to_user, from_user, v.media_id, v.title, v.description),
+            .music => |m| formatMusic(allocator, self.io, to_user, from_user, m),
+            .news => |n| formatNews(allocator, self.io, to_user, from_user, n.articles),
+            .miniprogrampage => |mp| formatMiniprogramPage(allocator, self.io, to_user, from_user, mp),
+            .transfer => |ti| formatTransfer(allocator, self.io, to_user, from_user, ti),
             .raw_xml => |r| allocator.dupe(u8, r.content) catch @as(anyerror![]u8, error.OutOfMemory),
         };
     }
 };
 
+/// 统一的 `CreateTime` 取值：由调用方注入的 `io` 驱动（不再直接访问全局单例）。
+fn createTimeStr(allocator: std.mem.Allocator, io: std.Io) std.mem.Allocator.Error![]u8 {
+    return std.fmt.allocPrint(allocator, "{d}", .{util_time.getCurrTSWithIo(io)});
+}
+
 /// 序列化为微信被动回复的文本 XML（明文模式）。
-fn formatText(allocator: std.mem.Allocator, to: []const u8, from: []const u8, content: []const u8) ![]u8 {
-    const ts_str = try std.fmt.allocPrint(allocator, "{d}", .{std.Io.Clock.now(.real, std.Options.debug_io).toSeconds()});
+fn formatText(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []const u8, content: []const u8) ![]u8 {
+    const ts_str = try createTimeStr(allocator, io);
     defer allocator.free(ts_str);
     const elements = [_]util_xml.XmlElement{
         .{ .key = "ToUserName", .value = to },
@@ -236,8 +246,8 @@ fn formatText(allocator: std.mem.Allocator, to: []const u8, from: []const u8, co
     return util_xml.serialize(allocator, "xml", &elements);
 }
 
-fn formatImage(allocator: std.mem.Allocator, to: []const u8, from: []const u8, media_id: []const u8) ![]u8 {
-    const ts_str = try std.fmt.allocPrint(allocator, "{d}", .{std.Io.Clock.now(.real, std.Options.debug_io).toSeconds()});
+fn formatImage(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []const u8, media_id: []const u8) ![]u8 {
+    const ts_str = try createTimeStr(allocator, io);
     defer allocator.free(ts_str);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
@@ -249,8 +259,8 @@ fn formatImage(allocator: std.mem.Allocator, to: []const u8, from: []const u8, m
     return buf.toOwnedSlice(allocator);
 }
 
-fn formatTransfer(allocator: std.mem.Allocator, to: []const u8, from: []const u8, trans_info: ?TransInfo) ![]u8 {
-    const ts_str = try std.fmt.allocPrint(allocator, "{d}", .{std.Io.Clock.now(.real, std.Options.debug_io).toSeconds()});
+fn formatTransfer(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []const u8, trans_info: ?TransInfo) ![]u8 {
+    const ts_str = try createTimeStr(allocator, io);
     defer allocator.free(ts_str);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
@@ -265,8 +275,8 @@ fn formatTransfer(allocator: std.mem.Allocator, to: []const u8, from: []const u8
     return buf.toOwnedSlice(allocator);
 }
 
-fn formatVoice(allocator: std.mem.Allocator, to: []const u8, from: []const u8, media_id: []const u8) ![]u8 {
-    const ts_str = try std.fmt.allocPrint(allocator, "{d}", .{std.Io.Clock.now(.real, std.Options.debug_io).toSeconds()});
+fn formatVoice(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []const u8, media_id: []const u8) ![]u8 {
+    const ts_str = try createTimeStr(allocator, io);
     defer allocator.free(ts_str);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
@@ -278,8 +288,8 @@ fn formatVoice(allocator: std.mem.Allocator, to: []const u8, from: []const u8, m
     return buf.toOwnedSlice(allocator);
 }
 
-fn formatVideo(allocator: std.mem.Allocator, to: []const u8, from: []const u8, media_id: []const u8, title: []const u8, description: []const u8) ![]u8 {
-    const ts_str = try std.fmt.allocPrint(allocator, "{d}", .{std.Io.Clock.now(.real, std.Options.debug_io).toSeconds()});
+fn formatVideo(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []const u8, media_id: []const u8, title: []const u8, description: []const u8) ![]u8 {
+    const ts_str = try createTimeStr(allocator, io);
     defer allocator.free(ts_str);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
@@ -293,8 +303,8 @@ fn formatVideo(allocator: std.mem.Allocator, to: []const u8, from: []const u8, m
     return buf.toOwnedSlice(allocator);
 }
 
-fn formatMusic(allocator: std.mem.Allocator, to: []const u8, from: []const u8, m: MusicReply) ![]u8 {
-    const ts_str = try std.fmt.allocPrint(allocator, "{d}", .{std.Io.Clock.now(.real, std.Options.debug_io).toSeconds()});
+fn formatMusic(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []const u8, m: MusicReply) ![]u8 {
+    const ts_str = try createTimeStr(allocator, io);
     defer allocator.free(ts_str);
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -308,8 +318,8 @@ fn formatMusic(allocator: std.mem.Allocator, to: []const u8, from: []const u8, m
     return buf.toOwnedSlice(allocator);
 }
 
-fn formatNews(allocator: std.mem.Allocator, to: []const u8, from: []const u8, articles: []const NewsArticle) ![]u8 {
-    const ts_str = try std.fmt.allocPrint(allocator, "{d}", .{std.Io.Clock.now(.real, std.Options.debug_io).toSeconds()});
+fn formatNews(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []const u8, articles: []const NewsArticle) ![]u8 {
+    const ts_str = try createTimeStr(allocator, io);
     defer allocator.free(ts_str);
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -325,8 +335,8 @@ fn formatNews(allocator: std.mem.Allocator, to: []const u8, from: []const u8, ar
     return buf.toOwnedSlice(allocator);
 }
 
-fn formatMiniprogramPage(allocator: std.mem.Allocator, to: []const u8, from: []const u8, mp: MiniprogramPageReply) ![]u8 {
-    const ts_str = try std.fmt.allocPrint(allocator, "{d}", .{std.Io.Clock.now(.real, std.Options.debug_io).toSeconds()});
+fn formatMiniprogramPage(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []const u8, mp: MiniprogramPageReply) ![]u8 {
+    const ts_str = try createTimeStr(allocator, io);
     defer allocator.free(ts_str);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
@@ -1236,6 +1246,62 @@ test "Reply.format miniprogrampage produces nested XML" {
     try std.testing.expect(std.mem.indexOf(u8, xml, "<PagePath><![CDATA[pages/index]]></PagePath>") != null);
     try std.testing.expect(std.mem.indexOf(u8, xml, "<ThumbMediaId><![CDATA[thumb_123]]></ThumbMediaId>") != null);
     try std.testing.expect(std.mem.indexOf(u8, xml, "</MiniprogramPage>") != null);
+}
+
+// —— io 注入：被动回复的 CreateTime 不再直接访问全局单例 ——
+
+/// 冻结时钟的可观测 `Io`：`now` 恒定返回 `frozen_ns`，`random` 填固定字节。
+/// 用来证明注入的 `io` 真的驱动了回复 XML 里的 `CreateTime`。
+const FixedIo = struct {
+    vtable: std.Io.VTable = undefined,
+
+    const frozen_ns: i96 = 1_700_000_000 * std.time.ns_per_s;
+
+    fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        return .{ .nanoseconds = frozen_ns };
+    }
+
+    fn random(_: ?*anyopaque, buf: []u8) void {
+        @memset(buf, 0xAB);
+    }
+
+    fn io(self: *FixedIo) std.Io {
+        self.vtable = std.Io.Threaded.global_single_threaded.io().vtable.*;
+        self.vtable.now = now;
+        self.vtable.random = random;
+        return .{ .userdata = null, .vtable = &self.vtable };
+    }
+};
+
+test "Reply.format 的 CreateTime 取自注入的 io（冻结时钟 → 固定时间戳）" {
+    const allocator = std.testing.allocator;
+    var fixed = FixedIo{};
+    const reply = Reply{
+        .msg_type = .image,
+        .data = .{ .image = .{ .media_id = "m1" } },
+        .io = fixed.io(),
+    };
+    const xml = try reply.format(allocator, "toUser", "fromUser");
+    defer allocator.free(xml);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<CreateTime>1700000000</CreateTime>") != null);
+}
+
+test "Reply.io 默认值可用（未注入时取真实当前时间）" {
+    const allocator = std.testing.allocator;
+    const reply = Reply{
+        .msg_type = .image,
+        .data = .{ .image = .{ .media_id = "m1" } },
+    };
+    const xml = try reply.format(allocator, "toUser", "fromUser");
+    defer allocator.free(xml);
+
+    const open = "<CreateTime>";
+    const start = std.mem.indexOf(u8, xml, open).? + open.len;
+    const end = std.mem.indexOfScalarPos(u8, xml, start, '<').?;
+    const ts = try std.fmt.parseInt(i64, xml[start..end], 10);
+
+    const now = util_time.getCurrTSWithIo(std.Io.Threaded.global_single_threaded.io());
+    try std.testing.expect(ts <= now and now - ts <= 5);
 }
 
 // —— token 失效自愈 / 非 token 错误不重试 ——

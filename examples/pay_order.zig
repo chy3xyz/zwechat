@@ -11,10 +11,11 @@
 const std = @import("std");
 const zwechat = @import("zwechat");
 
-pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+pub fn main(init: std.process.Init) !void {
+    // 示例为一次性进程：临时分配统一走进程级 arena（`init.arena`）。
+    // 本示例不碰缓存 / 凭据获取器，因此不需要 `init.io`；
+    // 需要注入 `Io` 的示例见 officialaccount_server.zig / work_robot.zig。
+    const allocator = init.arena.allocator();
 
     std.debug.print("=== zwechat: 微信支付统一下单示例 ===\n", .{});
 

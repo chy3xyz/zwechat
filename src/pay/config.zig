@@ -14,6 +14,10 @@ pub const Config = struct {
     notify_url: []const u8 = "",
     /// 商户证书 P12 文件路径（退款 / 企业付款 / 红包等需 mTLS 的接口使用）。
     /// 密码固定为商户号 `mch_id`（与 Go 参考实现一致）。
+    ///
+    /// 非空时上述接口走 mTLS：需要 `zig build -Dmtls=true` 构建（仓库内自建的
+    /// 运行时 dlopen OpenSSL 通道）；默认构建会返回 `error.MtlsNotEnabled`，
+    /// 此时可用 v3 接口（`src/pay/v3/`，RSA 签名，无需客户端证书）替代。
     root_ca: []const u8 = "",
 };
 

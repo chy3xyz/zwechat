@@ -144,10 +144,12 @@ pub const TransferNotifyResource = struct {
 pub const TransferV3 = struct {
     cfg: Config,
 
-    /// 可选的可注入 transport（测试用，注入 MockTransport 拦截 HTTP，
-    /// 此时跳过本地 RSA 签名，直接以 mock 响应返回）。
+    /// 可选的可注入 transport（测试用，注入 MockTransport 拦截 HTTP）。
     transport: ?util_http.HttpClient.Transport = null,
     transport_ctx: ?*anyopaque = null,
+    /// 带请求头的 mock transport（测试用）：设置后优先于 `transport`，可直接
+    /// 断言 `Authorization` / `Wechatpay-Serial` 等头确实被发出。
+    header_transport: ?util_http.HeaderTransport = null,
 
     const Self = @This();
 
@@ -155,10 +157,25 @@ pub const TransferV3 = struct {
         return .{ .cfg = cfg };
     }
 
-    /// 注入自定义 transport（`null` 恢复真实 HTTPS + 商户私钥签名）。
+    /// 注入自定义 transport（`null` 恢复真实 HTTPS）。
+    ///
+    /// 与 `setHeaderTransport` 互斥（会清掉后者）。
     pub fn setTransport(self: *Self, t: ?util_http.HttpClient.Transport, ctx: ?*anyopaque) void {
         self.transport = t;
+        self.header_transport = null;
         self.transport_ctx = ctx;
+    }
+
+    /// 注入带请求头的 mock transport（`null` 仅清除它）。与 `setTransport` 互斥。
+    pub fn setHeaderTransport(self: *Self, t: ?util_http.HeaderTransport, ctx: ?*anyopaque) void {
+        self.header_transport = t;
+        self.transport = null;
+        self.transport_ctx = ctx;
+    }
+
+    /// 是否注入了任意 mock transport。
+    fn hasTransport(self: *const Self) bool {
+        return self.transport != null or self.header_transport != null;
     }
 
     /// 发起转账：`POST /v3/fund-app/mch-transfer/transfer-bills`。
@@ -262,8 +279,15 @@ pub const TransferV3 = struct {
         }) catch return util_error.WechatError.DecodeError;
     }
 
-    /// 发送 v3 请求：先按 signer 惯例生成 `Authorization` 头（真实 HTTPS 路径），
-    /// transport 已注入时直接走 mock（跳过签名，测试无需真实私钥）。
+    /// 发送 v3 请求：先用 `signer` 生成 `Authorization` 头，再交给
+    /// `util_http.HttpClient.requestWithHeaders` 发出（全仓只有 `util/http.zig`
+    /// 直接构造 `std.http.Client`）。
+    ///
+    /// - 真实 HTTPS 路径必须签名（缺私钥时 signer 返回 `error.MissingPrivateKey`）；
+    /// - 注入了 mock transport 时：配置了私钥就照签（便于测试断言 `Authorization`），
+    ///   没配私钥则跳过签名（历史行为，测试无需真实私钥）；
+    /// - **不做状态码判定**：v3 的 4xx/5xx 应答体里带 `code`/`message`，先交给
+    ///   `checkV3Error` 分类，认不出业务错误码才按 `NetworkError` 处理。
     fn doRequest(
         self: *Self,
         allocator: std.mem.Allocator,
@@ -275,7 +299,8 @@ pub const TransferV3 = struct {
         var sign: ?signer.SignResult = null;
         defer if (sign) |*s| s.deinit(allocator);
 
-        if (self.transport == null) {
+        const should_sign = !self.hasTransport() or self.cfg.private_key_pem.len > 0;
+        if (should_sign) {
             const method_str = switch (method) {
                 .POST => "POST",
                 .GET => "GET",
@@ -284,46 +309,51 @@ pub const TransferV3 = struct {
             sign = try signer.buildAuthorizationHeader(allocator, self.cfg, method_str, canonical_url, body);
         }
 
-        if (self.transport) |t| {
-            const tctx = self.transport_ctx orelse return util_error.WechatError.ConfigMissing;
-            return t(tctx, allocator, full_url, method, body, "application/json");
+        if (self.hasTransport() and self.transport_ctx == null)
+            return util_error.WechatError.ConfigMissing;
+
+        // 头顺序：Authorization（真签了名才有）→ Accept → Wechatpay-Serial。
+        var extra_buf: [2]std.http.Header = undefined;
+        const extra = buildExtraHeaders(self.cfg, &extra_buf);
+
+        var header_buf: [3]std.http.Header = undefined;
+        var header_count: usize = 0;
+        if (sign) |s| {
+            header_buf[header_count] = .{ .name = "Authorization", .value = s.authorization };
+            header_count += 1;
+        }
+        for (extra) |header| {
+            header_buf[header_count] = header;
+            header_count += 1;
         }
 
-        var client: std.http.Client = .{
-            .allocator = allocator,
-            .io = std.Io.Threaded.global_single_threaded.io(),
-        };
+        var client = util_http.HttpClient.init(allocator);
         defer client.deinit();
+        if (self.header_transport) |t| {
+            client.setHeaderTransport(t, self.transport_ctx);
+        } else {
+            client.setTransport(self.transport, self.transport_ctx);
+        }
 
-        var body_writer: std.Io.Writer.Allocating = .init(allocator);
-        defer body_writer.deinit();
-
-        var header_buf: [2]std.http.Header = undefined;
-        const extra_headers = buildExtraHeaders(self.cfg, &header_buf);
-
-        const result = client.fetch(.{
-            .method = method,
-            .location = .{ .url = full_url },
-            .payload = if (body.len == 0 and method == .GET) null else body,
-            .response_writer = &body_writer.writer,
-            .extra_headers = extra_headers,
-            .headers = .{
-                .authorization = .{ .override = sign.?.authorization },
-                .content_type = .{ .override = "application/json" },
-            },
-        }) catch |err| switch (err) {
+        var resp = client.requestWithHeaders(
+            method,
+            full_url,
+            body,
+            "application/json",
+            header_buf[0..header_count],
+        ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return util_error.WechatError.NetworkError,
         };
 
-        if (result.status != .ok) {
-            try checkV3Error(allocator, body_writer.written());
+        if (resp.status != .ok) {
+            defer resp.deinit(allocator);
+            try checkV3Error(allocator, resp.body);
             return util_error.WechatError.NetworkError;
         }
 
-        var list = body_writer.toArrayList();
-        defer list.deinit(allocator);
-        return list.toOwnedSlice(allocator);
+        // 成功路径把 body 的所有权交给调用方（不再 deinit）。
+        return resp.body;
     }
 };
 
@@ -471,6 +501,145 @@ fn baseParams() TransferParams {
             .{ .info_type = "奖励说明", .info_content = "注册会员抽奖一等奖" },
         },
     };
+}
+
+/// 测试用 RSA 私钥（1024-bit，一次性生成的公开 throwaway 密钥；`util/rsa.zig`
+/// 的测试用的是同一把）。只为验证「真实/带私钥的 mock 路径确实走了 signer」。
+const test_private_key_pkcs1 =
+    "-----BEGIN RSA PRIVATE KEY-----\n" ++
+    "MIICXAIBAAKBgQDeEfNBUM8LdVgybCmePyzqq4K4JeITO0tSI3cjLVIU0WNjn+/Z\n" ++
+    "XQkp2wnxRwy7rejptcZ52VSisBkZ24O2nmQ1mggRQ62qHiMqOJdfBCr5eYIcC+nB\n" ++
+    "hZTMCXeokzGXNQgWHSYSequj3b0IQLW/UJuoy4LshG69+3XtcOWFTitj6wIDAQAB\n" ++
+    "AoGADhiVmE/I1LFeJ9U1zxWzhDHe2lGNSCs7XLtjlJgL3cZsyKYeU23UZxPATdB0\n" ++
+    "vnULk8o2DwX8mVcUQM/uTGlBcwdJSYHDgxm/ALQLFk/HWndQZPhRG4beOPuleA/u\n" ++
+    "nLyyI+WCs/kcTfkSVLxyWhd8mffdlPc8zJ3BeTscKuye9AECQQD3tfFTkRe3RXEY\n" ++
+    "JYrYJTfcjqY/VQnNmoOCDcRkZ9hcf65+00ddGy2HVAYgbQIK0kSeW5h99duxfB1Q\n" ++
+    "//n3enzzAkEA5YBaVbXfXtwYcm1Ay6yCrgF5M5dvWdbYqPxe7WSI+xA+x0Vo6VzT\n" ++
+    "i4+LEBgXQHOj5sgD+ZBHDggm+yI4FxFbKQJBANzxXNITzVp7xtcpzUDjWYMRfXlp\n" ++
+    "yTepRPlAfFauRU6j2ClpG/MQ5bgaGujbMgIi8G9q9YYMQCt7r85qszOo/j8CQBt7\n" ++
+    "i1XIOb96S9MoEiJRvjRoKMNs1wDDIZ7a2eNDrsOh5mKmhTGs1AhaYCTFPcOSFYaF\n" ++
+    "XTR9eoTLpR9dsanRgkECQBZ5QXRRn5m3ri33vEuQMVB4+zN4/WTsoTajjIsAquYS\n" ++
+    "zNYkCg0jFcrx72bue1vi6XjuFCEB2dkA3BccoQjF+PQ=\n" ++
+    "-----END RSA PRIVATE KEY-----";
+
+/// 带请求头的 mock transport：记录方法 / body / 关心的请求头。
+///
+/// 头名与头值都拷进固定缓冲，因此调用返回后仍可读（`HeaderTransport` 只保证
+/// 调用期间有效）。
+const HeaderCapture = struct {
+    response: []const u8,
+    method: std.http.Method = .GET,
+    payload_buf: [2048]u8 = undefined,
+    payload_len: usize = 0,
+    names: [8][64]u8 = undefined,
+    values: [8][512]u8 = undefined,
+    name_lens: [8]usize = @splat(0),
+    value_lens: [8]usize = @splat(0),
+    count: usize = 0,
+
+    fn dispatch(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        method: std.http.Method,
+        payload: []const u8,
+        content_type: ?[]const u8,
+        headers: []const std.http.Header,
+    ) anyerror![]u8 {
+        _ = uri;
+        _ = content_type;
+        const self: *HeaderCapture = @ptrCast(@alignCast(ctx));
+        self.method = method;
+        const plen = @min(payload.len, self.payload_buf.len);
+        @memcpy(self.payload_buf[0..plen], payload[0..plen]);
+        self.payload_len = plen;
+        self.count = @min(headers.len, self.names.len);
+        for (headers[0..self.count], 0..) |header, i| {
+            const nl = @min(header.name.len, self.names[i].len);
+            @memcpy(self.names[i][0..nl], header.name[0..nl]);
+            self.name_lens[i] = nl;
+            const vl = @min(header.value.len, self.values[i].len);
+            @memcpy(self.values[i][0..vl], header.value[0..vl]);
+            self.value_lens[i] = vl;
+        }
+        return allocator.dupe(u8, self.response);
+    }
+
+    fn headerValue(self: *const HeaderCapture, name: []const u8) ?[]const u8 {
+        for (0..self.count) |i| {
+            if (std.ascii.eqlIgnoreCase(self.names[i][0..self.name_lens[i]], name))
+                return self.values[i][0..self.value_lens[i]];
+        }
+        return null;
+    }
+};
+
+test "TransferV3.transfer 把 signer 生成的 Authorization 与 Wechatpay-Serial 交给请求头入口" {
+    const allocator = std.testing.allocator;
+    var cap = HeaderCapture{
+        .response = "{\"out_bill_no\":\"plfk2020042013\",\"state\":\"ACCEPTED\"}",
+    };
+
+    var t = TransferV3.init(.{
+        .app_id = "wxf636efh567hg4356",
+        .mch_id = "1900000109",
+        .serial_no = "1DDE557876238",
+        .private_key_pem = test_private_key_pkcs1,
+        .wechatpay_serial = "PUB_KEY_ID_3000000001",
+    });
+    t.setHeaderTransport(HeaderCapture.dispatch, @ptrCast(&cap));
+
+    var p = baseParams();
+    p.user_name = "757b340b45ebef5467rter35gf464344v3542sdf4t6re4tb4f54ty45t4yyry45";
+    const parsed = try t.transfer(allocator, p);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method);
+    // 签名必须仍由 pay/v3/signer.zig 生成（本模块不拼签名字符串）。
+    try std.testing.expect(cap.headerValue("Authorization") != null);
+    const auth = cap.headerValue("Authorization").?;
+    try std.testing.expect(std.mem.startsWith(u8, auth, "WECHATPAY2-SHA256-RSA2048 "));
+    try std.testing.expect(std.mem.indexOf(u8, auth, "mchid=\"1900000109\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, auth, "serial_no=\"1DDE557876238\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, auth, "signature=\"") != null);
+    // 原有的 Accept / Wechatpay-Serial 头部语义不变。
+    try std.testing.expectEqualStrings("application/json", cap.headerValue("Accept").?);
+    try std.testing.expectEqualStrings("PUB_KEY_ID_3000000001", cap.headerValue("Wechatpay-Serial").?);
+}
+
+test "TransferV3.queryTransfer（GET）同样带 Authorization 与 Accept" {
+    const allocator = std.testing.allocator;
+    var cap = HeaderCapture{ .response = "{\"out_bill_no\":\"plfk2020042013\",\"state\":\"SUCCESS\"}" };
+
+    var t = TransferV3.init(.{
+        .app_id = "wxf636efh567hg4356",
+        .mch_id = "1900000109",
+        .serial_no = "1DDE557876238",
+        .private_key_pem = test_private_key_pkcs1,
+    });
+    t.setHeaderTransport(HeaderCapture.dispatch, @ptrCast(&cap));
+
+    const parsed = try t.queryTransfer(allocator, "plfk2020042013");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.GET, cap.method);
+    try std.testing.expect(cap.headerValue("Authorization") != null);
+    try std.testing.expectEqualStrings("application/json", cap.headerValue("Accept").?);
+}
+
+test "TransferV3.setTransport(null, null) 清掉带请求头的 transport，回到真实路径" {
+    const allocator = std.testing.allocator;
+    var cap = HeaderCapture{ .response = "{}" };
+    var t = TransferV3.init(.{ .app_id = "wx-v3", .mch_id = "1900000109" });
+
+    t.setHeaderTransport(HeaderCapture.dispatch, @ptrCast(&cap));
+    try std.testing.expect(t.header_transport != null);
+    t.setTransport(null, null);
+    try std.testing.expect(!t.hasTransport());
+
+    // 真实路径（无 transport）必须先过 signer：没配私钥即 MissingPrivateKey，
+    // 不会发出任何网络请求。
+    try std.testing.expectError(error.MissingPrivateKey, t.queryTransfer(allocator, "B1"));
 }
 
 test "TransferV3.transfer 缺必填参数返回 InvalidArgument" {

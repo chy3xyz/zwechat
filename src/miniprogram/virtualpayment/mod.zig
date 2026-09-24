@@ -836,13 +836,7 @@ const SignedReq = struct {
 fn hmacSha256Hex(allocator: std.mem.Allocator, key: []const u8, data: []const u8) ![]u8 {
     var out: [32]u8 = undefined;
     std.crypto.auth.hmac.sha2.HmacSha256.create(&out, data, key);
-    const hex_chars = "0123456789abcdef";
-    const result = try allocator.alloc(u8, 64);
-    for (&out, 0..) |byte, i| {
-        result[i * 2] = hex_chars[byte >> 4];
-        result[i * 2 + 1] = hex_chars[byte & 15];
-    }
-    return result;
+    return allocator.dupe(u8, &std.fmt.bytesToHex(&out, .lower));
 }
 
 fn jsonStringify(allocator: std.mem.Allocator, value: anytype) ![]u8 {

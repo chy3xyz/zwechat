@@ -11,14 +11,14 @@
 const std = @import("std");
 const zwechat = @import("zwechat");
 
-pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+pub fn main(init: std.process.Init) !void {
+    // 示例为一次性进程：临时分配统一走进程级 arena（`init.arena`），
+    // 缓存互斥量使用宿主注入的 `Io`（`init.io`）。
+    const allocator = init.arena.allocator();
 
     std.debug.print("=== zwechat: 企业微信群机器人推送示例 ===\n", .{});
 
-    var memory_cache = try zwechat.cache.Memory.create(allocator);
+    var memory_cache = try zwechat.cache.Memory.createWithIo(allocator, init.io);
     defer {
         memory_cache.deinit();
         allocator.destroy(memory_cache);

@@ -12,15 +12,15 @@
 const std = @import("std");
 const zwechat = @import("zwechat");
 
-pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+pub fn main(init: std.process.Init) !void {
+    // 示例为一次性进程：临时分配统一走进程级 arena（`init.arena`），
+    // `Io` 由宿主选好后注入（`init.io`），库内默认值仅在未注入时兜底。
+    const allocator = init.arena.allocator();
 
     std.debug.print("=== zwechat: 微信公众号 Server 消息处理示例 ===\n", .{});
 
-    // 1. 初始化通用 Cache
-    var memory_cache = try zwechat.cache.Memory.create(allocator);
+    // 1. 初始化通用 Cache（注入宿主的 Io）
+    var memory_cache = try zwechat.cache.Memory.createWithIo(allocator, init.io);
     defer {
         memory_cache.deinit();
         allocator.destroy(memory_cache);
@@ -44,6 +44,8 @@ pub fn main() !void {
         zwechat.credential.CacheKeyOfficialAccountPrefix,
         cfg.cache.?,
     );
+    // 凭据获取器的 futex 等待 / 唤醒也交给宿主的 Io（默认值仅作兜底）。
+    default_token.io = init.io;
 
     const factory = struct {
         var token_ptr: *zwechat.credential.DefaultAccessToken = undefined;

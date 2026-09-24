@@ -337,6 +337,8 @@ const ProbeCtx = struct {
     rec: *Recorder,
     /// 具体实例指针（公众号 / 企业微信 / 小程序），由探针函数按组 `@ptrCast`。
     handle: *anyopaque,
+    /// 取时间戳用的 `Io`（由 `main` 注入的宿主实例，不再读取全局单例）。
+    io: std.Io,
 };
 
 const ProbeFn = *const fn (p: ProbeCtx) anyerror!Attempt;
@@ -675,12 +677,12 @@ const Report = struct {
 // 执行
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn nowNs() i96 {
-    return std.Io.Clock.now(.real, std.Options.debug_io).toNanoseconds();
+fn nowNs(io: std.Io) i96 {
+    return std.Io.Clock.now(.real, io).toNanoseconds();
 }
 
-fn msSince(start_ns: i96) u64 {
-    const diff = nowNs() - start_ns;
+fn msSince(io: std.Io, start_ns: i96) u64 {
+    const diff = nowNs(io) - start_ns;
     if (diff <= 0) return 0;
     const ms = @divTrunc(diff, 1_000_000);
     return @intCast(ms);
@@ -704,9 +706,9 @@ fn runProbe(p: *ProbeCtx, rep: *Report, spec: ProbeSpec) void {
     p.rec.begin();
     util_error.clearErrorDetail();
 
-    const start = nowNs();
+    const start = nowNs(p.io);
     const outcome = spec.run_fn(p.*);
-    const elapsed_ms = msSince(start);
+    const elapsed_ms = msSince(p.io, start);
 
     if (outcome) |attempt| {
         const body = p.rec.bodySlice();
@@ -869,7 +871,7 @@ fn runOaGroup(p: *ProbeCtx, rep: *Report, env: EnvGet, env_ctx: *anyopaque) void
         rep.failAll(&oa_specs, err);
         return;
     };
-    var ctx = ProbeCtx{ .alloc = p.alloc, .rec = p.rec, .handle = @ptrCast(oa) };
+    var ctx = ProbeCtx{ .alloc = p.alloc, .rec = p.rec, .handle = @ptrCast(oa), .io = p.io };
     for (&oa_specs) |spec| runProbe(&ctx, rep, spec);
 }
 
@@ -882,7 +884,7 @@ fn runWorkGroup(p: *ProbeCtx, rep: *Report, env: EnvGet, env_ctx: *anyopaque) vo
         rep.failAll(&work_specs, err);
         return;
     };
-    var ctx = ProbeCtx{ .alloc = p.alloc, .rec = p.rec, .handle = @ptrCast(w) };
+    var ctx = ProbeCtx{ .alloc = p.alloc, .rec = p.rec, .handle = @ptrCast(w), .io = p.io };
     for (&work_specs) |spec| runProbe(&ctx, rep, spec);
 }
 
@@ -895,7 +897,7 @@ fn runMpGroup(p: *ProbeCtx, rep: *Report, env: EnvGet, env_ctx: *anyopaque) void
         rep.failAll(&mp_specs, err);
         return;
     };
-    var ctx = ProbeCtx{ .alloc = p.alloc, .rec = p.rec, .handle = @ptrCast(mp) };
+    var ctx = ProbeCtx{ .alloc = p.alloc, .rec = p.rec, .handle = @ptrCast(mp), .io = p.io };
     for (&mp_specs) |spec| runProbe(&ctx, rep, spec);
 }
 
@@ -928,10 +930,10 @@ fn printDisabled() void {
 
 pub fn main(init: std.process.Init) !void {
     // 探针只在人工显式启用时运行，全程单线程、一次性生命周期，
-    // 因此统一用 arena 管理临时分配（含 HTTP 客户端与缓存）。
-    var arena_state = std.heap.ArenaAllocator.init(init.gpa);
-    defer arena_state.deinit();
-    const alloc = arena_state.allocator();
+    // 因此统一用进程级 arena 管理临时分配（含 HTTP 客户端与缓存）；
+    // 时间戳等取时操作使用宿主注入的 `Io`（`init.io`），不读全局单例。
+    const alloc = init.arena.allocator();
+    const io = init.io;
 
     // strict 的三个来源：`-Dstrict`（由 build.zig 转成 `--strict`）/ 直接运行传参 / env。
     var strict = false;
@@ -963,7 +965,7 @@ pub fn main(init: std.process.Init) !void {
     defer client.setTransport(null, null);
 
     var report = Report{ .alloc = alloc };
-    var p = ProbeCtx{ .alloc = alloc, .rec = &rec, .handle = @ptrCast(&rec) };
+    var p = ProbeCtx{ .alloc = alloc, .rec = &rec, .handle = @ptrCast(&rec), .io = io };
 
     std.debug.print("[zwechat live-probe] 已启用：将对真实微信接口发出只读请求（会消耗配额）\n", .{});
     runOaGroup(&p, &report, env, env_ctx);

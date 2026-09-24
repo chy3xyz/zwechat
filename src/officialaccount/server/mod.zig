@@ -61,6 +61,10 @@ pub const Server = struct {
     allocator: std.mem.Allocator,
     raw_body: []u8 = &.{},
 
+    /// 被动回复所需的 `Io` 句柄：取时间戳、生成随机数、OS 随机熵源。
+    /// 默认 `global_single_threaded`，宿主可注入自己的 `Io` 实例。
+    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+
     /// 用户注册的消息处理回调（`null` = 不处理）。
     handler: ?MessageHandler = null,
     handler_ctx: ?*anyopaque = null,
@@ -171,10 +175,10 @@ pub const Server = struct {
     /// 构造被动回复的 XML（明文模式）。
     /// 返回的切片由调用方负责 `allocator.free`。
     pub fn buildReply(self: *Self, to_user: []const u8, from_user: []const u8, content: []const u8) ![]u8 {
-        const ts_str = try std.fmt.allocPrint(self.allocator, "{d}", .{util_time.getCurrTS()});
+        const ts_str = try std.fmt.allocPrint(self.allocator, "{d}", .{util_time.getCurrTSWithIo(self.io)});
         defer self.allocator.free(ts_str);
 
-        const nonce = try util_util.randomStr(self.allocator, 16);
+        const nonce = try util_util.randomStrWithIo(self.allocator, self.io, 16);
         defer self.allocator.free(nonce);
 
         var elements = [_]util_xml.XmlElement{
@@ -201,7 +205,7 @@ pub const Server = struct {
     fn encryptXml(self: *Self, plain_xml: []const u8, timestamp: i64, nonce: []const u8) ![]u8 {
         // 生成 16 字节随机数（OS 级随机源，同 work/smartbot 的取法）
         var random: [16]u8 = undefined;
-        std.Io.Threaded.global_single_threaded.io().random(&random);
+        self.io.random(&random);
 
         // AES 加密（返回原始密文字节）
         const cipher = try util_crypto.aesEncryptMsg(self.allocator, &random, plain_xml, self.ctx.config.app_id, self.ctx.config.encoding_aes_key);
@@ -341,10 +345,25 @@ test "Server.buildReply 输出合法 XML" {
     var buf: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     var s = Server.init(&ctx, fba.allocator());
+    // 注入宿主 `Io`：`buildReply` 的取时间戳 / 生成 nonce 都走这个句柄。
+    s.io = std.testing.io;
     const xml = try s.buildReply("user1", "gh_x", "hello back");
     defer fba.allocator().free(xml);
     try std.testing.expect(std.mem.indexOf(u8, xml, "<![CDATA[hello back]]>") != null);
     try std.testing.expect(std.mem.indexOf(u8, xml, "<ToUserName><![CDATA[user1]]>") != null);
+}
+
+test "Server.io 默认值可用（未注入时退回 global_single_threaded）" {
+    var ctx: Context = .{
+        .config = .{ .token = "t" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = undefined },
+    };
+    var buf: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var s = Server.init(&ctx, fba.allocator());
+    const xml = try s.buildReply("u", "gh", "hi");
+    defer fba.allocator().free(xml);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<CreateTime>") != null);
 }
 
 test "Server.serve 端到端：handler 收到 text 消息，返回 text 回复" {
@@ -437,7 +456,7 @@ fn buildEncryptedBody(
     inner_xml: []const u8,
 ) !struct { body: []u8, msg_sig: []u8 } {
     var random: [16]u8 = undefined;
-    std.Io.Threaded.global_single_threaded.io().random(&random);
+    std.testing.io.random(&random);
     const cipher = try util_crypto.aesEncryptMsg(allocator, &random, inner_xml, app_id, key);
     defer allocator.free(cipher);
 
@@ -575,8 +594,7 @@ test "serve 安全模式端到端：解密入站消息并加密回复" {
     const timestamp = "1700000000";
     const nonce = "nonce-se";
     const inner_xml =
-        "<xml><ToUserName><![CDATA[gh_s]]></ToUserName><FromUserName><![CDATA[user-se]]></FromUserName><CreateTime>1700000000</CreateTime><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[加密你好]]></Content></xml>"
-    ;
+        "<xml><ToUserName><![CDATA[gh_s]]></ToUserName><FromUserName><![CDATA[user-se]]></FromUserName><CreateTime>1700000000</CreateTime><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[加密你好]]></Content></xml>";
 
     const built = try buildEncryptedBody(allocator, token, timestamp, nonce, app_id, aes_key, inner_xml);
     defer allocator.free(built.body);

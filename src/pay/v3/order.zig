@@ -47,6 +47,9 @@ pub const JsapiPayParams = struct {
 
 pub const OrderV3 = struct {
     cfg: Config,
+    /// 时间戳 / 随机数所需的 `Io` 句柄。
+    /// 默认 `global_single_threaded`，宿主可注入自己的 `Io` 实例。
+    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
 
     pub fn init(cfg: Config) OrderV3 {
         return .{ .cfg = cfg };
@@ -63,10 +66,10 @@ pub const OrderV3 = struct {
     ) !JsapiPayParams {
         if (self.cfg.private_key_pem.len == 0) return error.MissingPrivateKey;
 
-        const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{time.getCurrTS()});
+        const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{time.getCurrTSWithIo(self.io)});
         errdefer allocator.free(timestamp);
 
-        const nonce_str = try util.randomStr(allocator, 32);
+        const nonce_str = try util.randomStrWithIo(allocator, self.io, 32);
         errdefer allocator.free(nonce_str);
 
         const package_str = try std.fmt.allocPrint(allocator, "prepay_id={s}", .{prepay_id});
