@@ -22,7 +22,7 @@ src/cache/memcache.zig: field Memcache.owned_io: ?std.Io.Threaded
 src/cache/memcache.zig: field Memcache.read_buffer: [4096]u8
 src/cache/memcache.zig: field Memcache.reader: ?std.Io.net.Stream.Reader
 src/cache/memcache.zig: field Memcache.stream: ?std.Io.net.Stream
-src/cache/memcache.zig: field Memcache.timeout_reader: ?SocketReader
+src/cache/memcache.zig: field Memcache.timeout_reader: ?net.SocketReader(.memcache)
 src/cache/memcache.zig: field Memcache.write_buffer: [4096]u8
 src/cache/memcache.zig: field Memcache.writer: ?std.Io.net.Stream.Writer
 src/cache/memcache.zig: field Options.connect_timeout_ms: u64
@@ -73,6 +73,13 @@ src/cache/mod.zig: sig Cache.delete(Cache, []const u8) CacheError!void
 src/cache/mod.zig: sig Cache.get(Cache, []const u8) CacheError!?[]const u8
 src/cache/mod.zig: sig Cache.isExist(Cache, []const u8) CacheError!bool
 src/cache/mod.zig: sig Cache.set(Cache, []const u8, []const u8, i64) CacheError!void
+src/cache/net.zig: field Backend.memcache
+src/cache/net.zig: field Backend.redis
+src/cache/net.zig: pub const Backend
+src/cache/net.zig: pub fn SocketReader
+src/cache/net.zig: pub fn resolveHost
+src/cache/net.zig: sig SocketReader(Backend) type
+src/cache/net.zig: sig resolveHost(std.Io, []const u8, u16) std.Io.net.IpAddress
 src/cache/redis.zig: field Options.connect_timeout_ms: u64
 src/cache/redis.zig: field Options.db: i32
 src/cache/redis.zig: field Options.host: []const u8

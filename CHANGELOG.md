@@ -5,6 +5,22 @@ All notable changes to `zwechat` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`cache/net.zig`（新）：两个缓存后端的网络工具共享化**——`SocketReader`（支持 `recv_timeout_ms` 的读取器）与 `resolveHost`（IPv4/IPv6/域名解析）原在 `redis.zig` 与 `memcache.zig` 各有一份等价实现，现收敛到 `src/cache/net.zig`（`pub fn SocketReader(comptime backend) type` + `pub fn resolveHost`），两处重复代码约 205 行清除。**字段类型变化**：`Memcache.timeout_reader` 的类型由 `?SocketReader` 变为 `?net.SocketReader(.memcache)`（语义与默认值 `null` 不变）。
+- **日志分域**：`cache/redis.zig`、`cache/memcache.zig`、`cache/net.zig`、`util/mtls_openssl.zig` 的告警改用 `std.log.scoped`（`.zwechat_redis` / `.zwechat_memcache` / `.zwechat_mtls`），宿主可用 `std_options.log_scope_levels` 单点静音；日志文本与级别未变。
+
+### Added
+
+- **fuzz 真实语料**：`util/pkcs12.zig` 与 `util/xml.zig` 的 fuzz 用例接入 `std.testing.FuzzInputOptions.corpus`（1683 字节真实 P12 + 两个真实回调 XML）。机制上 corpus 元素在**非 fuzz 模式**下会被原样跑一遍断言，因此它同时是"真实样本回归"。配套修了两处会让语料失效的坑：PKCS#12 的 `fuzz_max_len` 由 512 提到 2048（否则 1683 字节种子被静默截断为 0）、口令改为独立输入段（否则真实 P12 永远走 `BadPassword` 早退）；各加一条**布局哨兵测试**回放种子，防止 Smith 权重与读取顺序错位（初版即错位，被哨兵抓出）。
+- **CI 新增 `api-surface-windows` job**：在 `windows-latest` + Git Bash 下跑 `zig run tools/api_surface.zig` 并与 `api/surface.txt` 对账——API 面提取器（`std.zig.Ast` 遍历、路径分隔符、CRLF）此前从未在 Windows 上验证过。
+
+### Tests
+
+- **`std.testing.expectEqualDeep` 强化解析类断言（15 处）**：`officialaccount/user`、`work/{addresslist,externalcontact,kf}` 的解析结果由"逐字段断言"改为整体结构比较，失败时会打印字段路径——覆盖字段数从每例 3–24 个提升到 8–373 个（例如 `SyncMessage` 的 41 个叶子字段、`UserInfo` 的 17 个字段），新增字段从此自动进入断言范围。含 1 处负向验证（故意给未下发字段填错值，确认能打印 `Field … incorrect`）。
+
 ## [0.5.0] — 2026-09-24
 
 ### Changed

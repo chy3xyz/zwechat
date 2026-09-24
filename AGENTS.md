@@ -2,7 +2,7 @@
 
 `zwechat` 是使用 Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付、开放平台、企业微信、智能对话等能力。
 
-> ✅ **当前状态**：`zig 0.17.0-dev.2151+2ec5523d5`。`zig build` / `zig build test` / `zig build run` 全部通过，**1087 个内联单元测试全部通过且零内存泄漏**。
+> ✅ **当前状态**：`zig 0.17.0-dev.2151+2ec5523d5`。`zig build` / `zig build test` / `zig build run` 全部通过，**1091 个内联单元测试全部通过且零内存泄漏**。
 >
 > 目录包括：
 > - `_ref/wechat/` — 完整克隆的 Go 参考实现（`silenceper/wechat/v2`，Apache-2.0），作为移植依据（**只读**）。
@@ -39,7 +39,7 @@
 | 构建系统 | 原生 `zig build`（`build.zig` + `build.zig.zon`） |
 | 许可证 | Apache License 2.0（与上游参考保持一致，保留 `_ref/wechat/LICENSE`） |
 | 运行目标 | 静态库 + 可执行示例 |
-| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **1087 个测试（含 5 个 fuzz 测试），0 泄漏** |
+| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **1091 个测试（含 5 个 fuzz 测试），0 泄漏** |
 
 外部依赖按需声明在 `build.zig.zon`，尽量减少三方依赖；优先使用 Zig 标准库。**当前为零三方依赖**：`build.zig.zon` 的 `.dependencies` 为空（原唯一依赖 `httpz`（`chy3xyz/zhttp`）已移除——它只为微信支付 v2 的 mTLS 服务，却把 OpenSSL + libc 链到所有构建目标）。mTLS 改为仓库内自建 + 构建选项 `-Dmtls`（默认 `false`）门控，详见「移植备注」。
 
@@ -111,7 +111,7 @@ src/
 ├── openplatform/          # 开放平台：account/component_access_token 已实现，其余子模块待补齐
 ├── work/                  # 企业微信（顶层 Work + context + config + oauth + jsapi 已实现；addresslist/appchat/checkin/externalcontact/invoice/kf/material/message/msgaudit/robot 持续补齐）
 ├── aispeech/              # 智能对话（占位）
-└── test_runner.zig        # ✅ 编译门（强制 @import 每个模块），1087 个测试全部发现
+└── test_runner.zig        # ✅ 编译门（强制 @import 每个模块），1091 个测试全部发现
 ```
 
 ---
@@ -374,6 +374,10 @@ const oa = wc.getOfficialAccount(cfg);
 - **并发原语：`std.Io.Mutex` 取代自旋锁（本仓不再有自旋锁）**：`std.Io.Mutex` 是 `extern struct`、可**静态初始化并直接内嵌为结构体字段**（`std/Io.zig` 的 `Mutex.init`），只有 `lock`/`unlock` 需要传 `io`；底层走 futex（Linux `futex(2)`、macOS `__ulock_wait2`、Windows `RtlOnAddress`），**长临界区里等待者睡眠而不是空转**。`util/sync.zig` 的 `SpinMutex` 保留为**兼容层**（零参数 `lock()`/`unlock()`/`tryLock()` 语义不变，内部 `lockUncancelable`），新代码一律直接用 `std.Io.Mutex` + 结构体 `io` 字段。约定：结构体持有一个可注入的 `io: std.Io`（默认 `std.Io.Threaded.global_single_threaded.io()`），临界区写法 `self.mutex.lockUncancelable(self.io); defer self.mutex.unlock(self.io);`。**已知的长临界区是刻意的**：memcache get 跨整个 RTT（单连接必须串行化）、credential 在锁内做缓存双检+回写、openplatform 在锁内串行化 authorizer 刷新（防 refresh_token 轮换被并发覆盖）。
 - **测试编译门升级为声明级**：`src/test_runner.zig` 的 `_ = mod;` 已全部换成 `std.testing.refAllDecls(mod)`（`std.testing.refAllDeclsRecursive` 在本工具链**已移除**，别用）。语义从"文件被解析"提升到"每个顶层声明都被语义分析"——首次启用就暴露并修掉了 `util/crypto.pkcs5Pad` 的错误集不一致。**注意**：`refAllDecls` 不实例化泛型，所以「泛型参数位错位」仍必须靠真实调用测试（仓库纪律：每个模块至少一个走 mock transport 的真实调用测试）。
 - **fuzz 测试（`zig build test --fuzz=<N>`）**：`util/{xml,asn1,pkcs12,json,uri}.zig` 各有 1 个 `std.testing.fuzz` 用例；普通 `zig build test` 下只做零输入冒烟（不拖慢 CI），fuzz 模式才真跑。**首次引入即发现 3 个真实缺陷**：① `util/uri.queryEscape` 容量按 1 倍预留却写最多 3 倍（Debug/ReleaseSafe panic、**ReleaseFast 堆溢出**）——已改 `3 *| len` 预留 + 自动扩容 `append`；② `util/xml.parse` 接受空标签名（`<>` 被当成合法文档）；③ `util/json.appendEscapedString` 对非法 UTF-8 产出非法 JSON（现按 Go 语义逐字节替换为 `\ufffd`）。新增解析器/转义器时**优先补一个 fuzz 用例**。
+- **`cache/net.zig`（网络工具共享）**：两个缓存后端原先各有一份等价的 `SocketReader`（支持 `recv_timeout_ms` 的读取器）与 `resolveHost`（IPv4/IPv6/域名），已收敛到 `src/cache/net.zig`（`SocketReader(comptime backend)` 用 comptime 参数决定日志 scope）。新增缓存后端时**不要**再各自复制这两块。
+- **日志分域**：cache 与 mtls 的告警用 `std.log.scoped(.zwechat_redis / .zwechat_memcache / .zwechat_mtls)`，宿主可用 `std_options.log_scope_levels` 单点静音——**新增告警时用对应 scope 的 `log`，不要直接 `std.log.warn`**。
+- **解析类测试优先用 `std.testing.expectEqualDeep` 做整体比较**：逐字段断言会漏掉"新增字段"（仓库里 15 个用例已改为整体比较，覆盖字段数最高从 24 提升到 373）。注意两点：① 期望值里的**可变切片**字段要用局部 `var` 数组 + `&arr`；② `expectEqualDeep` 对 float 是**精确**比较，只适合"同一字符串解析值 vs 字面量"，SDK 计算出的浮点（求和/平均）仍用 `expectApproxEqAbs`。
+- **fuzz 语料**：`std.testing.fuzz` 的 `corpus` 是纯代码内机制（无目录约定、无需 build.zig 接线）；非 fuzz 模式下每个语料元素会被原样跑一遍断言，等价于"真实样本回归"。喂真实语料时注意 Smith 的**长度权重**必须覆盖语料长度，否则种子被静默复位成 0 字节（仓库里给 pkcs12/xml 各留了一条"布局哨兵测试"防这类错位）。
 - **`zig build test` 的 `failed command: …--listen=-` 是工具链的上报不一致，不是测试失败**：只要测试步骤真的执行，输出里就会出现该行（并附带测试进程 stderr 转储），但同一份汇总仍是 `N/N tests passed` + `test success`、退出码 0。已实测：子进程 **exit 0**（lldb 验证）、无 abort/panic、一次构建只 spawn 一次测试二进制、干净缓存/静音日志/最小项目都不复现（最小项目 + fuzz 用例也不复现）。成因指向 `test_runner` 的 stdio 协议与仓库代码共用 `Io.Threaded.global_single_threaded` 这一非线程安全单例。**判据**：看 `--summary all` 的 `N/N tests passed` 与退出码，**不要**把这行当失败；需要干净输出时直接跑 `.zig-cache/o/*/test`。详见 `docs/OPEN_ITEMS.md` 第 13 条。
 - **手写假 server 的端口约定**：测试用假 server **不要**用 `reuse_address = true` —— POSIX 上它同时打开 `SO_REUSEPORT`，会让**多个测试进程**绑定同一端口、内核把连接分摊给它们，导致某个假 server 的 `accept` 永远等不到请求、`defer join()` 永久挂住（实测挂死 14 分钟）。`util/http.zig` 的 `listenLocal` 已明确用 `reuse_address = false` + 端口递增。
 - **Io 注入惯例（继续扩展）**：库代码**不直接取全局 Io**——需要 io 的模块把 `io: std.Io = std.Io.Threaded.global_single_threaded.io()` 作为**可注入字段**（`cache.*`、`credential.*`、`officialaccount/{material,server}`、`work/material`、`pay/v3/order` 已如此），纯工具函数提供 `*WithIo(...)` 变体（`getCurrTSWithIo` / `randomStrWithIo` / `ed25519GenerateKeyPairWithIo`，旧函数保留并委托，标 deprecated）。`std.Options.debug_io` **只用于 `std.debug` 语义**（打印/栈回溯），不要再当应用 Io 用；`main`/示例用 `std.process.Init` 的 `io`/`arena`。**迁移状态**：生产代码已全部迁完（`grep -rn "getCurrTS()\|randomStr(" src/` 只剩 `integration_test.zig` 的测试；`std.Options.debug_io` 只剩各测试块内的 `sleep`/取时）。**纪律**：新增代码一律用注入的 `io` 字段或 `*WithIo` 变体，不要直接取全局单例或 `debug_io`。
@@ -419,5 +423,5 @@ const oa = wc.getOfficialAccount(cfg);
 - **新增测试时**在 `src/test_runner.zig` 中加一行 `@import`（即便内容只是占位），否则 `zig build test` 不会发现它。
 - **`build.zig.zon` 的 fingerprint 字段**：写一个占位 hex（如 `0xd658b8e96476550b`）即可；若该值不被 Zig 接受，运行 `zig build` 会提示正确的值。
 - **避免 Zig 0.17-dev 已被移除的 API**：`std.Thread.Mutex`/`Condition`（用 `std.Io.Mutex`/`Io.Condition`）、`std.time.timestamp()`（用 `std.Io.Clock.now`）、`std.fmt.AllocPrintError`（用 `Allocator.Error`）、`std.ArrayListUnmanaged = .{}`（用 `.empty`）。
-- **修改完任何模块后**，必须 `zig build test` 确认 1087/1087 测试仍全部通过；任何内存泄漏会让测试失败。
+- **修改完任何模块后**，必须 `zig build test` 确认 1091/1091 测试仍全部通过；任何内存泄漏会让测试失败。
 - **避免 Zig 0.17-dev 已被移除的 API**：`std.fs.cwd()`（改用 `std.Io.Dir.cwd()`）、`std.Thread.Mutex`/`Condition`（用 `std.Io.Mutex`/`Io.Condition`）、`std.time.timestamp()`（用 `std.Io.Clock.now`）、`std.fmt.AllocPrintError`（用 `Allocator.Error`）、`std.ArrayListUnmanaged = .{}`（用 `.empty`）。
