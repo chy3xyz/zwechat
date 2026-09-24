@@ -707,9 +707,9 @@ test "deriveKey 对超限迭代次数快速返回 UnsupportedPbe（不卡住）"
 
     // 迭代次数 = 0xFFFFFFFF：真去算 PBKDF2-HMAC-SHA256 是小时级，必须在派生之前就拒绝。
     const kdf = pbkdf2KdfWithIterationCount([_]u8{ 0xff, 0xff, 0xff, 0xff });
-    const started_ns = std.Io.Clock.now(.real, std.Options.debug_io).toNanoseconds();
+    const started_ns = std.Io.Clock.now(.real, std.testing.io).toNanoseconds();
     try std.testing.expectError(error.UnsupportedPbe, deriveKey(&state, &kdf));
-    const elapsed_ns = std.Io.Clock.now(.real, std.Options.debug_io).toNanoseconds() - started_ns;
+    const elapsed_ns = std.Io.Clock.now(.real, std.testing.io).toNanoseconds() - started_ns;
 
     // 时间断言只是把「没有卡住」钉死：上限内最慢的合法文件也只有几百毫秒级，
     // 而 4.29e9 轮 PBKDF2 需要小时级，10 秒的余量足以区分且不会误报。

@@ -27,6 +27,7 @@
 //! - 不支持 TLS；如需 TLS，可外部用 stunnel / memcache+tls 代理，或后续扩展。
 
 const std = @import("std");
+const default_io = @import("../util/default_io.zig");
 const posix = std.posix;
 const Cache = @import("mod.zig").Cache;
 const CacheError = @import("mod.zig").CacheError;
@@ -750,8 +751,8 @@ fn mockReadLine(alloc: std.mem.Allocator, reader: *std.Io.net.Stream.Reader) ![]
 }
 
 fn findFreePort() !u16 {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    var rng: std.Random.DefaultPrng = .init(@intCast(std.Io.Clock.now(.real, std.Options.debug_io).nanoseconds));
+    const io = default_io.io();
+    var rng: std.Random.DefaultPrng = .init(@intCast(std.Io.Clock.now(.real, default_io.io()).nanoseconds));
     for (0..20) |_| {
         const port: u16 = @intCast(20000 + rng.random().int(u16) % 45000);
         const addr = std.Io.net.IpAddress{ .ip4 = .{
@@ -776,7 +777,7 @@ fn waitReady(ready: *std.atomic.Value(bool)) void {
     var i: usize = 0;
     while (!ready.load(.acquire)) : (i += 1) {
         if (i > 400) return;
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        std.Io.sleep(default_io.io(), std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
 }
 
@@ -868,7 +869,7 @@ test "memcache 基本 set/get/exists/delete 往返" {
     var ready = std.atomic.Value(bool).init(false);
     const thread = try mockMemcacheServer(allocator, addr, &ready);
     while (!ready.load(.acquire)) {
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
 
     var server_str_buf: [32]u8 = undefined;
@@ -903,7 +904,7 @@ test "memcache get 不存在的 key 返回 null" {
     var ready = std.atomic.Value(bool).init(false);
     const thread = try mockMemcacheServer(allocator, addr, &ready);
     while (!ready.load(.acquire)) {
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
 
     var server_str_buf: [32]u8 = undefined;
@@ -941,7 +942,7 @@ test "memcache set 超大 TTL 不触发 @intCast panic" {
     var ready = std.atomic.Value(bool).init(false);
     const thread = try mockMemcacheServer(allocator, addr, &ready);
     while (!ready.load(.acquire)) {
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
 
     var server_str_buf: [32]u8 = undefined;
@@ -972,7 +973,7 @@ test "memcache 多线程并发 set/get 不同 key 全部正确" {
     var ready = std.atomic.Value(bool).init(false);
     const thread = try mockMemcacheServer(allocator, addr, &ready);
     while (!ready.load(.acquire)) {
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
 
     var server_str_buf: [32]u8 = undefined;
@@ -1019,7 +1020,7 @@ test "memcache 多线程并发 set/get 不同 key 全部正确" {
 }
 
 test "memcache 服务器地址解析：IPv4/IPv6 字面量、域名与非法输入" {
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = default_io.io();
 
     // IPv4 字面量 + 端口（改动前的唯一支持项，语义必须原样保留）。
     const v4 = try resolveServer(io, "127.0.0.1:11211");
@@ -1070,7 +1071,7 @@ test "memcache 读超时：服务端不回包 → 有界失败、连接被丢弃
     // 兜底刻意远于下面 5s 的判定上界，好让判定只反映「客户端超时是否生效」。
     const thread = try mockSilentThenHealthyServer(allocator, addr, &ready, &stop, 8000);
     while (!ready.load(.acquire)) {
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
 
     var server_str_buf: [32]u8 = undefined;
@@ -1080,9 +1081,9 @@ test "memcache 读超时：服务端不回包 → 有界失败、连接被丢弃
     const c = mc.asCache();
 
     // (a) 有界失败：必须在远早于服务端兜底断开（8000ms）之前报错，而不是挂死。
-    const start_ns = std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds;
+    const start_ns = std.Io.Clock.now(.awake, std.testing.io).nanoseconds;
     try std.testing.expectError(error.StorageError, c.get("silent"));
-    const elapsed_ms = @divTrunc(std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds - start_ns, std.time.ns_per_ms);
+    const elapsed_ms = @divTrunc(std.Io.Clock.now(.awake, std.testing.io).nanoseconds - start_ns, std.time.ns_per_ms);
     std.debug.print("[memcache recv timeout] elapsed_ms={d}\n", .{elapsed_ms});
     try std.testing.expect(elapsed_ms >= 100); // 确实等过（不是被别的错误短路）
     try std.testing.expect(elapsed_ms < 5000); // 是客户端超时在起作用，不是服务端断开
@@ -1106,7 +1107,7 @@ test "memcache 读超时：服务端不回包 → 有界失败、连接被丢弃
     allocator.destroy(mc);
     stop.store(true, .release);
     {
-        const io = std.Io.Threaded.global_single_threaded.io();
+        const io = default_io.io();
         if (addr.connect(io, .{ .mode = .stream })) |wake| {
             wake.close(io);
         } else |_| {}
@@ -1116,7 +1117,7 @@ test "memcache 读超时：服务端不回包 → 有界失败、连接被丢弃
 
 test "memcache 建连超时：SYN 被丢弃 → 有界失败、状态干净、同实例随后连正常地址成功" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = default_io.io();
     const port = try findFreePort();
 
     // 黑洞目标（本进程内的本地 listener，队列填满后内核丢 SYN）。
@@ -1141,9 +1142,9 @@ test "memcache 建连超时：SYN 被丢弃 → 有界失败、状态干净、�
 
     // (a) 有界失败：必须在 [100ms, 5000ms) 内返回，而不是等内核的 SYN 重传兜底
     //     （Linux 默认 ≈ 127s、macOS ≈ 75s）。
-    const start_ns = std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds;
+    const start_ns = std.Io.Clock.now(.awake, std.testing.io).nanoseconds;
     try std.testing.expectError(error.StorageError, c.get("never"));
-    const elapsed_ms = @divTrunc(std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds - start_ns, std.time.ns_per_ms);
+    const elapsed_ms = @divTrunc(std.Io.Clock.now(.awake, std.testing.io).nanoseconds - start_ns, std.time.ns_per_ms);
     std.debug.print("[memcache connect timeout] elapsed_ms={d}\n", .{elapsed_ms});
     try std.testing.expect(elapsed_ms >= 100); // 确实等到了 deadline，不是被别的错误短路
     try std.testing.expect(elapsed_ms < 5000); // 是客户端 deadline 在起作用，不是内核兜底

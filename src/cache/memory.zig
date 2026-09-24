@@ -5,11 +5,12 @@
 //! - 键、值字符串由本结构持有，插入时复制、由 `Memory.deinit` / `delete` / 覆盖写时释放。
 //! - 互斥使用 `std.Io.Mutex`：真阻塞的 futex 锁（Linux `futex(2)` / macOS
 //!   `__ulock_wait2`），可静态初始化并直接内嵌为字段，零依赖且不空转烧 CPU。
-//!   `io` 字段驱动 futex 等待 / 唤醒，默认 `std.Io.Threaded.global_single_threaded.io()`，
+//!   `io` 字段驱动 futex 等待 / 唤醒，默认本仓进程级单例 `default_io.io()`，
 //!   可用 `Memory.createWithIo` 注入宿主运行时的 `Io`。
 //! - TTL 以纳秒存储（`expire_at_ns: i64`）；`get` / `isExist` 命中过期键时延迟删除。
 
 const std = @import("std");
+const default_io = @import("../util/default_io.zig");
 const Cache = @import("mod.zig").Cache;
 const CacheError = @import("mod.zig").CacheError;
 
@@ -31,9 +32,9 @@ pub const Memory = struct {
     allocator: std.mem.Allocator,
     /// 键 → 条目 的哈希表。键 / 值的所有权由 `Memory` 管理。
     data: std.HashMap([]const u8, Entry, std.hash_map.StringContext, 80),
-    /// futex 等待 / 唤醒所用的 `Io` 句柄（默认 `global_single_threaded`，
-    /// 其 futex 路径不依赖实例状态，跨线程使用安全）。
-    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    /// futex 等待 / 唤醒所用的 `Io` 句柄（默认 `default_io.io()`，其 futex 路径
+    /// 不依赖实例状态，跨线程使用安全）。
+    io: std.Io = default_io.io(),
     /// 进程内线程安全互斥（真阻塞的 futex 锁）。
     mutex: std.Io.Mutex = .init,
 
@@ -41,7 +42,7 @@ pub const Memory = struct {
     ///
     /// 调用方须在使用完毕后依次调用 `deinit()` 与 `allocator.destroy(self)`。
     pub fn create(allocator: std.mem.Allocator) !*Memory {
-        return createWithIo(allocator, std.Io.Threaded.global_single_threaded.io());
+        return createWithIo(allocator, default_io.io());
     }
 
     /// 分配一个新的 `Memory` 缓存，并注入驱动互斥量的 `Io` 句柄。
@@ -199,7 +200,7 @@ pub const Memory = struct {
 
     /// TTL 时钟的当前纳秒读数（来源见 `ttlClock`）。
     fn nowNanoseconds() i64 {
-        const ts = std.Io.Clock.now(ttlClock(), std.Options.debug_io);
+        const ts = std.Io.Clock.now(ttlClock(), default_io.io());
         // 纳秒值远低于 i64 上限；截断到 i64 方便序列化与比较。
         return @intCast(ts.nanoseconds);
     }
@@ -260,7 +261,7 @@ test "memory TTL 到期后惰性删除" {
     try std.testing.expect(try c.isExist("ephemeral"));
 
     // 睡眠到过期之后（Zig 0.17-dev：`std.Thread.sleep` 已移除，改用 `std.Io.sleep`）。
-    try std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(1200), .awake);
+    try std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1200), .awake);
 
     // 过期后读 / 存在性检查都应返回 null / false，并触发惰性删除。
     const after = try c.get("ephemeral");
@@ -331,7 +332,7 @@ test "memory createWithIo：注入的 Io 驱动互斥量，多线程并发写表
     // 迁移语义取证：并发 insert 走同一个哈希表，互斥一旦失效就会出现
     // 条目覆盖 / 表结构损坏（HashMap 非线程安全，损坏时 count 必然对不上）。
     const allocator = std.testing.allocator;
-    const mem = try Memory.createWithIo(allocator, std.Io.Threaded.global_single_threaded.io());
+    const mem = try Memory.createWithIo(allocator, default_io.io());
     defer {
         mem.deinit();
         allocator.destroy(mem);
@@ -369,9 +370,9 @@ test "memory TTL 取时来源为 Clock.boot（计入休眠）" {
     try std.testing.expectEqual(std.Io.Clock.boot, Memory.ttlClock());
 
     // 取时封装就是 boot 时钟的读数（同一时刻前后夹逼）。
-    const before: i64 = @intCast(std.Io.Clock.now(Memory.ttlClock(), std.Options.debug_io).nanoseconds);
+    const before: i64 = @intCast(std.Io.Clock.now(Memory.ttlClock(), std.testing.io).nanoseconds);
     const got = Memory.nowNanoseconds();
-    const after: i64 = @intCast(std.Io.Clock.now(Memory.ttlClock(), std.Options.debug_io).nanoseconds);
+    const after: i64 = @intCast(std.Io.Clock.now(Memory.ttlClock(), std.testing.io).nanoseconds);
     try std.testing.expect(got >= before and got <= after);
 
     const allocator = std.testing.allocator;

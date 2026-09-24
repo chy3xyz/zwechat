@@ -19,6 +19,7 @@
 const std = @import("std");
 
 const options = @import("mtls_options");
+const default_io = @import("default_io.zig");
 
 /// 编译期开关：是否启用运行时 dlopen OpenSSL 的 mTLS 后端。
 pub const enabled = options.enabled;
@@ -487,7 +488,7 @@ test "parseResponse 拒绝相互冲突的 Content-Length 与 obs-fold 续行头"
 
 test "mtls 开关默认关闭时 postXML 返回 MtlsNotEnabled" {
     if (!options.enabled) {
-        const io = std.Io.Threaded.global_single_threaded.io();
+        const io = default_io.io();
         const result = postXML(
             std.testing.allocator,
             io,

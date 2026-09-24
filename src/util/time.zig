@@ -8,14 +8,15 @@
 //! 等价的默认实现，行为与历史版本一致。
 
 const std = @import("std");
+const default_io = @import("default_io.zig");
 
 /// 返回当前 Unix 秒（等价于 Go 的 `time.Now().Unix()`）。
 ///
-/// **deprecated**：库代码应当接受 `Io` 参数，而不是自行访问全局单例
-/// （见 `std/Io/Threaded.zig` 中 `global_single_threaded` 的说明）。请改用
+/// **deprecated**：库代码应当接受 `Io` 参数，而不是自行访问进程级单例
+/// （见 `util/default_io.zig`）。请改用
 /// [`getCurrTSWithIo`]；本函数保留为等价的默认实现，行为不变。
 pub fn getCurrTS() i64 {
-    return getCurrTSWithIo(std.Io.Threaded.global_single_threaded.io());
+    return getCurrTSWithIo(default_io.io());
 }
 
 /// 返回当前 Unix 秒，由调用方注入驱动时钟的 `Io`。
@@ -38,9 +39,9 @@ test "getCurrTSWithIo 与 Io.Clock.now 偏差不超过 2 秒" {
 }
 
 test "getCurrTS 与 getCurrTSWithIo 走同一条取时路径" {
-    // 旧函数委托到 `global_single_threaded`，与注入同一实例的结果应完全一致
+    // 旧函数委托到 `default_io`，与注入同一实例的结果应完全一致
     // （同一秒内调用；跨秒只会差 1）。
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = default_io.io();
     const diff = getCurrTS() - getCurrTSWithIo(io);
     try std.testing.expect(diff >= -1 and diff <= 1);
 }

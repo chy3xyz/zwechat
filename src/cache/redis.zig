@@ -42,6 +42,7 @@
 //! - 不支持 TLS；如需 TLS，可外部用 stunnel / redis+tls 代理，或后续扩展。
 
 const std = @import("std");
+const default_io = @import("../util/default_io.zig");
 const posix = std.posix;
 const Cache = @import("mod.zig").Cache;
 const CacheError = @import("mod.zig").CacheError;
@@ -669,7 +670,7 @@ pub const Redis = struct {
 /// 要的是「进程实际等了多久」；休眠期间进程不跑，不该算进等待额度。
 /// （TTL 语义相反，见 memory.zig 的 `ttlClock`。）
 fn nowNanoseconds() i64 {
-    const ts = std.Io.Clock.now(.awake, std.Options.debug_io);
+    const ts = std.Io.Clock.now(.awake, default_io.io());
     return @intCast(ts.nanoseconds);
 }
 
@@ -909,11 +910,11 @@ fn mockReadCommand(alloc: std.mem.Allocator, reader: *std.Io.net.Stream.Reader) 
 /// mock 服务器的 KV 存储；可被多条连接共享（自带互斥）。
 ///
 /// 与生产代码同一套同步原语：`std.Io.Mutex`（真阻塞），`io` 只用来自动 futex
-/// 等待 / 唤醒，与 `Threaded` 实例无关，故直接用 `global_single_threaded`。
+/// 等待 / 唤醒，与 `Threaded` 实例无关，故直接用 `default_io.io()`。
 const Store = struct {
     allocator: std.mem.Allocator,
     map: std.HashMap([]const u8, []const u8, std.hash_map.StringContext, 80),
-    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    io: std.Io = default_io.io(),
     mutex: std.Io.Mutex = .init,
 
     fn init(allocator: std.mem.Allocator) Store {
@@ -1176,7 +1177,7 @@ const MockPoolServer = struct {
 /// 结束多连接 mock 服务器：置位 stop，并主动连一次唤醒阻塞中的 accept，再 join。
 fn stopPoolServer(srv: *MockPoolServer, thread: std.Thread) void {
     srv.stop.store(true, .release);
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = default_io.io();
     const conn = srv.addr.connect(io, .{ .mode = .stream }) catch {
         thread.join();
         return;
@@ -1265,13 +1266,13 @@ fn waitReady(ready: *std.atomic.Value(bool)) void {
     var i: usize = 0;
     while (!ready.load(.acquire)) : (i += 1) {
         if (i > 400) return;
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        std.Io.sleep(default_io.io(), std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
 }
 
 fn findFreePort() !u16 {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    var rng: std.Random.DefaultPrng = .init(@intCast(std.Io.Clock.now(.real, std.Options.debug_io).nanoseconds));
+    const io = default_io.io();
+    var rng: std.Random.DefaultPrng = .init(@intCast(std.Io.Clock.now(.real, default_io.io()).nanoseconds));
     for (0..20) |_| {
         const port: u16 = @intCast(20000 + rng.random().int(u16) % 45000);
         const addr = std.Io.net.IpAddress{ .ip4 = .{
@@ -1300,7 +1301,7 @@ test "redis 基本 set/get/exists/delete 往返" {
     var ready = std.atomic.Value(bool).init(false);
     const thread = try mockRedisServer(allocator, addr, &ready);
     while (!ready.load(.acquire)) {
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
 
     const redis = try Redis.create(allocator, .{
@@ -1335,7 +1336,7 @@ test "redis get 不存在的 key 返回 null" {
     var ready = std.atomic.Value(bool).init(false);
     const thread = try mockRedisServer(allocator, addr, &ready);
     while (!ready.load(.acquire)) {
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
 
     const redis = try Redis.create(allocator, .{
@@ -1372,7 +1373,7 @@ test "redis 多线程并发 set/get 不同 key 全部正确" {
     var ready = std.atomic.Value(bool).init(false);
     const thread = try mockRedisServer(allocator, addr, &ready);
     while (!ready.load(.acquire)) {
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
 
     const redis = try Redis.create(allocator, .{
@@ -1428,7 +1429,7 @@ test "redis 连接池：默认上限为 1，显式 0 也按 1 处理（兼容既
     var ready = std.atomic.Value(bool).init(false);
     const thread = try mockRedisServer(allocator, addr, &ready);
     while (!ready.load(.acquire)) {
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
 
     const redis = try Redis.create(allocator, .{
@@ -1680,14 +1681,14 @@ test "redis 连接池：池满等待超时返回 PoolTimeout 而非挂死" {
     while (redis.poolStats().live == 0) {
         if (waited > 1000) break;
         waited += 1;
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
     try std.testing.expectEqual(@as(usize, 1), redis.poolStats().live);
 
-    const start_ns = std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds;
+    const start_ns = std.Io.Clock.now(.awake, std.testing.io).nanoseconds;
     const c = redis.asCache();
     try std.testing.expectError(error.StorageError, c.get("holder"));
-    const elapsed_ms = @divTrunc(std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds - start_ns, std.time.ns_per_ms);
+    const elapsed_ms = @divTrunc(std.Io.Clock.now(.awake, std.testing.io).nanoseconds - start_ns, std.time.ns_per_ms);
 
     // 超时是有界的：既真的等了（≥ 100ms，容调度误差），又没有等到 holder 跑完（2000ms）。
     try std.testing.expect(elapsed_ms >= 100);
@@ -1712,7 +1713,7 @@ test "redis 连接池：池满等待超时返回 PoolTimeout 而非挂死" {
 }
 
 test "redis 主机解析：IPv4/IPv6 字面量、域名与非法输入" {
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = default_io.io();
 
     // 走的是与 memcache 共用的 `net.resolveHost`（`net.zig` 另有直接单测）；
     // 这里额外证明本后端的接线（`Options.host` 这条路径用的就是它）。
@@ -1781,9 +1782,9 @@ test "redis 读超时：服务端不回包 → 有界失败、连接被丢弃、
     const c = redis.asCache();
 
     // (a) 有界失败：必须在远早于服务端兜底断开（8000ms）之前报错，而不是挂死。
-    const start_ns = std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds;
+    const start_ns = std.Io.Clock.now(.awake, std.testing.io).nanoseconds;
     try std.testing.expectError(error.StorageError, c.get("silent"));
-    const elapsed_ms = @divTrunc(std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds - start_ns, std.time.ns_per_ms);
+    const elapsed_ms = @divTrunc(std.Io.Clock.now(.awake, std.testing.io).nanoseconds - start_ns, std.time.ns_per_ms);
     std.debug.print("[redis recv timeout] elapsed_ms={d}\n", .{elapsed_ms});
     try std.testing.expect(elapsed_ms >= 100); // 确实等过（不是被别的错误短路）
     try std.testing.expect(elapsed_ms < 5000); // 是客户端超时在起作用，不是服务端断开
@@ -1815,7 +1816,7 @@ test "redis 读超时：服务端不回包 → 有界失败、连接被丢弃、
 
 test "redis 建连超时：SYN 被丢弃 → 有界失败、不建连接、同实例随后连正常地址成功" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = default_io.io();
     const port = try findFreePort();
 
     // 黑洞目标（本进程内的本地 listener，队列填满后内核丢 SYN）。
@@ -1840,9 +1841,9 @@ test "redis 建连超时：SYN 被丢弃 → 有界失败、不建连接、同�
 
     // (a) 有界失败：必须在 [100ms, 5000ms) 内返回，而不是等内核的 SYN 重传兜底
     //     （Linux 默认 ≈ 127s、macOS ≈ 75s）。
-    const start_ns = std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds;
+    const start_ns = std.Io.Clock.now(.awake, std.testing.io).nanoseconds;
     try std.testing.expectError(error.StorageError, c.get("never"));
-    const elapsed_ms = @divTrunc(std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds - start_ns, std.time.ns_per_ms);
+    const elapsed_ms = @divTrunc(std.Io.Clock.now(.awake, std.testing.io).nanoseconds - start_ns, std.time.ns_per_ms);
     std.debug.print("[redis connect timeout] elapsed_ms={d}\n", .{elapsed_ms});
     try std.testing.expect(elapsed_ms >= 100); // 确实等到了 deadline，不是被别的错误短路
     try std.testing.expect(elapsed_ms < 5000); // 是客户端 deadline 在起作用，不是内核兜底

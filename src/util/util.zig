@@ -5,6 +5,7 @@
 //! 最后一个子切片可能更短。常用于把大批量 openid 拆分为多次群发请求。
 
 const std = @import("std");
+const default_io = @import("default_io.zig");
 
 /// 把 `src` 切成大小为 `chunk_size` 的子切片（最后一个可能更短）。
 ///
@@ -94,9 +95,9 @@ const randomAlphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRST
 /// 生成 `length` 字节的随机字符串，字符集与 Go `util.RandomStr` 一致。
 ///
 /// **deprecated**：请改用 [`randomStrWithIo`] 显式传入宿主的 `Io`；本函数保留为
-/// 等价的默认实现（种子取自 `global_single_threaded`），行为不变。
+/// 等价的默认实现（种子取自 `default_io`），行为不变。
 pub fn randomStr(allocator: std.mem.Allocator, length: usize) std.mem.Allocator.Error![]u8 {
-    return randomStrWithIo(allocator, std.Io.Threaded.global_single_threaded.io(), length);
+    return randomStrWithIo(allocator, default_io.io(), length);
 }
 
 /// 生成 `length` 字节的随机字符串，字符集与 Go `util.RandomStr` 一致。

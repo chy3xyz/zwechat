@@ -9,6 +9,7 @@ const Config = @import("config.zig").Config;
 const rsa = @import("../../util/rsa.zig");
 const time = @import("../../util/time.zig");
 const util = @import("../../util/util.zig");
+const default_io = @import("../../util/default_io.zig");
 
 pub const SignResult = struct {
     authorization: []const u8,
@@ -41,7 +42,7 @@ pub fn buildAuthorizationHeader(
 ) !SignResult {
     return buildAuthorizationHeaderWithIo(
         allocator,
-        std.Io.Threaded.global_single_threaded.io(),
+        default_io.io(),
         cfg,
         method,
         canonical_url,
@@ -137,7 +138,7 @@ const FixedIo = struct {
     }
 
     fn io(self: *FixedIo) std.Io {
-        self.vtable = std.Io.Threaded.global_single_threaded.io().vtable.*;
+        self.vtable = default_io.io().vtable.*;
         self.vtable.now = now;
         return .{ .userdata = null, .vtable = &self.vtable };
     }
@@ -221,6 +222,6 @@ test "buildAuthorizationHeader 默认 io 取真实当前时间（未注入时的
     var r = try buildAuthorizationHeader(allocator, cfg, "GET", "/v3/certificates", "");
     defer r.deinit(allocator);
 
-    const now = time.getCurrTSWithIo(std.Io.Threaded.global_single_threaded.io());
+    const now = time.getCurrTSWithIo(default_io.io());
     try std.testing.expect(r.timestamp <= now and now - r.timestamp <= 5);
 }

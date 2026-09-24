@@ -9,6 +9,7 @@ const Context = @import("../context.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_json = @import("../../util/json.zig");
+const default_io = @import("../../util/default_io.zig");
 
 pub const PermanentMaterialType = enum {
     image,
@@ -108,8 +109,8 @@ pub const Material = struct {
     ctx: *Context,
     allocator: std.mem.Allocator,
     /// 文件系统操作（错误体回读 / 删除）所用的 `Io` 句柄。
-    /// 默认 `global_single_threaded`，宿主可注入自己的 `Io` 实例。
-    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    /// 默认 `default_io.io()`，宿主可注入自己的 `Io` 实例。
+    io: std.Io = default_io.io(),
 
     const Self = @This();
 

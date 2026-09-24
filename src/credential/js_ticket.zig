@@ -14,6 +14,7 @@
 const std = @import("std");
 
 const cache_mod = @import("../cache/mod.zig");
+const default_io = @import("../util/default_io.zig");
 const Cache = cache_mod.Cache;
 
 const http = @import("../util/http.zig");
@@ -39,13 +40,13 @@ fn defaultFetcher(ctx: *anyopaque, allocator: std.mem.Allocator, url: []const u8
 /// 默认 `jsapi_ticket` 实现（对应 Go 的 `DefaultJsTicket`）。
 ///
 /// 互斥用 `std.Io.Mutex`（真阻塞的 futex 锁），与 `default_access_token.zig` 一致；
-/// `io` 默认 `std.Io.Threaded.global_single_threaded.io()`，可用 `.io = ...` 注入。
+/// `io` 默认 `default_io.io()`，可用 `.io = ...` 注入。
 pub const DefaultJsTicket = struct {
     app_id: []const u8,
     cache_key_prefix: []const u8,
     cache: Cache,
     /// futex 等待 / 唤醒所用的 `Io` 句柄。
-    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    io: std.Io = default_io.io(),
     lock: std.Io.Mutex = .init,
     fetcher: Fetcher,
     fetcher_ctx: *anyopaque,

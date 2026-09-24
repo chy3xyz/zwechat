@@ -18,6 +18,7 @@ const util_xml = @import("../../util/xml.zig");
 const util_util = @import("../../util/util.zig");
 const util_time = @import("../../util/time.zig");
 const message = @import("../message/mod.zig");
+const default_io = @import("../../util/default_io.zig");
 
 /// MessageHandler：用户自定义的回调，根据收到的消息返回回复。
 ///
@@ -62,8 +63,8 @@ pub const Server = struct {
     raw_body: []u8 = &.{},
 
     /// 被动回复所需的 `Io` 句柄：取时间戳、生成随机数、OS 随机熵源。
-    /// 默认 `global_single_threaded`，宿主可注入自己的 `Io` 实例。
-    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    /// 默认 `default_io.io()`，宿主可注入自己的 `Io` 实例。
+    io: std.Io = default_io.io(),
 
     /// 用户注册的消息处理回调（`null` = 不处理）。
     handler: ?MessageHandler = null,
@@ -353,7 +354,7 @@ test "Server.buildReply 输出合法 XML" {
     try std.testing.expect(std.mem.indexOf(u8, xml, "<ToUserName><![CDATA[user1]]>") != null);
 }
 
-test "Server.io 默认值可用（未注入时退回 global_single_threaded）" {
+test "Server.io 默认值可用（未注入时取 default_io）" {
     var ctx: Context = .{
         .config = .{ .token = "t" },
         .access_token_handle = .{ .ptr = undefined, .vtable = undefined },

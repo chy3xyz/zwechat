@@ -6,13 +6,13 @@
 //! 可以静态初始化（`.init`）并直接内嵌为任意结构体的字段，不需要构造期传入任何
 //! Io 运行时。它内部走 `Io.futexWait` / `Io.futexWake`
 //! （Linux `futex(2)` / macOS `__ulock_wait2` / Windows `RtlWaitOnAddress`），
-//! 用 `std.Io.Threaded.global_single_threaded.io()` 也是**真阻塞**，
+//! 用本仓进程级单例 `default_io.io()` 也是**真阻塞**，
 //! 不会像自旋锁那样在临界区较长时空转烧 CPU（更不会把整个时间片耗在等待者身上）。
 //!
 //! 迁移后的惯用写法（结构体持锁 + 可注入 Io）：
 //!
 //! ```zig
-//! io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+//! io: std.Io = default_io.io(),
 //! mutex: std.Io.Mutex = .init,
 //! // 临界区：
 //! self.mutex.lockUncancelable(self.io);
@@ -27,11 +27,12 @@
 //! 新代码请直接用 `std.Io.Mutex`。
 
 const std = @import("std");
+const default_io = @import("default_io.zig");
 
-/// 默认 `Io` 句柄：`global_single_threaded` 的 futex 路径不依赖实例状态
+/// 默认 `Io` 句柄（`util/default_io.zig` 的进程级单例）：其 futex 路径不依赖实例状态
 /// （`Io.Threaded` 的 `futexWaitUncancelable` / `futexWake` 直接下发系统调用，
 /// 不使用 `userdata`），因此可以安全地在任意线程上用于跨线程的锁等待与唤醒。
-pub const defaultIo: std.Io = std.Io.Threaded.global_single_threaded.io();
+pub const defaultIo: std.Io = default_io.io();
 
 /// 兼容层（**已弃用**）：零参数 `lock()` / `unlock()` 的历史签名，内部已改为
 /// `std.Io.Mutex` 的**真阻塞**实现（不再是 CAS 自旋）。

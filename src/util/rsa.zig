@@ -14,6 +14,7 @@
 //! 3. **PKCS#12**（`parseP12`）：由 `pkcs12.zig` 提供完整解析。
 
 const std = @import("std");
+const default_io = @import("default_io.zig");
 const ed25519 = std.crypto.sign.Ed25519;
 const rsa_impl = @import("rsa_impl.zig");
 const pkcs12 = @import("pkcs12.zig");
@@ -311,7 +312,7 @@ const Ed25519KeyPair = struct {
 /// **deprecated**：请改用 [`ed25519GenerateKeyPairWithIo`] 显式传入宿主的 `Io`
 /// （种子取自 OS 随机源）；本函数保留为等价的默认实现，行为不变。
 pub fn ed25519GenerateKeyPair(allocator: std.mem.Allocator) !Ed25519KeyPair {
-    return ed25519GenerateKeyPairWithIo(allocator, std.Io.Threaded.global_single_threaded.io());
+    return ed25519GenerateKeyPairWithIo(allocator, default_io.io());
 }
 
 /// 生成 Ed25519 密钥对，由调用方注入提供熵源的 `Io`。

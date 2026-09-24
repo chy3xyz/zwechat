@@ -9,6 +9,7 @@
 const std = @import("std");
 const Cache = @import("../cache/mod.zig").Cache;
 const credential = @import("mod.zig");
+const default_io = @import("../util/default_io.zig");
 
 /// 企业微信 access_token URL（使用 `{s}` 占位符以匹配 `std.fmt`）。
 pub const workAccessTokenURL = "https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid={s}&corpsecret={s}";
@@ -31,8 +32,8 @@ pub const WorkAccessToken = struct {
     corp_secret: []const u8,
     cache_key_prefix: []const u8,
     cache: Cache,
-    /// futex 等待 / 唤醒所用的 `Io` 句柄（默认 `global_single_threaded`，可注入）。
-    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    /// futex 等待 / 唤醒所用的 `Io` 句柄（默认 `default_io.io()`，可注入）。
+    io: std.Io = default_io.io(),
     lock: std.Io.Mutex = .init,
     fetcher: Fetcher,
     fetcher_ctx: *anyopaque,

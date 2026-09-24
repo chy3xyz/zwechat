@@ -13,6 +13,7 @@ const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
 const util_xml = @import("../../util/xml.zig");
 const util_time = @import("../../util/time.zig");
+const default_io = @import("../../util/default_io.zig");
 
 /// 消息类型（与 Go `MsgType` 一一对应）。
 pub const MsgType = enum {
@@ -191,8 +192,8 @@ pub const Reply = struct {
     data: ReplyData,
 
     /// `format` 构造被动回复 XML 时取 `CreateTime` 所用的 `Io` 句柄。
-    /// 默认 `global_single_threaded`（与历史行为一致），宿主可用 `.io = ...` 注入。
-    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    /// 默认 `default_io.io()`（与历史行为一致），宿主可用 `.io = ...` 注入。
+    io: std.Io = default_io.io(),
 
     pub const ReplyData = union(enum) {
         text: TextReply,
@@ -1266,7 +1267,7 @@ const FixedIo = struct {
     }
 
     fn io(self: *FixedIo) std.Io {
-        self.vtable = std.Io.Threaded.global_single_threaded.io().vtable.*;
+        self.vtable = default_io.io().vtable.*;
         self.vtable.now = now;
         self.vtable.random = random;
         return .{ .userdata = null, .vtable = &self.vtable };
@@ -1300,7 +1301,7 @@ test "Reply.io 默认值可用（未注入时取真实当前时间）" {
     const end = std.mem.indexOfScalarPos(u8, xml, start, '<').?;
     const ts = try std.fmt.parseInt(i64, xml[start..end], 10);
 
-    const now = util_time.getCurrTSWithIo(std.Io.Threaded.global_single_threaded.io());
+    const now = util_time.getCurrTSWithIo(default_io.io());
     try std.testing.expect(ts <= now and now - ts <= 5);
 }
 

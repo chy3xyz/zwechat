@@ -11,6 +11,7 @@ const http = @import("../../util/http.zig");
 const time = @import("../../util/time.zig");
 const util = @import("../../util/util.zig");
 const rsa = @import("../../util/rsa.zig");
+const default_io = @import("../../util/default_io.zig");
 
 pub const Amount = struct {
     total: i64,
@@ -48,8 +49,8 @@ pub const JsapiPayParams = struct {
 pub const OrderV3 = struct {
     cfg: Config,
     /// 时间戳 / 随机数所需的 `Io` 句柄。
-    /// 默认 `global_single_threaded`，宿主可注入自己的 `Io` 实例。
-    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    /// 默认 `default_io.io()`，宿主可注入自己的 `Io` 实例。
+    io: std.Io = default_io.io(),
 
     pub fn init(cfg: Config) OrderV3 {
         return .{ .cfg = cfg };

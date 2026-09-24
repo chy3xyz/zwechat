@@ -15,6 +15,7 @@
 const std = @import("std");
 
 const cache_mod = @import("../cache/mod.zig");
+const default_io = @import("../util/default_io.zig");
 const Cache = cache_mod.Cache;
 
 const http = @import("../util/http.zig");
@@ -40,8 +41,8 @@ fn defaultFetcher(ctx: *anyopaque, allocator: std.mem.Allocator, url: []const u8
 /// 默认 `access_token` 实现（对应 Go 的 `DefaultAccessToken`）。
 ///
 /// 互斥用 `std.Io.Mutex`（真阻塞的 futex 锁，可静态初始化并内嵌为字段）；
-/// `io` 驱动 futex 等待 / 唤醒，默认 `std.Io.Threaded.global_single_threaded.io()`
-/// （其 futex 路径不依赖实例状态，跨线程使用安全），调用方可用 `.io = ...` 注入。
+/// `io` 驱动 futex 等待 / 唤醒，默认 `default_io.io()`（本仓进程级单例，其 futex
+/// 路径不依赖实例状态，跨线程使用安全），调用方可用 `.io = ...` 注入。
 ///
 /// 字段说明：
 /// - `app_id` / `app_secret` / `cache_key_prefix`：调用方持有（通常是字符串字面量）。
@@ -54,7 +55,7 @@ pub const DefaultAccessToken = struct {
     cache_key_prefix: []const u8,
     cache: Cache,
     /// futex 等待 / 唤醒所用的 `Io` 句柄。
-    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    io: std.Io = default_io.io(),
     lock: std.Io.Mutex = .init,
     fetcher: Fetcher,
     fetcher_ctx: *anyopaque,
@@ -605,7 +606,7 @@ test "DefaultAccessToken: expires_in 取 i64 极值不溢出 panic 且缓存 TTL
     defer allocator.free(key);
     const entry = ctx.mem.data.getEntry(key).?;
     try std.testing.expect(entry.value_ptr.expire_at_ns > 0);
-    const now_ns = std.Io.Clock.now(.awake, std.Options.debug_io).nanoseconds;
+    const now_ns = std.Io.Clock.now(.awake, std.testing.io).nanoseconds;
     try std.testing.expect(entry.value_ptr.expire_at_ns -| now_ns <= 2 * std.time.ns_per_s);
 }
 

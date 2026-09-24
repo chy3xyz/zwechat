@@ -34,6 +34,7 @@ const util_crypto = @import("../../util/crypto.zig");
 const util_sig = @import("../../util/signature.zig");
 const util_xml = @import("../../util/xml.zig");
 const util_time = @import("../../util/time.zig");
+const default_io = @import("../../util/default_io.zig");
 
 /// 消息处理器：处理收到的消息；返回 null 表示不回复
 /// （明文模式下企业微信平台会收到 "success"）。
@@ -96,8 +97,8 @@ pub const Server = struct {
     handler_ctx: ?*anyopaque = null,
 
     /// 回复的 `CreateTime` 与加密 IV 的随机源由该 `Io` 驱动。
-    /// 默认 `global_single_threaded`（与历史行为一致），宿主可用 `.io = ...` 注入。
-    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    /// 默认 `default_io.io()`（与历史行为一致），宿主可用 `.io = ...` 注入。
+    io: std.Io = default_io.io(),
 
     const Self = @This();
 
@@ -609,7 +610,7 @@ const FixedIo = struct {
     }
 
     fn io(self: *FixedIo) std.Io {
-        self.vtable = std.Io.Threaded.global_single_threaded.io().vtable.*;
+        self.vtable = default_io.io().vtable.*;
         self.vtable.now = now;
         self.vtable.random = random;
         return .{ .userdata = null, .vtable = &self.vtable };

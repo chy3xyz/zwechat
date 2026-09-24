@@ -11,6 +11,7 @@ const Context = @import("../context.zig").Context;
 const credential = @import("../../credential/mod.zig");
 const util_time = @import("../../util/time.zig");
 const util_util = @import("../../util/util.zig");
+const default_io = @import("../../util/default_io.zig");
 
 /// JS-SDK 配置返回结构。
 pub const Config = struct {
@@ -37,8 +38,8 @@ pub const Js = struct {
     ticket_handle: ?credential.JsTicketHandle = null,
 
     /// `getConfig` 取当前时间戳 / 生成 `nonceStr` 所用的 `Io` 句柄。
-    /// 默认 `global_single_threaded`（与历史行为一致），宿主可用 `.io = ...` 注入。
-    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    /// 默认 `default_io.io()`（与历史行为一致），宿主可用 `.io = ...` 注入。
+    io: std.Io = default_io.io(),
 
     const Self = @This();
 
@@ -197,7 +198,7 @@ const FixedIo = struct {
     }
 
     fn io(self: *FixedIo) std.Io {
-        self.vtable = std.Io.Threaded.global_single_threaded.io().vtable.*;
+        self.vtable = default_io.io().vtable.*;
         self.vtable.now = now;
         return .{ .userdata = null, .vtable = &self.vtable };
     }

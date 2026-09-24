@@ -14,6 +14,7 @@ const Cache = @import("../cache/mod.zig").Cache;
 const util_http = @import("../util/http.zig");
 const util_error = @import("../util/error.zig");
 const credential = @import("mod.zig");
+const default_io = @import("../util/default_io.zig");
 
 /// Ticket 类型（与 Go `TicketType` 对应）。
 pub const TicketType = enum {
@@ -38,8 +39,8 @@ pub const WorkJsTicket = struct {
     agent_id: []const u8,
     cache_key_prefix: []const u8,
     cache: Cache,
-    /// futex 等待 / 唤醒所用的 `Io` 句柄（默认 `global_single_threaded`，可注入）。
-    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    /// futex 等待 / 唤醒所用的 `Io` 句柄（默认 `default_io.io()`，可注入）。
+    io: std.Io = default_io.io(),
     lock: std.Io.Mutex = .init,
     fetcher: Fetcher,
     fetcher_ctx: *anyopaque,

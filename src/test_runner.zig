@@ -46,6 +46,7 @@ const util_sync = @import("util/sync.zig");
 const util_retry = @import("util/retry.zig");
 const util_uri = @import("util/uri.zig");
 const util_json = @import("util/json.zig");
+const util_default_io = @import("util/default_io.zig");
 const _integration = @import("integration_test.zig");
 
 // —— officialaccount ——
@@ -181,6 +182,7 @@ test "test_runner 编译门 — 强制所有模块被解析 (v2)" {
     std.testing.refAllDecls(util_retry);
     std.testing.refAllDecls(util_uri);
     std.testing.refAllDecls(util_json);
+    std.testing.refAllDecls(util_default_io);
     std.testing.refAllDecls(_integration);
     std.testing.refAllDecls(oa_mod);
     std.testing.refAllDecls(oa_config);

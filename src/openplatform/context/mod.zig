@@ -10,6 +10,7 @@
 //! 未命中时由调用方在收到 `SetComponentAccessToken` 后回填。
 
 const std = @import("std");
+const default_io = @import("../../util/default_io.zig");
 
 const Config = @import("../config.zig").Config;
 
@@ -25,9 +26,9 @@ const Config = @import("../config.zig").Config;
 /// 自旋锁在长临界区里会把等待者整个时间片烧在 CPU 上空转——这正是迁移到
 /// futex 阻塞锁收益最大的地方。
 pub const TokenMutex = struct {
-    /// futex 等待 / 唤醒所用的 `Io` 句柄，可注入（默认
-    /// `std.Io.Threaded.global_single_threaded.io()`，其 futex 路径不依赖实例状态）。
-    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    /// futex 等待 / 唤醒所用的 `Io` 句柄，可注入（默认 `default_io.io()`，
+    /// 其 futex 路径不依赖实例状态）。
+    io: std.Io = default_io.io(),
     /// 真正的互斥量。非递归：同一线程重复 `lock` 会死锁。
     mutex: std.Io.Mutex = .init,
 
@@ -287,8 +288,8 @@ test "TokenMutex 已迁移为 std.Io.Mutex：持锁期间同线程 tryLock 返�
     try std.testing.expect(m.tryLock());
     m.unlock();
 
-    // `io` 可注入（默认 `global_single_threaded`）。
-    var injected: TokenMutex = .{ .io = std.Io.Threaded.global_single_threaded.io() };
+    // `io` 可注入（默认 `default_io.io()`）。
+    var injected: TokenMutex = .{ .io = default_io.io() };
     injected.lock();
     injected.unlock();
 

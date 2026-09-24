@@ -12,6 +12,7 @@ const util_crypto = @import("../../util/crypto.zig");
 const util_util = @import("../../util/util.zig");
 const util_xml = @import("../../util/xml.zig");
 const util_time = @import("../../util/time.zig");
+const default_io = @import("../../util/default_io.zig");
 const WechatError = @import("../../util/error.zig").WechatError;
 
 /// 下单参数。
@@ -135,8 +136,8 @@ pub const Order = struct {
     transport_ctx: ?*anyopaque = null,
 
     /// 下单 / 查询 / 关闭 / 拉起支付所需的 `nonce_str` 与 `timestamp` 由该 `Io` 驱动。
-    /// 默认 `global_single_threaded`（与历史行为一致），宿主可用 `.io = ...` 注入。
-    io: std.Io = std.Io.Threaded.global_single_threaded.io(),
+    /// 默认 `default_io.io()`（与历史行为一致），宿主可用 `.io = ...` 注入。
+    io: std.Io = default_io.io(),
 
     const Self = @This();
 
@@ -716,7 +717,7 @@ const FixedIo = struct {
     }
 
     fn io(self: *FixedIo) std.Io {
-        self.vtable = std.Io.Threaded.global_single_threaded.io().vtable.*;
+        self.vtable = default_io.io().vtable.*;
         self.vtable.now = now;
         return .{ .userdata = null, .vtable = &self.vtable };
     }

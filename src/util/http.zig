@@ -6,7 +6,7 @@
 //!
 //! Zig 版基于 std 0.17 的 `std.http.Client.fetch`，把响应体通过
 //! `std.Io.Writer.Allocating` 收集到调用方提供的 allocator 上。
-//! `io` 实例固定使用 `std.Io.Threaded.global_single_threaded`，适合同步阻塞
+//! `io` 实例固定使用本仓的进程级单例（`util/default_io.zig`），适合同步阻塞
 //! 场景；如果以后需要并发，可以把 `inner.io` 换成调用方注入的 `Io`。
 //!
 //! ## 响应体体积上限
@@ -51,6 +51,7 @@
 const std = @import("std");
 const rsa = @import("rsa.zig");
 const mtls = @import("mtls.zig");
+const default_io = @import("default_io.zig");
 
 /// JSON/XML 等 API 响应的默认体积上限（16 MiB）。
 ///
@@ -295,13 +296,13 @@ pub const HttpClient = struct {
         self.max_response_bytes = n;
     }
 
-    /// 创建客户端；当前固定使用 `std.Io.Threaded.global_single_threaded`，
+    /// 创建客户端；当前固定使用本仓进程级单例 `default_io.io()`，
     /// 即同步阻塞模式。如果将来要支持并发，应在此处允许传入 `std.Io`。
     pub fn init(allocator: std.mem.Allocator) HttpClient {
         return .{
             .inner = .{
                 .allocator = allocator,
-                .io = std.Io.Threaded.global_single_threaded.io(),
+                .io = default_io.io(),
             },
             .allocator = allocator,
         };
@@ -381,7 +382,7 @@ pub const HttpClient = struct {
         file_path: []const u8,
         max_bytes: usize,
     ) !u64 {
-        const io = std.Io.Threaded.global_single_threaded.io();
+        const io = default_io.io();
 
         if (self.hasTransport()) {
             const body = (try self.dispatchTransport(applyUriModifier(uri), .GET, "", null, &.{})).?;
@@ -478,7 +479,7 @@ pub const HttpClient = struct {
         p12_password: []const u8,
     ) ![]u8 {
         const effective_uri = applyUriModifier(uri);
-        const io = std.Io.Threaded.global_single_threaded.io();
+        const io = default_io.io();
 
         // 1. 读取 P12 文件
         const p12_bytes = try std.Io.Dir.cwd().readFileAlloc(
@@ -983,11 +984,10 @@ fn writeFileAll(io: std.Io, file_path: []const u8, bytes: []const u8) !u64 {
 
 /// 生成 24 字节 hex 形式的 multipart boundary。
 ///
-/// 使用 `std.Io.Threaded.global_single_threaded` 的 random 熵源，
-/// 与 HTTP client 共用同一个 Io 实例。
+/// 使用 `default_io.io()` 的 random 熵源，与 HTTP client 共用同一个 Io 实例。
 fn generateBoundary(allocator: std.mem.Allocator) ![]u8 {
     var bytes: [12]u8 = undefined;
-    std.Io.Threaded.global_single_threaded.io().random(&bytes);
+    default_io.io().random(&bytes);
     return allocator.dupe(u8, &std.fmt.bytesToHex(bytes, .lower));
 }
 
@@ -1021,7 +1021,7 @@ fn writeMultipartPart(
             // 直接使用内存中的二进制数据。
             try body_buf.appendSlice(allocator, field.data);
         } else {
-            const io = std.Io.Threaded.global_single_threaded.io();
+            const io = default_io.io();
             const file = std.Io.Dir.cwd().openFile(
                 io,
                 field.file_path,
@@ -1145,7 +1145,7 @@ test "postXMLWithTLS 缺少 P12 文件返回 FileNotFound" {
 
 test "postXMLWithTLS 非法 P12 文件返回 InvalidP12File" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = default_io.io();
     // 相对路径：不依赖平台 /tmp 语义（Windows 上无统一 /tmp）。
     const tmp_path = "zwechat_test_bad_p12.p12";
 
@@ -1301,7 +1301,7 @@ fn unblockAccept(io: std.Io, port: u16) void {
 
 test "getFollowRedirect 跟随 302 拿到最终内容且请求了第二个 URL" {
     const allocator = std.testing.allocator;
-    // server 线程使用独立 Io（global_single_threaded 非线程安全，禁止跨线程共享）。
+    // server 线程使用独立 Io（`Io.Threaded` 实例不可跨线程共享）。
     var server_threaded: std.Io.Threaded = .init_single_threaded;
     const sio = server_threaded.io();
     const bound = try listenLocal(sio);
@@ -1620,7 +1620,7 @@ test "getFollowRedirectLimited 用 Content-Length 预判提前失败（不读 bo
 
 test "getFollowRedirectToFile 流式落盘并返回写入字节数" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = default_io.io();
     const file_path = "zwechat_http_followredirect_tofile_test.bin";
     defer std.Io.Dir.cwd().deleteFile(io, file_path) catch {};
 
@@ -1671,7 +1671,7 @@ test "getFollowRedirectToFile 流式落盘并返回写入字节数" {
 
 test "getFollowRedirectToFile 超限删除不完整文件" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = default_io.io();
     const file_path = "zwechat_http_followredirect_tofile_over_test.bin";
     defer std.Io.Dir.cwd().deleteFile(io, file_path) catch {};
 

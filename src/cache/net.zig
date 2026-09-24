@@ -13,6 +13,7 @@
 //! 后端，不必整体降 `log_level`。文案逐字保留各后端原有措辞。
 
 const std = @import("std");
+const default_io = @import("../util/default_io.zig");
 
 /// 后端标识：只用于决定日志 scope 与读超时告警文案，不影响任何网络行为。
 pub const Backend = enum {
@@ -150,7 +151,7 @@ pub fn resolveHost(io: std.Io, host: []const u8, port: u16) !std.Io.net.IpAddres
 // ============================================================================
 
 test "cache/net resolveHost：IPv4/IPv6 字面量带端口，非法输入报 InvalidAddress" {
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = default_io.io();
 
     // IPv4 字面量（改动前的唯一支持项，语义必须原样保留）。
     const v4 = try resolveHost(io, "127.0.0.1", 6379);
@@ -174,7 +175,7 @@ test "cache/net resolveHost：IPv4/IPv6 字面量带端口，非法输入报 Inv
 
 test "cache/net SocketReader：recv_timeout_ms=0 时与 std 的 Stream.Reader 逐字节等价" {
     const allocator = std.testing.allocator;
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = default_io.io();
     const port = try findFreePort();
     const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = port } };
 
@@ -262,13 +263,13 @@ fn waitReady(ready: *std.atomic.Value(bool)) void {
     var i: usize = 0;
     while (!ready.load(.acquire)) : (i += 1) {
         if (i > 400) return;
-        std.Io.sleep(std.Options.debug_io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        std.Io.sleep(default_io.io(), std.Io.Duration.fromMilliseconds(5), .awake) catch {};
     }
 }
 
 fn findFreePort() !u16 {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    var rng: std.Random.DefaultPrng = .init(@intCast(std.Io.Clock.now(.real, std.Options.debug_io).nanoseconds));
+    const io = default_io.io();
+    var rng: std.Random.DefaultPrng = .init(@intCast(std.Io.Clock.now(.real, default_io.io()).nanoseconds));
     for (0..20) |_| {
         const port: u16 = @intCast(20000 + rng.random().int(u16) % 45000);
         const addr = std.Io.net.IpAddress{ .ip4 = .{
