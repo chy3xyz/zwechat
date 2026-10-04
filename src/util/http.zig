@@ -1241,9 +1241,15 @@ const FakeServerState = struct {
             while (std.mem.indexOf(u8, header_buf[0..filled], "\r\n\r\n") == null) {
                 if (filled >= header_buf.len) return;
                 var chunk: [1][]u8 = .{header_buf[filled..]};
-                const n = stream.read(self.io, &chunk) catch return;
-                if (n == 0) return;
-                filled += n;
+                // 不能走 `Stream.read`：0.17.0 的该实现内部以 `const rc, _ =` 解构
+                // `Stream.ReadResult`（具名结构体不可解构），实例化即编译失败。
+                // 这里直接走 `io.operate`，并按 0.17.0 的载荷取 `data_len`。
+                const res = (self.io.operate(.{ .net_read = .{
+                    .socket_handle = stream.socket.handle,
+                    .data = &chunk,
+                } }) catch return).net_read catch return;
+                if (res.data_len == 0) return;
+                filled += res.data_len;
             }
             // 捕获请求行（第一个 \r\n 之前）。
             if (std.mem.indexOf(u8, header_buf[0..filled], "\r\n")) |eol| {

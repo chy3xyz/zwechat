@@ -86,7 +86,9 @@ pub fn SocketReader(comptime backend: Backend) type {
                 },
                 else => return error.ReadFailed,
             };
-            const n = result.net_read catch return error.ReadFailed;
+            // 0.17.0 起 `net_read` 的载荷由 `usize` 变为 `Stream.ReadResult`（含 data_len）。
+            const res = result.net_read catch return error.ReadFailed;
+            const n = res.data_len;
             if (n == 0) return error.EndOfStream; // 对端已关闭，等同于 std 的读取器
             io_w.advance(n);
             return n;
