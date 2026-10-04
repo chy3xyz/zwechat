@@ -6,7 +6,7 @@
 
 | 工具 | 版本要求 |
 |---|---|
-| Zig | ≥ 0.17.0（CI 在 `0.17.0-dev.1567+f0354179a` 上构建通过）|
+| Zig | ≥ `0.17.0` 正式版（CI 在 `0.17.0` 上构建通过；更早的 dev 快照编译不过，见 `docs/UPGRADING.md`）|
 | Git | 任意版本 |
 | 编辑器 | 任意；推荐 VSCode + Zig Language Server，或 `zls` |
 

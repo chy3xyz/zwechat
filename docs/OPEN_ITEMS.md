@@ -541,7 +541,8 @@ SDK 不把它折叠成 `error.ApiError`，而是原样放进返回结构体。
   与 `AddVideo`/`AddMaterial`；§7 的小程序段落也未列出 24 个子模块的全貌。
   **需要精确签名时以源码为准**（本文与 [`UPGRADING.md`](UPGRADING.md) 都按此口径标注）。
 - ~~工具链版本记录也不完全一致：CI 钉的是 `0.17.0-dev.1567+f0354179a`~~
-  → **已在 v0.4.5 统一为 `0.17.0-dev.2151+2ec5523d5`**（旧版缺 `Type.Struct.field_names` 等，实际编译不过）。
+  → **已在 v0.4.5 统一为 `0.17.0-dev.2151+2ec5523d5`**（旧版缺 `Type.Struct.field_names` 等，实际编译不过）；
+  **v0.5.2 起统一为 `0.17.0` 正式版**（`net_read` 载荷改为 `Stream.ReadResult`，dev 快照已编译不过）。
 
 **缓解**
 - 下游按"源码 > CHANGELOG > `doc/api_guide.md` > `docs/api-reference.md` > README"的

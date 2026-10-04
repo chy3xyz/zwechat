@@ -2,7 +2,7 @@
 
 `zwechat` 是使用 Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付、开放平台、企业微信、智能对话等能力。
 
-> ✅ **当前状态**：`zig 0.17.0-dev.2151+2ec5523d5`。`zig build` / `zig build test` / `zig build run` 全部通过，**1094 个内联单元测试全部通过且零内存泄漏**。
+> ✅ **当前状态**：`zig 0.17.0`（正式版）。`zig build` / `zig build test` / `zig build run` 全部通过，**1094 个内联单元测试全部通过且零内存泄漏**。
 >
 > 目录包括：
 > - `_ref/wechat/` — 完整克隆的 Go 参考实现（`silenceper/wechat/v2`，Apache-2.0），作为移植依据（**只读**）。
@@ -35,7 +35,7 @@
 
 | 项 | 取值 |
 |---|---|
-| 语言 | Zig `0.17.0-dev.2151+2ec5523d5`（参考同 workspace 下 `zigmodu`） |
+| 语言 | Zig `0.17.0`（正式版；参考同 workspace 下 `zigmodu`） |
 | 构建系统 | 原生 `zig build`（`build.zig` + `build.zig.zon`） |
 | 许可证 | Apache License 2.0（与上游参考保持一致，保留 `_ref/wechat/LICENSE`） |
 | 运行目标 | 静态库 + 可执行示例 |
@@ -378,6 +378,7 @@ const oa = wc.getOfficialAccount(cfg);
 - **日志分域**：cache 与 mtls 的告警用 `std.log.scoped(.zwechat_redis / .zwechat_memcache / .zwechat_mtls)`，宿主可用 `std_options.log_scope_levels` 单点静音——**新增告警时用对应 scope 的 `log`，不要直接 `std.log.warn`**。
 - **解析类测试优先用 `std.testing.expectEqualDeep` 做整体比较**：逐字段断言会漏掉"新增字段"（仓库里 15 个用例已改为整体比较，覆盖字段数最高从 24 提升到 373）。注意两点：① 期望值里的**可变切片**字段要用局部 `var` 数组 + `&arr`；② `expectEqualDeep` 对 float 是**精确**比较，只适合"同一字符串解析值 vs 字面量"，SDK 计算出的浮点（求和/平均）仍用 `expectApproxEqAbs`。
 - **fuzz 语料**：`std.testing.fuzz` 的 `corpus` 是纯代码内机制（无目录约定、无需 build.zig 接线）；非 fuzz 模式下每个语料元素会被原样跑一遍断言，等价于"真实样本回归"。喂真实语料时注意 Smith 的**长度权重**必须覆盖语料长度，否则种子被静默复位成 0 字节（仓库里给 pkcs12/xml 各留了一条"布局哨兵测试"防这类错位）。
+- **Zig 0.17.0 正式版适配（v0.5.2）**：`Io.Operation` 的 `net_read` 载荷由 `usize` 变为 `Stream.ReadResult`（取 `.data_len`）；**`Stream.read` 在 0.17.0 下无法实例化**（其内部以 `const rc, _ =` 解构具名结构体，Zig 不支持），需要直读 socket 时用 `io.operate(.{ .net_read = … })` 或 `stream.readWithControl(...)`（返回 `ReadResult`）。因此本仓**要求 `0.17.0` 正式版或更新**——更早的 dev 快照（如 `0.17.0-dev.2151`）已编译不过；CI 已钉 `0.17.0` 并从 `ziglang.org/download/0.17.0/` 下载。
 - **默认 Io 用 `util/default_io.zig`，不要用 std 的全局单例**：`std.Io.Threaded.global_single_threaded` 与 `std.Options.debug_io` 指向**同一个非线程安全实例**，而 test runner 拿它承载 stdio 协议；库代码一律用 `default_io.io()`（懒初始化、进程级、永不 deinit）。测试块内用 `std.testing.io`。新增需要 io 的模块时沿用"可注入 `io` 字段、默认 `default_io.io()`"的写法。
 - **`zig build test` 的 `failed command: …--listen=-` 是工具链展示口径，不是测试失败**（根因已查明）：`Maker.zig:2698` 的注释写着 *"No matter the result, we want to display error/warning messages"* ——**只要该步骤产生了任何 stderr**（本仓测试会写约 102 KB 的 `std.log.warn`）就会走"错误/警告渲染"路径并**无条件**打印该行（`:3198`）。因此：缓存命中时没有该行、`live-probe-test`（不写 stderr）也没有；汇总始终是 `N/N tests passed` + `test success`、退出码 0。**判据看 `--summary all` 与退出码**；需要干净输出时直接跑 `.zig-cache/o/*/test`。详见 `docs/OPEN_ITEMS.md` 第 13 条。：只要测试步骤真的执行，输出里就会出现该行（并附带测试进程 stderr 转储），但同一份汇总仍是 `N/N tests passed` + `test success`、退出码 0。已实测：子进程 **exit 0**（lldb 验证）、无 abort/panic、一次构建只 spawn 一次测试二进制、干净缓存/静音日志/最小项目都不复现（最小项目 + fuzz 用例也不复现）。成因指向 `test_runner` 的 stdio 协议与仓库代码共用 `Io.Threaded.global_single_threaded` 这一非线程安全单例。**判据**：看 `--summary all` 的 `N/N tests passed` 与退出码，**不要**把这行当失败；需要干净输出时直接跑 `.zig-cache/o/*/test`。详见 `docs/OPEN_ITEMS.md` 第 13 条。
 - **手写假 server 的端口约定**：测试用假 server **不要**用 `reuse_address = true` —— POSIX 上它同时打开 `SO_REUSEPORT`，会让**多个测试进程**绑定同一端口、内核把连接分摊给它们，导致某个假 server 的 `accept` 永远等不到请求、`defer join()` 永久挂住（实测挂死 14 分钟）。`util/http.zig` 的 `listenLocal` 已明确用 `reuse_address = false` + 端口递增。

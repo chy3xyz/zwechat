@@ -23,14 +23,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ZIG_VERSION="0.17.0-dev.2151+2ec5523d5"
+          ZIG_VERSION="0.17.0"
           case "$RUNNER_OS" in
             Linux)   PLAT="x86_64-linux";  EXT="tar.xz" ;;
             macOS)   PLAT="aarch64-macos"; EXT="tar.xz" ;;
             *) echo "unsupported runner os: $RUNNER_OS"; exit 1 ;;
           esac
           FILE="zig-${PLAT}-${ZIG_VERSION}.${EXT}"
-          curl -fL --retry 3 --retry-delay 2 -o "$FILE" "https://ziglang.org/builds/$FILE"
+          curl -fL --retry 3 --retry-delay 2 -o "$FILE" "https://ziglang.org/download/0.17.0/$FILE"
           mkdir -p "$HOME/zig"
           tar -xf "$FILE" -C "$HOME/zig" --strip-components=1
           "$HOME/zig/zig" version
@@ -102,10 +102,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ZIG_VERSION="0.17.0-dev.2151+2ec5523d5"
+          ZIG_VERSION="0.17.0"
           PLAT="x86_64-windows"
           FILE="zig-${PLAT}-${ZIG_VERSION}.zip"
-          curl -fL --retry 3 --retry-delay 2 -o "$FILE" "https://ziglang.org/builds/$FILE"
+          curl -fL --retry 3 --retry-delay 2 -o "$FILE" "https://ziglang.org/download/0.17.0/$FILE"
           python -m zipfile -e "$FILE" "$HOME"
           mv "$HOME/zig-${PLAT}-${ZIG_VERSION}" "$HOME/zig"
           "$HOME/zig/zig.exe" version
@@ -167,10 +167,10 @@ jobs:
       - name: Install Zig
         run: |
           set -euo pipefail
-          ZIG_VERSION="0.17.0-dev.2151+2ec5523d5"
+          ZIG_VERSION="0.17.0"
           PLAT="x86_64-windows"
           FILE="zig-${PLAT}-${ZIG_VERSION}.zip"
-          curl -fL --retry 3 --retry-delay 2 -o "$FILE" "https://ziglang.org/builds/$FILE"
+          curl -fL --retry 3 --retry-delay 2 -o "$FILE" "https://ziglang.org/download/0.17.0/$FILE"
           python -m zipfile -e "$FILE" "$HOME"
           mv "$HOME/zig-${PLAT}-${ZIG_VERSION}" "$HOME/zig"
           "$HOME/zig/zig.exe" version
@@ -232,10 +232,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ZIG_VERSION="0.17.0-dev.2151+2ec5523d5"
+          ZIG_VERSION="0.17.0"
           PLAT="x86_64-linux"
           FILE="zig-${PLAT}-${ZIG_VERSION}.tar.xz"
-          curl -fL --retry 3 --retry-delay 2 -o "$FILE" "https://ziglang.org/builds/$FILE"
+          curl -fL --retry 3 --retry-delay 2 -o "$FILE" "https://ziglang.org/download/0.17.0/$FILE"
           mkdir -p "$HOME/zig"
           tar -xf "$FILE" -C "$HOME/zig" --strip-components=1
           "$HOME/zig/zig" version

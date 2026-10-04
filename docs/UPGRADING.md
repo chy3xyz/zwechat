@@ -634,11 +634,11 @@ zig build
 zig build test
 ```
 
-> **工具链提示**：`build.zig.zon` 的 `.minimum_zig_version = "0.17.0"`。
-> 本仓库在 `0.17.0-dev` 系列上开发（AGENTS.md 记录为 `0.17.0-dev.2151+2ec5523d5`），
-> 而 CI 里钉的是一个更早的 dev 快照（`.github/workflows/ci.yml:26` 的
-> `ZIG_VERSION="0.17.0-dev.1567+f0354179a"`）。
-> **建议你仍然用 `0.17.0-dev.2151+2ec5523d5`**（开发/测试所用版本）；
+> **工具链提示**：`build.zig.zon` 的 `.minimum_zig_version = "0.17.0"`，CI 现在钉
+> **`0.17.0` 正式版**（`.github/workflows/ci.yml` 从 `ziglang.org/download/0.17.0/` 下载）。
+> **请使用 0.17.0 正式版或更新的版本**：0.17.0 把 `Io.Operation` 的 `net_read` 载荷由
+> `usize` 改为 `Stream.ReadResult`（取 `data_len`），因此更早的 dev 快照（如
+> `0.17.0-dev.2151`）**已经编译不过本仓库**。
 > 换工具链本身就可能引入编译错误，与 SDK 升级分开提交，便于定位。
 
 ---

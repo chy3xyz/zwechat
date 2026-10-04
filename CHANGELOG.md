@@ -5,6 +5,13 @@ All notable changes to `zwechat` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **适配 Zig 0.17.0 正式版**：0.17.0 把 `Io.Operation` 的 `net_read` 载荷由 `usize` 改为 `Stream.ReadResult`，本仓两处受影响代码已适配——`cache/net.zig` 的超时读取器改为取 `res.data_len`；`util/http.zig` 的假 server 不再调用 `Stream.read`（该函数在 0.17.0 下无法实例化：其实现以 `const rc, _ =` 解构具名结构体），改为直接走 `io.operate(.{ .net_read = … })`。
+- **工具链钉版统一为 `0.17.0` 正式版**：`.github/workflows/ci.yml` 的 4 个 job 改为从 `ziglang.org/download/0.17.0/` 下载 `zig-<plat>-0.17.0`（此前是 `builds/` 下的 dev 快照）；`AGENTS.md` / `README.md` / `CONTRIBUTING.md` / `docs/UPGRADING.md` 同步。**注意：更早的 dev 快照（如 `0.17.0-dev.2151`）已无法编译本仓**。
+
 ## [0.5.1] — 2026-09-24
 
 ### Changed
