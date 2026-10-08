@@ -52,8 +52,7 @@ fn fetchAccessTokenViaMock(
     app_id: []const u8,
     app_secret: []const u8,
 ) ![]u8 {
-    const url = try std.fmt.allocPrint(
-        allocator,
+    const url = try allocator.print(
         "https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={s}&secret={s}",
         .{ app_id, app_secret },
     );
@@ -101,8 +100,8 @@ test "integration: parse + 回复 XML 构造 round-trip" {
     const reply = try util_xml.serialize(allocator, "xml", &elements);
     defer allocator.free(reply);
 
-    try std.testing.expect(std.mem.indexOf(u8, reply, "<![CDATA[自动回复]]>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, reply, "<ToUserName><![CDATA[user_openid_123]]>") != null);
+    try std.testing.expect(std.mem.find(u8, reply, "<![CDATA[自动回复]]>") != null);
+    try std.testing.expect(std.mem.find(u8, reply, "<ToUserName><![CDATA[user_openid_123]]>") != null);
 }
 
 test "integration: getCurrTS 时间戳合理性" {

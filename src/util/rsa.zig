@@ -145,14 +145,14 @@ pub fn p12Available() bool {
 /// 仅做粗略字符串匹配（"-----BEGIN" + "PRIVATE KEY" 或 "RSA PRIVATE KEY"）。
 /// 不做 ASN.1 解码，所以**不能**替代真实验签。
 pub fn looksLikeRsaPrivateKeyPem(pem: []const u8) bool {
-    return std.mem.indexOf(u8, pem, "-----BEGIN") != null and
-        (std.mem.indexOf(u8, pem, "PRIVATE KEY") != null);
+    return std.mem.find(u8, pem, "-----BEGIN") != null and
+        (std.mem.find(u8, pem, "PRIVATE KEY") != null);
 }
 
 /// 提示：检测 PEM 格式是否看起来是 RSA 公钥。
 pub fn looksLikeRsaPublicKeyPem(pem: []const u8) bool {
-    return std.mem.indexOf(u8, pem, "-----BEGIN") != null and
-        (std.mem.indexOf(u8, pem, "PUBLIC KEY") != null);
+    return std.mem.find(u8, pem, "-----BEGIN") != null and
+        (std.mem.find(u8, pem, "PUBLIC KEY") != null);
 }
 
 const test_private_key_pkcs1 =

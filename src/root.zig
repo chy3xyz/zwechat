@@ -54,9 +54,9 @@ test "version 与 build.zig.zon 保持一致" {
     defer allocator.free(zon);
 
     const marker = ".version = \"";
-    const start = std.mem.indexOf(u8, zon, marker) orelse return error.ZonVersionNotFound;
+    const start = std.mem.find(u8, zon, marker) orelse return error.ZonVersionNotFound;
     const rest = zon[start + marker.len ..];
-    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return error.ZonVersionNotFound;
+    const end = std.mem.findScalar(u8, rest, '"') orelse return error.ZonVersionNotFound;
     try std.testing.expectEqualStrings(rest[0..end], version);
 }
 

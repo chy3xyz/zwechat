@@ -93,15 +93,13 @@ pub const WorkJsTicket = struct {
     /// 构造缓存 key。
     fn cacheKey(self: *const Self, allocator: std.mem.Allocator, ticket_type: TicketType) credential.CredentialError![]u8 {
         return switch (ticket_type) {
-            .corp_js => std.fmt.allocPrint(
-                allocator,
+            .corp_js => allocator.print(
                 "{s}_corp_jsapi_ticket_{s}",
                 .{ self.cache_key_prefix, self.corp_id },
             ),
             .agent_js => blk: {
                 if (self.agent_id.len == 0) return credential.CredentialError.ConfigMissing;
-                break :blk std.fmt.allocPrint(
-                    allocator,
+                break :blk allocator.print(
                     "{s}_agent_jsapi_ticket_{s}_{s}",
                     .{ self.cache_key_prefix, self.corp_id, self.agent_id },
                 );
@@ -113,13 +111,11 @@ pub const WorkJsTicket = struct {
     fn buildURL(self: *const Self, allocator: std.mem.Allocator, ticket_type: TicketType, access_token: []const u8) credential.CredentialError![]u8 {
         _ = self;
         return switch (ticket_type) {
-            .corp_js => std.fmt.allocPrint(
-                allocator,
+            .corp_js => allocator.print(
                 "https://qyapi.weixin.qq.com/cgi-bin/get_jsapi_ticket?access_token={s}",
                 .{access_token},
             ),
-            .agent_js => std.fmt.allocPrint(
-                allocator,
+            .agent_js => allocator.print(
                 "https://qyapi.weixin.qq.com/cgi-bin/ticket/get?access_token={s}&type=agent_config",
                 .{access_token},
             ),
@@ -239,13 +235,13 @@ test "WorkJsTicket.buildURL corp 与 agent URL 不同" {
     const t = WorkJsTicket.init("wxcorp", "", "gk_", undefined);
     const url_corp = try t.buildURL(std.testing.allocator, .corp_js, "AT");
     defer std.testing.allocator.free(url_corp);
-    try std.testing.expect(std.mem.indexOf(u8, url_corp, "get_jsapi_ticket") != null);
+    try std.testing.expect(std.mem.find(u8, url_corp, "get_jsapi_ticket") != null);
 
     const t2 = WorkJsTicket.init("wxcorp", "a1", "gk_", undefined);
     const url_agent = try t2.buildURL(std.testing.allocator, .agent_js, "AT");
     defer std.testing.allocator.free(url_agent);
-    try std.testing.expect(std.mem.indexOf(u8, url_agent, "/ticket/get") != null);
-    try std.testing.expect(std.mem.indexOf(u8, url_agent, "type=agent_config") != null);
+    try std.testing.expect(std.mem.find(u8, url_agent, "/ticket/get") != null);
+    try std.testing.expect(std.mem.find(u8, url_agent, "type=agent_config") != null);
 }
 
 test "TicketType 枚举值" {

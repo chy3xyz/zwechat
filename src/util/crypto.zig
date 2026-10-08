@@ -346,7 +346,7 @@ test "AESEncryptMsg/AESDecryptMsg round-trip 长明文（>255 字节，钉住 en
         break :blk b;
     };
     var xml_buf: [600]u8 = undefined;
-    const xml = try std.fmt.bufPrint(&xml_buf, "<xml><Content>{s}</Content></xml>", .{&filler});
+    const xml = try std.mem.print(&xml_buf, "<xml><Content>{s}</Content></xml>", .{&filler});
     try std.testing.expect(xml.len > 255);
     const app_id = "wx_test_appid";
     const cipher = try aesEncryptMsg(allocator, random16, xml, app_id, aes_key);

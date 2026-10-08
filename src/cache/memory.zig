@@ -346,7 +346,7 @@ test "memory createWithIo：注入的 Io 驱动互斥量，多线程并发写表
             var i: usize = 0;
             while (i < PER_THREAD) : (i += 1) {
                 var key_buf: [32]u8 = undefined;
-                const key = try std.fmt.bufPrint(&key_buf, "concurrent_{d}_{d}", .{ tid, i });
+                const key = try std.mem.print(&key_buf, "concurrent_{d}_{d}", .{ tid, i });
                 try m.asCache().set(key, "v", 60);
             }
         }

@@ -105,9 +105,9 @@ pub fn build(b: *std.Build) void {
     // 发出任何真实网络请求。只有显式执行 `zig build live-probe` 才会运行，
     // 且进程内还有 `ZWECHAT_LIVE_PROBE=1` 门控兜底。
     //
-    // strict：本工具链的 `zig build <step> -- <args>` 不会把参数转发给被运行的
-    // 进程（`std.Build` 已无 `args` 字段，实测被静默忽略），因此改用构建选项
-    // `-Dstrict`，由这里补上 `--strict` 传给探针。
+    // strict：`-Dstrict` 由这里补上 `--strict`；此外 `addPassthruArgs()` 让
+    // `zig build live-probe -- --strict` 把 `--` 之后的参数原样转发给探针
+    // （`Run.addPassthruArgs`，0.17.0 已支持；代价是该 step 视作有副作用、不缓存）。
     const live_probe_mod = b.createModule(.{
         .root_source_file = b.path("src/live_probe.zig"),
         .target = target,
@@ -123,6 +123,7 @@ pub fn build(b: *std.Build) void {
         .root_module = live_probe_mod,
     });
     const run_live_probe = b.addRunArtifact(live_probe_exe);
+    run_live_probe.addPassthruArgs();
     if (b.option(bool, "strict", "live-probe: 有 FAIL 时 exit 1（默认只报告，始终 exit 0）") orelse false) {
         run_live_probe.addArg("--strict");
     }
@@ -201,7 +202,7 @@ pub fn build(b: *std.Build) void {
     // stdio 继承 + 视作有副作用：每次显式调用都真的跑一遍并直接打印到终端
     // （默认的 `.infer_from_args` 会把 stdout 收走，看不到任何东西）。
     run_api_surface.stdio = .inherit;
-    run_api_surface.addDirectoryArg(b.path("."));
+    run_api_surface.addDirectoryArg2(b.path("."), .{});
     const api_surface_step = b.step(
         "api-surface",
         "Print the public API surface of src/ (same extractor as tools/api_surface_check.sh)",
@@ -210,7 +211,7 @@ pub fn build(b: *std.Build) void {
 
     // —— 代码格式化检查（zig fmt --check 的封装）——
     const fmt_check = b.addFmt(.{
-        .paths = &.{ b.path("src"), b.path("build.zig"), b.path("build.zig.zon"), b.path("examples") },
+        .paths = &.{ b.path("src"), b.path("build.zig"), b.path("build.zig.zon"), b.path("examples"), b.path("tools") },
         .check = true,
     });
     const fmt_step = b.step("fmt", "Check code formatting (zig fmt --check)");

@@ -31,7 +31,7 @@ pub fn orderParam(
     biz_key: []const u8,
 ) Allocator.Error![]u8 {
     // 1. 收集需要参与拼接的索引
-    var indices: std.ArrayListUnmanaged(usize) = .empty;
+    var indices: std.ArrayList(usize) = .empty;
     defer indices.deinit(allocator);
     try indices.ensureTotalCapacity(allocator, params.len);
     for (params, 0..) |p, i| {
@@ -49,7 +49,7 @@ pub fn orderParam(
     std.sort.block(usize, indices.items, params, Items.lessThan);
 
     // 3 & 4. 拼接
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var first = true;
     for (indices.items) |i| {

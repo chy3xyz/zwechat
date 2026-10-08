@@ -60,7 +60,7 @@ const max_file_bytes: usize = 16 * 1024 * 1024;
 
 /// 收集到的 `.zig` 文件的相对路径（`src/` 前缀 + `/` 分隔）。
 fn collectZigFiles(arena: std.mem.Allocator, io: std.Io, root: []const u8) ![]const []const u8 {
-    const src_path = try std.fs.path.join(arena, &.{ root, "src" });
+    const src_path = try std.Io.Dir.path.join(arena, &.{ root, "src" });
     var dir = try std.Io.Dir.cwd().openDir(io, src_path, .{ .iterate = true });
     defer dir.close(io);
 
@@ -71,7 +71,7 @@ fn collectZigFiles(arena: std.mem.Allocator, io: std.Io, root: []const u8) ![]co
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".zig")) continue;
-        const rel = try std.fmt.allocPrint(arena, "src/{s}", .{entry.path});
+        const rel = try arena.print("src/{s}", .{entry.path});
         // Windows 的 sep 是 `\`；统一成 `/`，让快照跨平台逐字可比。
         std.mem.replaceScalar(u8, rel, '\\', '/');
         try files.append(arena, rel);
@@ -92,7 +92,7 @@ fn processFile(
     root: []const u8,
     rel_path: []const u8,
 ) !void {
-    const abs_path = try std.fs.path.join(arena, &.{ root, rel_path });
+    const abs_path = try std.Io.Dir.path.join(arena, &.{ root, rel_path });
     const source = try std.Io.Dir.cwd().readFileAllocOptions(
         io,
         abs_path,
@@ -166,7 +166,7 @@ const Walker = struct {
                 try self.out.print("{s}: pub {s} {s}\n", .{ self.path, keyword, name });
 
                 const init = var_decl.ast.init_node.unwrap() orelse return;
-                const child_qual = try std.fmt.allocPrint(self.arena, "{s}.", .{name});
+                const child_qual = try self.arena.print("{s}.", .{name});
                 try self.walkContainer(init, child_qual);
             },
 
@@ -193,7 +193,7 @@ const Walker = struct {
                 try self.out.print("{s}: field {s}: {s}\n", .{ self.path, name, type_text });
 
                 // 内联匿名容器（`data: struct {...}`）本身是字段，其成员再带一层容器名
-                const child_qual = try std.fmt.allocPrint(self.arena, "{s}.", .{name});
+                const child_qual = try self.arena.print("{s}.", .{name});
                 try self.walkContainer(typed, child_qual);
             },
 
@@ -220,7 +220,7 @@ const Walker = struct {
     }
 
     fn qualified(self: *Walker, qual: []const u8, name: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(self.arena, "{s}{s}", .{ qual, name });
+        return self.arena.print("{s}{s}", .{ qual, name });
     }
 
     /// `@"type"` → `type`（Zig 关键字/带特殊字符的标识符写法）。

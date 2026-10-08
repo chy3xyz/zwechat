@@ -90,8 +90,7 @@ pub const DefaultJsTicket = struct {
         access_token: []const u8,
     ) CredentialError![]u8 {
         _ = self; // 当前 URL 模板不依赖 app_id，预留对齐 `DefaultAccessToken.buildURL`。
-        return std.fmt.allocPrint(
-            allocator,
+        return allocator.print(
             getTicketURLTemplate,
             .{access_token},
         );
@@ -99,8 +98,7 @@ pub const DefaultJsTicket = struct {
 
     /// 构造 cache key：`"{prefix}_jsapi_ticket_{app_id}"`。
     pub fn cacheKey(self: *const DefaultJsTicket, allocator: std.mem.Allocator) CredentialError![]u8 {
-        return std.fmt.allocPrint(
-            allocator,
+        return allocator.print(
             "{s}_jsapi_ticket_{s}",
             .{ self.cache_key_prefix, self.app_id },
         );
@@ -261,7 +259,7 @@ test "DefaultJsTicket: cache hit 返回缓存值，fetcher 不被调用" {
     const app_id = "wx_t_cache_hit";
     const expected = "ticket_from_cache";
 
-    const key = try std.fmt.allocPrint(allocator, "{s}_jsapi_ticket_{s}", .{ prefix, app_id });
+    const key = try allocator.print("{s}_jsapi_ticket_{s}", .{ prefix, app_id });
     defer allocator.free(key);
     try ctx.cache.set(key, expected, 7000);
 
@@ -317,11 +315,11 @@ test "DefaultJsTicket: cache miss 走 fetcher、解析、写入缓存并返回" 
     try std.testing.expectEqualStrings("fresh_ticket_abc", ticket);
     try std.testing.expectEqual(@as(usize, 1), stub_ctx.called_count);
     try std.testing.expect(stub_ctx.last_url != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub_ctx.last_url.?, ak) != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub_ctx.last_url.?, "type=jsapi") != null);
+    try std.testing.expect(std.mem.find(u8, stub_ctx.last_url.?, ak) != null);
+    try std.testing.expect(std.mem.find(u8, stub_ctx.last_url.?, "type=jsapi") != null);
 
     // 2) 验证缓存写入
-    const key = try std.fmt.allocPrint(allocator, "{s}_jsapi_ticket_{s}", .{ prefix, app_id });
+    const key = try allocator.print("{s}_jsapi_ticket_{s}", .{ prefix, app_id });
     defer allocator.free(key);
     const cached = (try ctx.cache.get(key)).?;
     try std.testing.expectEqualStrings("fresh_ticket_abc", cached);
@@ -357,7 +355,7 @@ test "DefaultJsTicket: errcode != 0 返回 ApiError 且不写入缓存" {
     const result = t.getTicket(allocator, "bad_ak");
     try std.testing.expectError(CredentialError.ApiError, result);
 
-    const key = try std.fmt.allocPrint(allocator, "gowechat_test__jsapi_ticket_{s}", .{"wx_t_bad"});
+    const key = try allocator.print("gowechat_test__jsapi_ticket_{s}", .{"wx_t_bad"});
     defer allocator.free(key);
     try std.testing.expect((try ctx.cache.get(key)) == null);
 }
@@ -428,9 +426,9 @@ test "DefaultJsTicket: buildURL 拼接正确" {
     const url = try t.buildURL(allocator, "my_ak");
     defer allocator.free(url);
 
-    try std.testing.expect(std.mem.indexOf(u8, url, "my_ak") != null);
-    try std.testing.expect(std.mem.indexOf(u8, url, "type=jsapi") != null);
-    try std.testing.expect(std.mem.indexOf(u8, url, "api.weixin.qq.com") != null);
+    try std.testing.expect(std.mem.find(u8, url, "my_ak") != null);
+    try std.testing.expect(std.mem.find(u8, url, "type=jsapi") != null);
+    try std.testing.expect(std.mem.find(u8, url, "api.weixin.qq.com") != null);
 }
 
 test "DefaultJsTicket: cacheKey 拼接正确" {

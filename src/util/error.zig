@@ -96,8 +96,7 @@ pub const CommonError = struct {
 
     /// 格式化为字符串，等价于 Go 的 `fmt.Sprintf("%s Error , errcode=%d , errmsg=%s", ...)`。
     pub fn format(self: CommonError, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
-        return std.fmt.allocPrint(
-            allocator,
+        return allocator.print(
             "{s} Error , errcode={d} , errmsg={s}",
             .{ self.api_name, self.errcode, self.errmsg },
         );
@@ -503,7 +502,7 @@ test "lastErrorDetail 长 errmsg 截断到 512B 且不越界" {
 
     // 700B 的纯 ASCII errmsg（远超 512B 容量）
     const long_msg = repeatByte(700, 'e');
-    const body = try std.fmt.allocPrint(allocator, "{{\"errcode\":45009,\"errmsg\":\"{s}\"}}", .{long_msg[0..]});
+    const body = try allocator.print("{{\"errcode\":45009,\"errmsg\":\"{s}\"}}", .{long_msg[0..]});
     defer allocator.free(body);
 
     const result = try decodeWithCommonError(allocator, body, "Send");
@@ -527,7 +526,7 @@ test "lastErrorDetail 在 UTF-8 边界截断，不切裂多字节字符" {
 
     // 511 个 ASCII + 一个 3 字节汉字（"错" = E9 94 99），容量 512 会正好切在汉字中间。
     const prefix = repeatByte(511, 'a');
-    const body = try std.fmt.allocPrint(allocator, "{{\"errcode\":45009,\"errmsg\":\"{s}错\"}}", .{prefix[0..]});
+    const body = try allocator.print("{{\"errcode\":45009,\"errmsg\":\"{s}错\"}}", .{prefix[0..]});
     defer allocator.free(body);
 
     const result = try decodeWithCommonError(allocator, body, "Send");
@@ -649,7 +648,7 @@ test "lastErrorDetail 是通道内的独立副本（CommonError.deinit 后依然
     defer clearErrorDetail();
 
     const long_msg = repeatByte(2000, 'z');
-    const body = try std.fmt.allocPrint(allocator, "{{\"errcode\":45009,\"errmsg\":\"{s}\"}}", .{long_msg[0..]});
+    const body = try allocator.print("{{\"errcode\":45009,\"errmsg\":\"{s}\"}}", .{long_msg[0..]});
     defer allocator.free(body);
 
     {

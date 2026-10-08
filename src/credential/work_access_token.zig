@@ -87,16 +87,14 @@ pub const WorkAccessToken = struct {
     }
 
     fn cacheKey(self: *const Self, allocator: std.mem.Allocator) credential.CredentialError![]u8 {
-        return std.fmt.allocPrint(
-            allocator,
+        return allocator.print(
             "{s}_access_token_{s}",
             .{ self.cache_key_prefix, self.corp_id },
         );
     }
 
     fn buildURL(self: *const Self, allocator: std.mem.Allocator) credential.CredentialError![]u8 {
-        return std.fmt.allocPrint(
-            allocator,
+        return allocator.print(
             workAccessTokenURL,
             .{ self.corp_id, self.corp_secret },
         );
@@ -197,9 +195,9 @@ test "WorkAccessToken.buildURL 使用 qyapi 域名" {
     const t = WorkAccessToken.init("ww-it", "sec", "gk_", undefined);
     const url = try t.buildURL(std.testing.allocator);
     defer std.testing.allocator.free(url);
-    try std.testing.expect(std.mem.indexOf(u8, url, "qyapi.weixin.qq.com") != null);
-    try std.testing.expect(std.mem.indexOf(u8, url, "corpid=ww-it") != null);
-    try std.testing.expect(std.mem.indexOf(u8, url, "corpsecret=sec") != null);
+    try std.testing.expect(std.mem.find(u8, url, "qyapi.weixin.qq.com") != null);
+    try std.testing.expect(std.mem.find(u8, url, "corpid=ww-it") != null);
+    try std.testing.expect(std.mem.find(u8, url, "corpsecret=sec") != null);
 }
 
 test "ResAccessToken 默认值" {

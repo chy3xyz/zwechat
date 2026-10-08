@@ -43,7 +43,7 @@ pub fn parseCallbackQuery(query_string: []const u8) !CallbackQuery {
     var it = std.mem.splitScalar(u8, query_string, '&');
     while (it.next()) |pair| {
         if (pair.len == 0) continue;
-        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        const eq = std.mem.findScalar(u8, pair, '=') orelse continue;
         const key = pair[0..eq];
         const value = pair[eq + 1 ..];
         if (std.mem.eql(u8, key, "signature")) {

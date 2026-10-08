@@ -16,7 +16,7 @@ const Sha1 = std.crypto.hash.Sha1;
 /// 错误集：`error{OutOfMemory}`。
 pub fn signature(allocator: Allocator, params: []const []const u8) Allocator.Error![]u8 {
     // 1. 拷贝并按字典序排序。Go 不会修改入参，所以这里用一份本地副本。
-    var owned: std.ArrayListUnmanaged([]const u8) = .empty;
+    var owned: std.ArrayList([]const u8) = .empty;
     defer owned.deinit(allocator);
     try owned.ensureTotalCapacity(allocator, params.len);
     for (params) |p| owned.appendAssumeCapacity(p);
@@ -26,7 +26,7 @@ pub fn signature(allocator: Allocator, params: []const []const u8) Allocator.Err
     var total: usize = 0;
     for (owned.items) |p| total += p.len;
 
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try buf.ensureTotalCapacity(allocator, total);
     for (owned.items) |p| try buf.appendSlice(allocator, p);

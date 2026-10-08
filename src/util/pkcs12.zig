@@ -500,9 +500,9 @@ fn aes256CbcDecrypt(allocator: std.mem.Allocator, key: []const u8, iv: []const u
 fn derToPem(allocator: std.mem.Allocator, der: []const u8, label: []const u8) Error![]u8 {
     const encoder = std.base64.standard.Encoder;
     const b64_len = encoder.calcSize(der.len);
-    const header = try std.fmt.allocPrint(allocator, "-----BEGIN {s}-----\n", .{label});
+    const header = try allocator.print("-----BEGIN {s}-----\n", .{label});
     defer allocator.free(header);
-    const footer = try std.fmt.allocPrint(allocator, "\n-----END {s}-----\n", .{label});
+    const footer = try allocator.print("\n-----END {s}-----\n", .{label});
     defer allocator.free(footer);
 
     // 每 64 字符一行
@@ -585,9 +585,9 @@ test "parseP12 解析 AES-256-CBC / PBKDF2-SHA256 P12" {
     defer result.deinit(allocator);
 
     try std.testing.expect(std.mem.startsWith(u8, result.cert_pem, "-----BEGIN CERTIFICATE-----"));
-    try std.testing.expect(std.mem.indexOf(u8, result.cert_pem, "-----END CERTIFICATE-----") != null);
+    try std.testing.expect(std.mem.find(u8, result.cert_pem, "-----END CERTIFICATE-----") != null);
     try std.testing.expect(std.mem.startsWith(u8, result.key_pem, "-----BEGIN PRIVATE KEY-----"));
-    try std.testing.expect(std.mem.indexOf(u8, result.key_pem, "-----END PRIVATE KEY-----") != null);
+    try std.testing.expect(std.mem.find(u8, result.key_pem, "-----END PRIVATE KEY-----") != null);
 }
 
 test "parseP12 密码错误返回 BadPassword" {

@@ -181,7 +181,7 @@ const FakeSender = struct {
     fn send(self: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
         const st = self.state;
         if (st.calls < st.token_buf.len and token.len <= st.token_buf[0].len) {
-            std.mem.copyForwards(u8, st.token_buf[st.calls][0..token.len], token);
+            @memmove(st.token_buf[st.calls][0..token.len], token);
             st.token_len[st.calls] = token.len;
         }
         st.calls += 1;

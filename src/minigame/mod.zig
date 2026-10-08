@@ -66,8 +66,8 @@ test "MiniGame.newMiniGame 注入 config 与 handle" {
     const mg = MiniGame.newMiniGame(.{ .app_id = "wx-mg-new" }, handle);
     try std.testing.expectEqualStrings("wx-mg-new", mg.ctx.config.app_id);
     // 验证 handle 句柄被原样转发：ptr 与 vtable 指针都保持一致
-    try std.testing.expectEqual(@intFromPtr(handle.ptr), @intFromPtr(mg.ctx.access_token_handle.ptr));
-    try std.testing.expectEqual(@intFromPtr(handle.vtable), @intFromPtr(mg.ctx.access_token_handle.vtable));
+    try std.testing.expect(handle.ptr == mg.ctx.access_token_handle.ptr);
+    try std.testing.expect(handle.vtable == mg.ctx.access_token_handle.vtable);
 }
 
 test "MiniGame.getContext 返回内部 ctx 指针" {

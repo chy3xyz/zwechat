@@ -75,10 +75,10 @@ const PemKind = enum {
 };
 
 fn detectPemKind(pem: []const u8) ?PemKind {
-    if (std.mem.indexOf(u8, pem, "BEGIN RSA PRIVATE KEY") != null) return .rsa_private_key;
-    if (std.mem.indexOf(u8, pem, "BEGIN PRIVATE KEY") != null) return .private_key;
-    if (std.mem.indexOf(u8, pem, "BEGIN RSA PUBLIC KEY") != null) return .rsa_public_key;
-    if (std.mem.indexOf(u8, pem, "BEGIN PUBLIC KEY") != null) return .public_key;
+    if (std.mem.find(u8, pem, "BEGIN RSA PRIVATE KEY") != null) return .rsa_private_key;
+    if (std.mem.find(u8, pem, "BEGIN PRIVATE KEY") != null) return .private_key;
+    if (std.mem.find(u8, pem, "BEGIN RSA PUBLIC KEY") != null) return .rsa_public_key;
+    if (std.mem.find(u8, pem, "BEGIN PUBLIC KEY") != null) return .public_key;
     return null;
 }
 
@@ -86,13 +86,13 @@ fn stripPemArmor(pem: []const u8) Error![]const u8 {
     var start: usize = 0;
     var end: usize = pem.len;
 
-    if (std.mem.indexOf(u8, pem, "-----BEGIN ")) |s| {
-        if (std.mem.indexOfPos(u8, pem, s, "\n")) |nl| {
+    if (std.mem.find(u8, pem, "-----BEGIN ")) |s| {
+        if (std.mem.findPos(u8, pem, s, "\n")) |nl| {
             start = nl + 1;
         } else return error.InvalidPemKey;
     }
 
-    if (std.mem.indexOf(u8, pem, "-----END ")) |e| {
+    if (std.mem.find(u8, pem, "-----END ")) |e| {
         // 找到 END 所在行的开头
         end = e;
         // 去掉该行之前的换行（如果 base64 最后一行之后有换行）

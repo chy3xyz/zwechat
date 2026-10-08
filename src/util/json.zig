@@ -78,7 +78,7 @@ pub fn stringFieldObject(
     field: []const u8,
     value: []const u8,
 ) std.mem.Allocator.Error![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.append(allocator, '{');
     try buf.append(allocator, '"');
@@ -92,7 +92,7 @@ pub fn stringFieldObject(
 /// `appendEscapedString` 的便捷包装：返回带首尾双引号的 JSON 字符串字面量。
 /// 返回的切片由 `allocator` 分配，调用方负责 `free`。
 pub fn stringLiteral(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.append(allocator, '"');
     try appendEscapedString(allocator, &buf, s);
@@ -102,7 +102,7 @@ pub fn stringLiteral(allocator: std.mem.Allocator, s: []const u8) std.mem.Alloca
 
 test "appendEscapedString 转义引号、反斜杠与短转义" {
     const allocator = std.testing.allocator;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try appendEscapedString(allocator, &buf, "a\"b\\c\nd\re\tf");
     try std.testing.expectEqualStrings("a\\\"b\\\\c\\nd\\re\\tf", buf.items);
@@ -110,7 +110,7 @@ test "appendEscapedString 转义引号、反斜杠与短转义" {
 
 test "appendEscapedString 其余控制字符输出 \\u00xx（小写 hex）" {
     const allocator = std.testing.allocator;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try appendEscapedString(allocator, &buf, "a\x01b\x1fc\x00d\x0be");
     // 与 std.json 的 outputSpecialEscape 一致（std.json 用 lowercase hex）。
@@ -119,7 +119,7 @@ test "appendEscapedString 其余控制字符输出 \\u00xx（小写 hex）" {
 
 test "appendEscapedString 对 \\b \\f 用短转义（与 std.json 一致）" {
     const allocator = std.testing.allocator;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try appendEscapedString(allocator, &buf, "\x08\x0c");
     try std.testing.expectEqualStrings("\\b\\f", buf.items);
@@ -127,7 +127,7 @@ test "appendEscapedString 对 \\b \\f 用短转义（与 std.json 一致）" {
 
 test "appendEscapedString 非 ASCII 与 UTF-8 原样透传" {
     const allocator = std.testing.allocator;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try appendEscapedString(allocator, &buf, "中文/emoji 🙂");
     try std.testing.expectEqualStrings("中文/emoji 🙂", buf.items);
@@ -135,7 +135,7 @@ test "appendEscapedString 非 ASCII 与 UTF-8 原样透传" {
 
 test "appendEscapedString 非法 UTF-8 字节替换为 \\ufffd（与 Go encoding/json 一致）" {
     const allocator = std.testing.allocator;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     // \xff 非法首字节、\xc3 被截断的 2 字节序列、\xc0\x80 是 overlong 编码，
     // 中间的 \xc3\xa9（é）是合法序列，必须原样留下。
@@ -152,7 +152,7 @@ test "appendEscapedString 非法 UTF-8 字节替换为 \\ufffd（与 Go encoding
 
 test "appendEscapedString 输出可被 std.json 解析（控制字符回归）" {
     const allocator = std.testing.allocator;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     const raw = "line1\nline2\t\"quoted\"\x01\x1f end";
     try buf.append(allocator, '"');

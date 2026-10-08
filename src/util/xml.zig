@@ -54,7 +54,7 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8) (std.mem.Allocator
 
     // 跳过可选的 `<?xml ...?>` 声明
     if (pos + 5 <= input.len and std.mem.eql(u8, input[pos .. pos + 5], "<?xml")) {
-        const end = std.mem.indexOfScalarPos(u8, input, pos, '>') orelse return error.MalformedXml;
+        const end = std.mem.findScalarPos(u8, input, pos, '>') orelse return error.MalformedXml;
         pos = end + 1;
         skipWs(input, &pos);
     }
@@ -70,7 +70,7 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8) (std.mem.Allocator
     if (pos >= input.len) return error.MalformedXml;
     pos += 1; // consume '>'
 
-    var elements: std.ArrayListUnmanaged(XmlElement) = .empty;
+    var elements: std.ArrayList(XmlElement) = .empty;
     errdefer elements.deinit(allocator);
 
     while (pos < input.len) {
@@ -117,7 +117,7 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8) (std.mem.Allocator
 ///
 /// 错误集：`Allocator.Error`。
 pub fn serialize(allocator: std.mem.Allocator, root_name: []const u8, elements: []const XmlElement) std.mem.Allocator.Error![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
     try buf.print(allocator, "<{s}>", .{root_name});
@@ -160,13 +160,13 @@ fn readValue(input: []const u8, pos: *usize) ![]const u8 {
     if (pos.* + 9 <= input.len and std.mem.eql(u8, input[pos.* .. pos.* + 9], "<![CDATA[")) {
         pos.* += 9;
         const start = pos.*;
-        const end = std.mem.indexOfPos(u8, input, start, "]]>") orelse return error.MalformedXml;
+        const end = std.mem.findPos(u8, input, start, "]]>") orelse return error.MalformedXml;
         pos.* = end + 3;
         return input[start..end];
     }
     // 普通文本模式：读到下一个 `</`
     const start = pos.*;
-    const next_close = std.mem.indexOfPos(u8, input, start, "</") orelse return error.MalformedXml;
+    const next_close = std.mem.findPos(u8, input, start, "</") orelse return error.MalformedXml;
     pos.* = next_close;
     return input[start..next_close];
 }
@@ -208,7 +208,7 @@ test "serialize round-trip" {
     };
     const out = try serialize(allocator, "xml", &elems);
     defer allocator.free(out);
-    try std.testing.expect(std.mem.indexOf(u8, out, "<![CDATA[<b>hello</b>]]>") != null);
+    try std.testing.expect(std.mem.find(u8, out, "<![CDATA[<b>hello</b>]]>") != null);
 }
 
 test "get 不存在的 key 返回 null" {

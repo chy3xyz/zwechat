@@ -206,7 +206,7 @@ pub const Memcache = struct {
         else
             0;
         var header_buf: [256]u8 = undefined;
-        const header = std.fmt.bufPrint(&header_buf, "set {s} 0 {d} {d}\r\n", .{ key, exp, val.len }) catch return error.StorageError;
+        const header = std.mem.print(&header_buf, "set {s} 0 {d} {d}\r\n", .{ key, exp, val.len }) catch return error.StorageError;
         self.sendCommandRaw(header, val) catch return error.StorageError;
 
         const line = self.readLine() catch return error.StorageError;
@@ -383,7 +383,7 @@ fn resolveServer(io: std.Io, server: []const u8) !std.Io.net.IpAddress {
     } else |_| {}
 
     // 域名不含 ':'，所以最后一段冒号必定是端口分隔符。
-    const colon = std.mem.lastIndexOfScalar(u8, server, ':') orelse return error.InvalidAddress;
+    const colon = std.mem.findScalarLast(u8, server, ':') orelse return error.InvalidAddress;
     const port = std.fmt.parseInt(u16, server[colon + 1 ..], 10) catch return error.InvalidAddress;
     return net.resolveHost(io, server[0..colon], port);
 }
@@ -687,7 +687,7 @@ fn mockSilentThenHealthyServer(
             rdy.store(true, .release);
             defer server.deinit(io);
 
-            var handlers: std.ArrayListUnmanaged(std.Thread) = .empty;
+            var handlers: std.ArrayList(std.Thread) = .empty;
             defer handlers.deinit(alloc);
 
             var index: usize = 0;
@@ -873,7 +873,7 @@ test "memcache 基本 set/get/exists/delete 往返" {
     }
 
     var server_str_buf: [32]u8 = undefined;
-    const server_str = try std.fmt.bufPrint(&server_str_buf, "127.0.0.1:{d}", .{port});
+    const server_str = try std.mem.print(&server_str_buf, "127.0.0.1:{d}", .{port});
 
     const mc = try Memcache.create(allocator, .{ .server = server_str });
 
@@ -908,7 +908,7 @@ test "memcache get 不存在的 key 返回 null" {
     }
 
     var server_str_buf: [32]u8 = undefined;
-    const server_str = try std.fmt.bufPrint(&server_str_buf, "127.0.0.1:{d}", .{port});
+    const server_str = try std.mem.print(&server_str_buf, "127.0.0.1:{d}", .{port});
 
     const mc = try Memcache.create(allocator, .{ .server = server_str });
 
@@ -946,7 +946,7 @@ test "memcache set 超大 TTL 不触发 @intCast panic" {
     }
 
     var server_str_buf: [32]u8 = undefined;
-    const server_str = try std.fmt.bufPrint(&server_str_buf, "127.0.0.1:{d}", .{port});
+    const server_str = try std.mem.print(&server_str_buf, "127.0.0.1:{d}", .{port});
 
     const mc = try Memcache.create(allocator, .{ .server = server_str });
 
@@ -977,7 +977,7 @@ test "memcache 多线程并发 set/get 不同 key 全部正确" {
     }
 
     var server_str_buf: [32]u8 = undefined;
-    const server_str = try std.fmt.bufPrint(&server_str_buf, "127.0.0.1:{d}", .{port});
+    const server_str = try std.mem.print(&server_str_buf, "127.0.0.1:{d}", .{port});
 
     const mc = try Memcache.create(allocator, .{ .server = server_str });
     errdefer allocator.destroy(mc);
@@ -992,8 +992,8 @@ test "memcache 多线程并发 set/get 不同 key 全部正确" {
             while (i < OPS) : (i += 1) {
                 var key_buf: [32]u8 = undefined;
                 var val_buf: [32]u8 = undefined;
-                const key = try std.fmt.bufPrint(&key_buf, "wk_{d}_{d}", .{ tid, i });
-                const val = try std.fmt.bufPrint(&val_buf, "val_{d}_{d}", .{ tid, i });
+                const key = try std.mem.print(&key_buf, "wk_{d}_{d}", .{ tid, i });
+                const val = try std.mem.print(&val_buf, "val_{d}_{d}", .{ tid, i });
                 const c = client.asCache();
                 try c.set(key, val, 60);
                 const got = (try c.get(key)).?;
@@ -1075,7 +1075,7 @@ test "memcache 读超时：服务端不回包 → 有界失败、连接被丢弃
     }
 
     var server_str_buf: [32]u8 = undefined;
-    const server_str = try std.fmt.bufPrint(&server_str_buf, "127.0.0.1:{d}", .{port});
+    const server_str = try std.mem.print(&server_str_buf, "127.0.0.1:{d}", .{port});
 
     const mc = try Memcache.create(allocator, .{ .server = server_str, .recv_timeout_ms = 200 });
     const c = mc.asCache();
@@ -1129,7 +1129,7 @@ test "memcache 建连超时：SYN 被丢弃 → 有界失败、状态干净、�
     defer stall.deinit(io);
 
     var server_str_buf: [32]u8 = undefined;
-    const server_str = try std.fmt.bufPrint(&server_str_buf, "127.0.0.1:{d}", .{port});
+    const server_str = try std.mem.print(&server_str_buf, "127.0.0.1:{d}", .{port});
 
     const mc = try Memcache.create(allocator, .{
         .server = server_str,

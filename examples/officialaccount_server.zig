@@ -73,8 +73,7 @@ pub fn main(init: std.process.Init) !void {
     const computed_signature = try zwechat.util.signature.signature(allocator, &params);
     defer allocator.free(computed_signature);
 
-    const raw_query = try std.fmt.allocPrint(
-        allocator,
+    const raw_query = try allocator.print(
         "signature={s}&timestamp={s}&nonce={s}&echostr=OK-VERIFY-PASSED",
         .{ computed_signature, timestamp, nonce },
     );

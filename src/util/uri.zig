@@ -20,7 +20,7 @@ const std = @import("std");
 /// 错误集：`error{OutOfMemory}`。
 pub fn queryEscape(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]u8 {
     const hex_upper = "0123456789ABCDEF";
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     // 最坏情况：每个字节都编码成 `%XX`，输出是输入的 3 倍长。这里只是省掉重复
     // 扩容的预估——下面的写入一律走会自动扩容的 `append`，所以即便估少了也不会
@@ -166,7 +166,7 @@ fn testQueryEscapeProperties(allocator: std.mem.Allocator, smith: *std.testing.S
         i += 1;
     }
 
-    var decoded: std.ArrayListUnmanaged(u8) = .empty;
+    var decoded: std.ArrayList(u8) = .empty;
     defer decoded.deinit(allocator);
     i = 0;
     while (i < escaped.len) {

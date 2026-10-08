@@ -170,7 +170,7 @@ const Conn = struct {
     /// bulk string 的宿主缓冲：跨多次 `get` 复用（容量只增不减），
     /// 正常路径上没有「每次 get 一次 malloc + free」的开销，也不会把别的线程
     /// 正在读的缓冲区提前释放掉。`get` 返回的切片借用自此缓冲。
-    value_buf: std.ArrayListUnmanaged(u8) = .empty,
+    value_buf: std.ArrayList(u8) = .empty,
 
     fn close(self: *Conn) void {
         self.stream.close(self.io);
@@ -285,7 +285,7 @@ pub const Redis = struct {
     pool_mutex: std.Io.Mutex = .init,
     /// 空闲（已建好、可立即复用）连接。容量在 `create` 时预留到 `max_connections`，
     /// 因此正常路径上池锁内不会发生堆分配。
-    idle: std.ArrayListUnmanaged(*Conn) = .empty,
+    idle: std.ArrayList(*Conn) = .empty,
     /// 当前存活连接数 = `idle.len` + 借出中的连接数。
     live: usize = 0,
     /// 历史并发借出峰值。
@@ -512,7 +512,7 @@ pub const Redis = struct {
             conn.expectOk(&.{ "AUTH", pwd }) catch return error.StorageError;
         }
         if (self.opts.db != 0) {
-            const db_str = std.fmt.allocPrint(self.allocator, "{d}", .{self.opts.db}) catch return error.OutOfMemory;
+            const db_str = self.allocator.print("{d}", .{self.opts.db}) catch return error.OutOfMemory;
             defer self.allocator.free(db_str);
             conn.expectOk(&.{ "SELECT", db_str }) catch return error.StorageError;
         }
@@ -582,7 +582,7 @@ pub const Redis = struct {
         defer self.release(conn, reusable);
 
         if (ttl_seconds > 0) {
-            const ttl_str = std.fmt.allocPrint(self.allocator, "{d}", .{ttl_seconds}) catch return error.OutOfMemory;
+            const ttl_str = self.allocator.print("{d}", .{ttl_seconds}) catch return error.OutOfMemory;
             defer self.allocator.free(ttl_str);
             conn.sendCommand(&.{ "SETEX", key, ttl_str, val }) catch {
                 reusable = false;
@@ -1092,7 +1092,7 @@ const MockPoolServer = struct {
         var store = Store.init(self.allocator);
         defer store.deinit();
 
-        var conn_threads: std.ArrayListUnmanaged(std.Thread) = .empty;
+        var conn_threads: std.ArrayList(std.Thread) = .empty;
         defer conn_threads.deinit(self.allocator);
 
         while (!self.stop.load(.acquire)) {
@@ -1392,8 +1392,8 @@ test "redis 多线程并发 set/get 不同 key 全部正确" {
             while (i < OPS) : (i += 1) {
                 var key_buf: [32]u8 = undefined;
                 var val_buf: [32]u8 = undefined;
-                const key = try std.fmt.bufPrint(&key_buf, "wk_{d}_{d}", .{ tid, i });
-                const val = try std.fmt.bufPrint(&val_buf, "val_{d}_{d}", .{ tid, i });
+                const key = try std.mem.print(&key_buf, "wk_{d}_{d}", .{ tid, i });
+                const val = try std.mem.print(&val_buf, "val_{d}_{d}", .{ tid, i });
                 const c = client.asCache();
                 try c.set(key, val, 60);
                 const got = (try c.get(key)).?;
@@ -1490,11 +1490,11 @@ test "redis 连接池：max_connections>1 时多线程真并发（服务端观�
             while (i < OPS) : (i += 1) {
                 var key_buf: [32]u8 = undefined;
                 var val_buf: [32]u8 = undefined;
-                const key = std.fmt.bufPrint(&key_buf, "pk_{d}_{d}", .{ tid, i }) catch {
+                const key = std.mem.print(&key_buf, "pk_{d}_{d}", .{ tid, i }) catch {
                     failed.store(true, .release);
                     return;
                 };
-                const val = std.fmt.bufPrint(&val_buf, "pv_{d}_{d}", .{ tid, i }) catch {
+                const val = std.mem.print(&val_buf, "pv_{d}_{d}", .{ tid, i }) catch {
                     failed.store(true, .release);
                     return;
                 };
@@ -1615,7 +1615,7 @@ test "redis 连接池：顺序请求复用连接，连接数不增长" {
     var i: usize = 0;
     while (i < 12) : (i += 1) {
         var key_buf: [32]u8 = undefined;
-        const key = try std.fmt.bufPrint(&key_buf, "rk_{d}", .{i});
+        const key = try std.mem.print(&key_buf, "rk_{d}", .{i});
         try c.set(key, "v", 60);
         const got = try c.get(key);
         try std.testing.expect(got != null);
