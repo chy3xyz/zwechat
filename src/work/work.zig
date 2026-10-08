@@ -428,7 +428,8 @@ test "Work.newWork 注入 config 与 handle" {
     );
     try std.testing.expectEqualStrings("ww-new", w.ctx.config.corp_id);
     try std.testing.expectEqualStrings("1000001", w.ctx.config.agent_id);
-    try std.testing.expectEqual(@intFromPtr(&state), @intFromPtr(w.ctx.access_token_handle.ptr));
+    // 指针同一性比较（`@intFromPtr` 在 release 下可能被折叠成无意义的值）。
+    try std.testing.expect(w.ctx.access_token_handle.ptr == @as(*anyopaque, @ptrCast(&state)));
     try std.testing.expect(w.ctx.js_ticket_handle == null);
 }
 
@@ -533,9 +534,9 @@ test "Work.getCorpJsTicket / getAgentJsTicket 返回对应类型 ticket" {
     // 注入带 fetcher 的 WorkJsTicket，按 URL 区分 corp / agent。
     const FetcherCtx = struct {
         fn fetch(_: *anyopaque, alloc: std.mem.Allocator, url: []const u8) credential.CredentialError![]u8 {
-            const is_agent = std.mem.indexOf(u8, url, "type=agent_config") != null;
+            const is_agent = std.mem.find(u8, url, "type=agent_config") != null;
             const ticket = if (is_agent) "agent-ticket-xyz" else "corp-ticket-xyz";
-            return std.fmt.allocPrint(alloc, "{{\"errcode\":0,\"errmsg\":\"ok\",\"ticket\":\"{s}\",\"expires_in\":7200}}", .{ticket}) catch return credential.CredentialError.HttpError;
+            return alloc.print("{{\"errcode\":0,\"errmsg\":\"ok\",\"ticket\":\"{s}\",\"expires_in\":7200}}", .{ticket}) catch return credential.CredentialError.HttpError;
         }
     };
 
@@ -573,9 +574,9 @@ test "Work.getJs 自动注入 corp / agent ticket handle" {
 
     const FetcherCtx = struct {
         fn fetch(_: *anyopaque, alloc: std.mem.Allocator, url: []const u8) credential.CredentialError![]u8 {
-            const is_agent = std.mem.indexOf(u8, url, "type=agent_config") != null;
+            const is_agent = std.mem.find(u8, url, "type=agent_config") != null;
             const ticket = if (is_agent) "agent-js-ticket" else "corp-js-ticket";
-            return std.fmt.allocPrint(alloc, "{{\"errcode\":0,\"errmsg\":\"ok\",\"ticket\":\"{s}\",\"expires_in\":7200}}", .{ticket}) catch return credential.CredentialError.HttpError;
+            return alloc.print("{{\"errcode\":0,\"errmsg\":\"ok\",\"ticket\":\"{s}\",\"expires_in\":7200}}", .{ticket}) catch return credential.CredentialError.HttpError;
         }
     };
 
@@ -611,8 +612,7 @@ const TicketFetchStub = struct {
         _ = url;
         const self: *TicketFetchStub = @ptrCast(@alignCast(ctx));
         self.calls += 1;
-        return std.fmt.allocPrint(
-            allocator,
+        return allocator.print(
             "{{\"errcode\":0,\"errmsg\":\"ok\",\"ticket\":\"ticket-v{d}\",\"expires_in\":7200}}",
             .{self.version},
         ) catch return credential.CredentialError.HttpError;
@@ -733,8 +733,7 @@ const TokenFetchStub = struct {
         _ = url;
         const self: *TokenFetchStub = @ptrCast(@alignCast(ctx));
         self.calls += 1;
-        return std.fmt.allocPrint(
-            allocator,
+        return allocator.print(
             "{{\"errcode\":0,\"errmsg\":\"ok\",\"access_token\":\"work-token-v{d}\",\"expires_in\":7200}}",
             .{self.version},
         ) catch return credential.CredentialError.HttpError;

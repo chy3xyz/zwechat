@@ -176,8 +176,7 @@ pub const Oauth = struct {
     pub fn getRedirectURL(self: *Self, redirect_uri: []const u8) ![]u8 {
         const escaped = try queryEscape(self.allocator, redirect_uri);
         defer self.allocator.free(escaped);
-        return std.fmt.allocPrint(
-            self.allocator,
+        return self.allocator.print(
             oauthTargetURL,
             .{ self.ctx.config.corp_id, escaped },
         );
@@ -190,8 +189,7 @@ pub const Oauth = struct {
     pub fn getRedirectPrivateURL(self: *Self, redirect_uri: []const u8, agent_id: []const u8) ![]u8 {
         const escaped = try queryEscape(self.allocator, redirect_uri);
         defer self.allocator.free(escaped);
-        return std.fmt.allocPrint(
-            self.allocator,
+        return self.allocator.print(
             oauthTargetPrivateURL,
             .{ self.ctx.config.corp_id, escaped, agent_id },
         );
@@ -199,16 +197,18 @@ pub const Oauth = struct {
 
     /// 构造独立窗口登录二维码 URL。
     ///
-    /// `state` 通常由调用方生成（Go 版使用 `util.RandomStr(16)`）；
+    /// `state` 通常由调用方生成（Go 版使用 `util.RandomStr(16)`），此处同样按
+    /// Go `url.QueryEscape` 语义编码（Go 参考是裸插值，本仓库统一收紧）；
     /// `redirect_uri` 的编码行为与 `getRedirectURL` 一致；
     /// 返回的 URL 同样由调用方负责 `free`。
     pub fn getQrContentTargetURL(self: *Self, redirect_uri: []const u8, state: []const u8) ![]u8 {
         const escaped = try queryEscape(self.allocator, redirect_uri);
         defer self.allocator.free(escaped);
-        return std.fmt.allocPrint(
-            self.allocator,
+        const escaped_state = try queryEscape(self.allocator, state);
+        defer self.allocator.free(escaped_state);
+        return self.allocator.print(
             oauthQrContentTargetURL,
-            .{ self.ctx.config.corp_id, self.ctx.config.agent_id, escaped, state },
+            .{ self.ctx.config.corp_id, self.ctx.config.agent_id, escaped, escaped_state },
         );
     }
 
@@ -218,13 +218,16 @@ pub const Oauth = struct {
     /// 走 `util/retry.callApi`：token 失效（40001 等）时自动作废缓存并重试一次。
     /// 返回的 `std.json.Parsed(ResUserInfo)` 由调用方持有并负责 `deinit`。
     pub fn userInfoToId(self: *Self, code: []const u8) !std.json.Parsed(ResUserInfo) {
+        // `code` 来自回调 query（用户可控），按 Go `url.QueryEscape` 语义编码后拼入 query。
+        const escaped_code = try queryEscape(self.allocator, code);
+        defer self.allocator.free(escaped_code);
+
         const Sender = struct {
             self: *Self,
             code: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     oauthUserInfoURL,
                     .{ token, c.code },
                 );
@@ -237,7 +240,7 @@ pub const Oauth = struct {
             self.ctx,
             self.allocator,
             "UserInfoToId",
-            Sender{ .self = self, .code = code },
+            Sender{ .self = self, .code = escaped_code },
         );
         defer self.allocator.free(body);
 
@@ -253,13 +256,16 @@ pub const Oauth = struct {
     /// 走 `util/retry.callApi`：token 失效时自动作废缓存并重试一次。
     /// 返回的 `std.json.Parsed(GetUserInfoResponse)` 由调用方持有并负责 `deinit`。
     pub fn getUserInfo(self: *Self, code: []const u8) !std.json.Parsed(GetUserInfoResponse) {
+        // `code` 来自回调 query（用户可控），编码行为与 `userInfoToId` 一致。
+        const escaped_code = try queryEscape(self.allocator, code);
+        defer self.allocator.free(escaped_code);
+
         const Sender = struct {
             self: *Self,
             code: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     getUserInfoURL,
                     .{ token, c.code },
                 );
@@ -272,7 +278,7 @@ pub const Oauth = struct {
             self.ctx,
             self.allocator,
             "GetUserInfo",
-            Sender{ .self = self, .code = code },
+            Sender{ .self = self, .code = escaped_code },
         );
         defer self.allocator.free(body);
 
@@ -299,8 +305,7 @@ pub const Oauth = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     getUserDetailURL,
                     .{token},
                 );
@@ -338,8 +343,7 @@ pub const Oauth = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     getTfaInfoURL,
                     .{token},
                 );
@@ -386,8 +390,7 @@ pub const Oauth = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     tfaSuccURL,
                     .{token},
                 );
@@ -423,14 +426,14 @@ test "Oauth.init 持有 ctx" {
 }
 
 test "URL 模板常量值正确" {
-    try std.testing.expect(std.mem.indexOf(u8, oauthTargetURL, "snsapi_base") != null);
-    try std.testing.expect(std.mem.indexOf(u8, oauthTargetPrivateURL, "snsapi_privateinfo") != null);
-    try std.testing.expect(std.mem.indexOf(u8, oauthUserInfoURL, "user/getuserinfo") != null);
-    try std.testing.expect(std.mem.indexOf(u8, oauthQrContentTargetURL, "wwopen/sso/qrConnect") != null);
-    try std.testing.expect(std.mem.indexOf(u8, getUserInfoURL, "auth/getuserinfo") != null);
-    try std.testing.expect(std.mem.indexOf(u8, getUserDetailURL, "auth/getuserdetail") != null);
-    try std.testing.expect(std.mem.indexOf(u8, getTfaInfoURL, "auth/get_tfa_info") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tfaSuccURL, "user/tfa_succ") != null);
+    try std.testing.expect(std.mem.find(u8, oauthTargetURL, "snsapi_base") != null);
+    try std.testing.expect(std.mem.find(u8, oauthTargetPrivateURL, "snsapi_privateinfo") != null);
+    try std.testing.expect(std.mem.find(u8, oauthUserInfoURL, "user/getuserinfo") != null);
+    try std.testing.expect(std.mem.find(u8, oauthQrContentTargetURL, "wwopen/sso/qrConnect") != null);
+    try std.testing.expect(std.mem.find(u8, getUserInfoURL, "auth/getuserinfo") != null);
+    try std.testing.expect(std.mem.find(u8, getUserDetailURL, "auth/getuserdetail") != null);
+    try std.testing.expect(std.mem.find(u8, getTfaInfoURL, "auth/get_tfa_info") != null);
+    try std.testing.expect(std.mem.find(u8, tfaSuccURL, "user/tfa_succ") != null);
 }
 
 test "Oauth.getRedirectURL 拼接 corp_id 并对 redirect_uri 做 QueryEscape" {
@@ -442,10 +445,10 @@ test "Oauth.getRedirectURL 拼接 corp_id 并对 redirect_uri 做 QueryEscape" {
     var fba = std.heap.FixedBufferAllocator.init(&fba_buf);
     var o = Oauth.init(&ctx, fba.allocator());
     const url = try o.getRedirectURL("https://example.com/cb?a=1&b=2");
-    try std.testing.expect(std.mem.indexOf(u8, url, "wwabc123") != null);
+    try std.testing.expect(std.mem.find(u8, url, "wwabc123") != null);
     // 与 Go url.QueryEscape("https://example.com/cb?a=1&b=2") 的结果一致。
-    try std.testing.expect(std.mem.indexOf(u8, url, "redirect_uri=https%3A%2F%2Fexample.com%2Fcb%3Fa%3D1%26b%3D2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, url, "scope=snsapi_base") != null);
+    try std.testing.expect(std.mem.find(u8, url, "redirect_uri=https%3A%2F%2Fexample.com%2Fcb%3Fa%3D1%26b%3D2") != null);
+    try std.testing.expect(std.mem.find(u8, url, "scope=snsapi_base") != null);
 }
 
 test "Oauth.getRedirectPrivateURL 包含 agentid 且编码 redirect_uri" {
@@ -457,10 +460,10 @@ test "Oauth.getRedirectPrivateURL 包含 agentid 且编码 redirect_uri" {
     var fba = std.heap.FixedBufferAllocator.init(&fba_buf);
     var o = Oauth.init(&ctx, fba.allocator());
     const url = try o.getRedirectPrivateURL("https://example.com/cb", "42");
-    try std.testing.expect(std.mem.indexOf(u8, url, "wwxyz") != null);
-    try std.testing.expect(std.mem.indexOf(u8, url, "scope=snsapi_privateinfo") != null);
-    try std.testing.expect(std.mem.indexOf(u8, url, "agentid=42") != null);
-    try std.testing.expect(std.mem.indexOf(u8, url, "redirect_uri=https%3A%2F%2Fexample.com%2Fcb") != null);
+    try std.testing.expect(std.mem.find(u8, url, "wwxyz") != null);
+    try std.testing.expect(std.mem.find(u8, url, "scope=snsapi_privateinfo") != null);
+    try std.testing.expect(std.mem.find(u8, url, "agentid=42") != null);
+    try std.testing.expect(std.mem.find(u8, url, "redirect_uri=https%3A%2F%2Fexample.com%2Fcb") != null);
 }
 
 test "Oauth.getQrContentTargetURL 编码 redirect_uri 并携带 state" {
@@ -472,11 +475,11 @@ test "Oauth.getQrContentTargetURL 编码 redirect_uri 并携带 state" {
     var fba = std.heap.FixedBufferAllocator.init(&fba_buf);
     var o = Oauth.init(&ctx, fba.allocator());
     const url = try o.getQrContentTargetURL("https://example.com/qr cb", "state123");
-    try std.testing.expect(std.mem.indexOf(u8, url, "appid=wwqr") != null);
-    try std.testing.expect(std.mem.indexOf(u8, url, "agentid=1000009") != null);
+    try std.testing.expect(std.mem.find(u8, url, "appid=wwqr") != null);
+    try std.testing.expect(std.mem.find(u8, url, "agentid=1000009") != null);
     // 空格转 '+'（Go QueryEscape 语义）。
-    try std.testing.expect(std.mem.indexOf(u8, url, "redirect_uri=https%3A%2F%2Fexample.com%2Fqr+cb") != null);
-    try std.testing.expect(std.mem.indexOf(u8, url, "state=state123") != null);
+    try std.testing.expect(std.mem.find(u8, url, "redirect_uri=https%3A%2F%2Fexample.com%2Fqr+cb") != null);
+    try std.testing.expect(std.mem.find(u8, url, "state=state123") != null);
 }
 
 test "queryEscape 符合 Go QueryEscape 语义" {
@@ -645,8 +648,8 @@ test "userInfoToId token 失效自愈：40001 → 作废缓存 → 新 token 重
     try std.testing.expectEqualStrings("zhangsan", parsed.value.UserId);
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-token") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-token") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[0], "access_token=old-token") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[1], "access_token=new-token") != null);
 }
 
 test "getUserDetail token 失效自愈：42001 → 作废缓存 → 新 token 重试成功（POST 路径）" {
@@ -676,7 +679,7 @@ test "getUserDetail token 失效自愈：42001 → 作废缓存 → 新 token �
     try std.testing.expectEqualStrings("15000000000", parsed.value.mobile);
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-token") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[1], "access_token=new-token") != null);
 }
 
 test "tfaSucc token 失效自愈：40014 → 重试后成功且返回 void（无响应体泄漏）" {
@@ -704,7 +707,7 @@ test "tfaSucc token 失效自愈：40014 → 重试后成功且返回 void（无
 
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-token") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[1], "access_token=new-token") != null);
 }
 
 test "getUserInfo 非 token 类 errcode（60011）直接 ApiError，不重试也不作废" {
@@ -730,4 +733,88 @@ test "getUserInfo 非 token 类 errcode（60011）直接 ApiError，不重试也
 
     try std.testing.expectEqual(@as(usize, 0), state.invalidates);
     try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query 转义守护（回归：用户可控参数裸插值进 URL query）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "getQrContentTargetURL 转义 state 中的 & 与 = （回归：裸插值截断参数）" {
+    var ctx: Context = .{
+        .config = .{ .corp_id = "wwqr", .agent_id = "1000009" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = undefined },
+    };
+    var fba_buf: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&fba_buf);
+    var o = Oauth.init(&ctx, fba.allocator());
+    const url = try o.getQrContentTargetURL("https://example.com/cb", "s&t=1");
+    try std.testing.expectEqualStrings(
+        "https://open.work.weixin.qq.com/wwopen/sso/qrConnect?appid=wwqr&agentid=1000009&redirect_uri=https%3A%2F%2Fexample.com%2Fcb&state=s%26t%3D1",
+        url,
+    );
+}
+
+test "userInfoToId / getUserInfo 转义 code 中的 & 与 = 且正常输入 URI 逐字节不变" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    // 正常输入（字母数字）：转义是恒等变换，URI 与改造前一致。
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/user/getuserinfo?access_token=old-token&code=CODE1", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"UserId\":\"zhangsan\"}",
+    });
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/auth/getuserinfo?access_token=old-token&code=CODE1", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"userid\":\"zhangsan\"}",
+    });
+    // 特殊字符输入：`&`/`=` 必须被 percent-encode，否则会截断 query。
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/user/getuserinfo?access_token=old-token&code=C%26ODE%3D1", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"UserId\":\"zhangsan\"}",
+    });
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/auth/getuserinfo?access_token=old-token&code=C%26ODE%3D1", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"userid\":\"zhangsan\"}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = HealState{};
+    var ctx = makeHealCtx(&state);
+    var o = Oauth.init(&ctx, allocator);
+    {
+        var parsed = try o.userInfoToId("CODE1");
+        defer parsed.deinit();
+    }
+    {
+        var parsed = try o.getUserInfo("CODE1");
+        defer parsed.deinit();
+    }
+    {
+        var parsed = try o.userInfoToId("C&ODE=1");
+        defer parsed.deinit();
+    }
+    {
+        var parsed = try o.getUserInfo("C&ODE=1");
+        defer parsed.deinit();
+    }
+
+    try std.testing.expectEqual(@as(usize, 4), mt.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/user/getuserinfo?access_token=old-token&code=CODE1",
+        mt.history.items[0],
+    );
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/auth/getuserinfo?access_token=old-token&code=CODE1",
+        mt.history.items[1],
+    );
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/user/getuserinfo?access_token=old-token&code=C%26ODE%3D1",
+        mt.history.items[2],
+    );
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/auth/getuserinfo?access_token=old-token&code=C%26ODE%3D1",
+        mt.history.items[3],
+    );
 }

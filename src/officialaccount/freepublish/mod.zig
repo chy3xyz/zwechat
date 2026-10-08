@@ -76,8 +76,7 @@ pub const FreePublish = struct {
             media_id: []const u8,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    a,
+                const uri = try a.print(
                     "https://api.weixin.qq.com/cgi-bin/freepublish/submit?access_token={s}",
                     .{token},
                 );
@@ -100,8 +99,7 @@ pub const FreePublish = struct {
             article_id: []const u8,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    a,
+                const uri = try a.print(
                     "https://api.weixin.qq.com/cgi-bin/freepublish/delete?access_token={s}",
                     .{token},
                 );
@@ -127,14 +125,13 @@ pub const FreePublish = struct {
             publish_id: i64,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    a,
+                const uri = try a.print(
                     "https://api.weixin.qq.com/cgi-bin/freepublish/get?access_token={s}",
                     .{token},
                 );
                 defer a.free(uri);
 
-                const body = try std.fmt.allocPrint(a, "{{\"publish_id\":{d}}}", .{c.publish_id});
+                const body = try a.print("{{\"publish_id\":{d}}}", .{c.publish_id});
                 defer a.free(body);
 
                 const client = util_http.getDefaultClient(a);
@@ -164,15 +161,13 @@ pub const FreePublish = struct {
             no_content: bool,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    a,
+                const uri = try a.print(
                     "https://api.weixin.qq.com/cgi-bin/freepublish/batchget?access_token={s}",
                     .{token},
                 );
                 defer a.free(uri);
 
-                const body = try std.fmt.allocPrint(
-                    a,
+                const body = try a.print(
                     "{{\"offset\":{d},\"count\":{d},\"no_content\":{}}}",
                     .{ c.offset, c.count_n, c.no_content },
                 );
@@ -312,7 +307,7 @@ test "FreePublish.list 走 batchget 端点且 no_content 序列化为布尔" {
         cap.uri,
     );
     try std.testing.expectEqualStrings("{\"offset\":0,\"count\":10,\"no_content\":true}", cap.payload);
-    try std.testing.expect(std.mem.indexOf(u8, resp, "\"total_count\":1") != null);
+    try std.testing.expect(std.mem.find(u8, resp, "\"total_count\":1") != null);
 }
 
 test "FreePublish.selectStatus 解析发布状态" {
@@ -386,8 +381,8 @@ test "FreePublish token 失效自愈：40001 → 作废缓存 → 新 token 重�
     try std.testing.expectEqualStrings("{\"total_count\":1,\"item\":[]}", resp);
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-ak") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-ak") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[0], "access_token=old-ak") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[1], "access_token=new-ak") != null);
 }
 
 test "FreePublish.selectStatus 走 token 失效自愈后仍解析发布状态" {

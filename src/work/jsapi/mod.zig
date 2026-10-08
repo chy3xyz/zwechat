@@ -139,8 +139,7 @@ fn computeConfig(
     const timestamp = util_time.getCurrTSWithIo(io);
 
     // 拼接签名字符串（与 Go 一致：jsapi_ticket=X&noncestr=Y&timestamp=Z&url=W）。
-    const to_sign = try std.fmt.allocPrint(
-        allocator,
+    const to_sign = try allocator.print(
         "jsapi_ticket={s}&noncestr={s}&timestamp={d}&url={s}",
         .{ ticket, nonce_str, timestamp, uri },
     );
@@ -327,7 +326,8 @@ test "Js.getAgentConfig 未设置 agent handle 时返回 JsTicketHandleNotSet" {
 
 // —— io 注入：timestamp / nonceStr 不再直接访问全局单例 ——
 
-/// 冻结时钟的可观测 `Io`：`now` 恒定返回 `frozen_ns`。
+/// 冻结时钟 + 确定性随机源的可观测 `Io`：`now` 恒定返回 `frozen_ns`，
+/// `random` 恒定填 `0xAB`。用来证明 `timestamp` / `nonceStr` 真的取自注入的 `io`。
 const FixedIo = struct {
     vtable: std.Io.VTable = undefined,
 
@@ -337,9 +337,14 @@ const FixedIo = struct {
         return .{ .nanoseconds = frozen_ns };
     }
 
+    fn random(_: ?*anyopaque, buf: []u8) void {
+        @memset(buf, 0xAB);
+    }
+
     fn io(self: *FixedIo) std.Io {
         self.vtable = default_io.io().vtable.*;
         self.vtable.now = now;
+        self.vtable.random = random;
         return .{ .userdata = null, .vtable = &self.vtable };
     }
 };
@@ -362,7 +367,7 @@ test "Js.getConfig 的 timestamp / nonceStr 取自注入的 io" {
     defer cfg.deinit(allocator);
     try std.testing.expectEqual(@as(i64, 1_700_000_000), cfg.timestamp);
 
-    // 冻结时钟播种的 PRNG 可复现；若仍走全局单例（真实时间）两次结果不会相同。
+    // 注入的确定性 `io.random` 保证可复现；若改走全局单例（真实熵源）两次结果不会相同。
     var cfg2 = try j.getConfig(allocator, "https://example.com/");
     defer cfg2.deinit(allocator);
     try std.testing.expectEqualStrings(cfg.nonce_str, cfg2.nonce_str);

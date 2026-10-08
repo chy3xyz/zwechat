@@ -194,7 +194,7 @@ pub const Broadcast = struct {
             .to_wxname => |v| v,
         };
 
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(self.allocator);
         try buf.append(self.allocator, '{');
         try buf.append(self.allocator, '"');
@@ -217,11 +217,10 @@ pub const Broadcast = struct {
             article_idx: i64,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(a, "{s}?access_token={s}", .{ deleteSendURL, token });
+                const uri = try a.print("{s}?access_token={s}", .{ deleteSendURL, token });
                 defer a.free(uri);
 
-                const json_body = try std.fmt.allocPrint(
-                    a,
+                const json_body = try a.print(
                     "{{\"msg_id\":{d},\"article_idx\":{d}}}",
                     .{ c.msg_id, c.article_idx },
                 );
@@ -248,7 +247,7 @@ pub const Broadcast = struct {
             msg_id: []const u8,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(a, "{s}?access_token={s}", .{ massStatusSendURL, token });
+                const uri = try a.print("{s}?access_token={s}", .{ massStatusSendURL, token });
                 defer a.free(uri);
 
                 const json_body = try util_json.stringFieldObject(a, "msg_id", c.msg_id);
@@ -280,7 +279,7 @@ pub const Broadcast = struct {
 
     /// 设置群发速度（`mass/speed/set`），`speed` 取值 0-4。
     pub fn setSpeed(self: *Self, speed: i64) !SpeedResult {
-        const json_body = try std.fmt.allocPrint(self.allocator, "{{\"speed\":{d}}}", .{speed});
+        const json_body = try self.allocator.print("{{\"speed\":{d}}}", .{speed});
         defer self.allocator.free(json_body);
         return self.postSpeed(setSpeedSendURL, json_body);
     }
@@ -291,7 +290,7 @@ pub const Broadcast = struct {
             json_body: []const u8,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(a, "{s}?access_token={s}", .{ c.url, token });
+                const uri = try a.print("{s}?access_token={s}", .{ c.url, token });
                 defer a.free(uri);
 
                 const client = util_http.getDefaultClient(a);
@@ -325,8 +324,7 @@ pub const Broadcast = struct {
         const payload = try buildPayloadJson(self.allocator, msgtype, body);
         defer self.allocator.free(payload);
 
-        const json_body = try std.fmt.allocPrint(
-            self.allocator,
+        const json_body = try self.allocator.print(
             "{{\"filter\":{{\"is_to_all\":true}},\"msgtype\":\"{s}\",{s}{s}}}",
             .{ msgtype, payload, extra_fields },
         );
@@ -339,8 +337,7 @@ pub const Broadcast = struct {
         const payload = try buildPayloadJson(self.allocator, msgtype, body);
         defer self.allocator.free(payload);
 
-        const json_body = try std.fmt.allocPrint(
-            self.allocator,
+        const json_body = try self.allocator.print(
             "{{\"filter\":{{\"is_to_all\":false,\"tag_id\":{d}}},\"msgtype\":\"{s}\",{s}}}",
             .{ tag_id, msgtype, payload },
         );
@@ -356,8 +353,7 @@ pub const Broadcast = struct {
         const payload = try buildPayloadJson(self.allocator, msgtype, body);
         defer self.allocator.free(payload);
 
-        const json_body = try std.fmt.allocPrint(
-            self.allocator,
+        const json_body = try self.allocator.print(
             "{{\"touser\":{s},\"msgtype\":\"{s}\",{s}}}",
             .{ openid_array, msgtype, payload },
         );
@@ -372,7 +368,7 @@ pub const Broadcast = struct {
             json_body: []const u8,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(a, "{s}?access_token={s}", .{ c.url, token });
+                const uri = try a.print("{s}?access_token={s}", .{ c.url, token });
                 defer a.free(uri);
 
                 const client = util_http.getDefaultClient(a);
@@ -404,7 +400,7 @@ pub const Broadcast = struct {
 /// 文本内容会做 JSON 转义；media 分支输出完整的 `{"media_id":"..."}` 对象
 /// （修复了此前缺花括号导致的 `"mpnews":"media_id":"..."` 非法 JSON）。
 fn buildPayloadJson(allocator: std.mem.Allocator, msgtype: []const u8, body: SendBody) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.appendSlice(allocator, "\"");
     try buf.appendSlice(allocator, msgtype);
@@ -447,10 +443,10 @@ fn buildPayloadJson(allocator: std.mem.Allocator, msgtype: []const u8, body: Sen
             try appendJsonEscaped(allocator, &buf, imgs.recommend);
             try buf.appendSlice(allocator, "\",\"need_open_comment\":");
             var num_buf: [24]u8 = undefined;
-            const num = std.fmt.bufPrint(&num_buf, "{d}", .{imgs.need_open_comment}) catch unreachable;
+            const num = std.mem.print(&num_buf, "{d}", .{imgs.need_open_comment}) catch unreachable;
             try buf.appendSlice(allocator, num);
             try buf.appendSlice(allocator, ",\"only_fans_can_comment\":");
-            const num2 = std.fmt.bufPrint(&num_buf, "{d}", .{imgs.only_fans_can_comment}) catch unreachable;
+            const num2 = std.mem.print(&num_buf, "{d}", .{imgs.only_fans_can_comment}) catch unreachable;
             try buf.appendSlice(allocator, num2);
             try buf.appendSlice(allocator, "}");
         },
@@ -460,7 +456,7 @@ fn buildPayloadJson(allocator: std.mem.Allocator, msgtype: []const u8, body: Sen
 
 /// 组装 openid 的 JSON 字符串数组（纯函数，元素做 JSON 转义）。
 fn buildOpenidArrayJson(allocator: std.mem.Allocator, openids: []const []const u8) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.append(allocator, '[');
     for (openids, 0..) |id, i| {
@@ -974,9 +970,9 @@ test "Broadcast.previewToUser to_wxname 图片预览（对照 Go Preview().SendI
 
 /// 断言全员群发请求体形状：filter 仅含 is_to_all，且无 tag_id / touser。
 fn expectAllMassBody(payload: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"filter\":{\"is_to_all\":true}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "tag_id") == null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "touser") == null);
+    try std.testing.expect(std.mem.find(u8, payload, "\"filter\":{\"is_to_all\":true}") != null);
+    try std.testing.expect(std.mem.find(u8, payload, "tag_id") == null);
+    try std.testing.expect(std.mem.find(u8, payload, "touser") == null);
 }
 
 test "Broadcast.sendTextToAll 全员群发文本走 mass/sendall" {
@@ -1038,7 +1034,7 @@ test "Broadcast.sendNewsToAll 全员群发图文并支持 send_ignore_reprint" {
         "{\"filter\":{\"is_to_all\":true},\"msgtype\":\"mpnews\",\"mpnews\":{\"media_id\":\"MEDIA_N\"}}",
         cap.payload,
     );
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "send_ignore_reprint") == null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "send_ignore_reprint") == null);
     try expectAllMassBody(cap.payload);
 }
 
@@ -1209,8 +1205,8 @@ test "Broadcast token 失效自愈：40001 → 作废缓存 → 新 token 重试
     try std.testing.expectEqual(@as(i64, 10001), try b.sendTextToTag(2, "x"));
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-ak") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-ak") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[0], "access_token=old-ak") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[1], "access_token=new-ak") != null);
 }
 
 test "Broadcast.getMassStatus 走 token 失效自愈后仍解析 msg_status" {

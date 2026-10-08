@@ -184,8 +184,7 @@ pub const Checkin = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "{s}?access_token={s}",
                     .{ getCheckinDataURL, token },
                 );
@@ -224,8 +223,7 @@ pub const Checkin = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "{s}?access_token={s}",
                     .{ getCheckinOptionURL, token },
                 );
@@ -257,7 +255,7 @@ pub const Checkin = struct {
 
 /// `CheckinDataRequest` 编码为 `{"opencheckindatatype":N,"starttime":N,"endtime":N,"useridlist":["a","b"]}`。
 fn encodeCheckinDataJson(allocator: std.mem.Allocator, req: CheckinDataRequest) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
 
     try buf.print(
@@ -277,7 +275,7 @@ fn encodeCheckinDataJson(allocator: std.mem.Allocator, req: CheckinDataRequest) 
 
 /// `CheckinOptionRequest` 编码为 `{"datetime":N,"useridlist":["a","b"]}`。
 fn encodeCheckinOptionJson(allocator: std.mem.Allocator, req: CheckinOptionRequest) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
 
     try buf.print(allocator, "{{\"datetime\":{d},\"useridlist\":[", .{req.datetime});
@@ -358,10 +356,10 @@ test "encodeCheckinDataJson 生成正确 JSON" {
         .useridlist = &.{ "u1", "u\"2" },
     });
     defer alloc.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"opencheckindatatype\":3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"starttime\":1700000000") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"endtime\":1700086400") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"u\\\"2\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"opencheckindatatype\":3") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"starttime\":1700000000") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"endtime\":1700086400") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"u\\\"2\"") != null);
 }
 
 test "encodeCheckinOptionJson 生成正确 JSON" {
@@ -486,8 +484,8 @@ test "getCheckinData token 失效自愈：40001 → 作废缓存 → 新 token �
     // 作废恰好一次，且第二次请求确实换上了新 token。
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-token") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-token") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[0], "access_token=old-token") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[1], "access_token=new-token") != null);
 }
 
 test "getCheckinOption 非 token 类 errcode（60011）直接 ApiError，不重试也不作废" {

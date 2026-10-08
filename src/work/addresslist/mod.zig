@@ -10,6 +10,10 @@ const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
+const util_uri = @import("../../util/uri.zig");
+
+/// 按 Go `url.QueryEscape` 语义转义 query 参数值（收敛到 `util.uri.queryEscape`）。
+const queryEscape = util_uri.queryEscape;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL 常量
@@ -592,7 +596,10 @@ pub const AddressList = struct {
     ///
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `UserGet`。
     pub fn getUser(self: *Self, user_id: []const u8) !std.json.Parsed(UserGetResponse) {
-        return self.getDecode(userGetURL, "&userid={s}", .{user_id}, UserGetResponse);
+        // `user_id` 为企业成员账号（用户可控），转义后拼入 query。
+        const escaped = try queryEscape(self.allocator, user_id);
+        defer self.allocator.free(escaped);
+        return self.getDecode(userGetURL, "&userid={s}", .{escaped}, UserGetResponse);
     }
 
     /// 获取部门成员（简略列表）。
@@ -634,7 +641,9 @@ pub const AddressList = struct {
     ///
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `UserDelete`。
     pub fn deleteUser(self: *Self, user_id: []const u8) !void {
-        return self.getExpectOK(userDeleteURL, "&userid={s}", .{user_id});
+        const escaped = try queryEscape(self.allocator, user_id);
+        defer self.allocator.free(escaped);
+        return self.getExpectOK(userDeleteURL, "&userid={s}", .{escaped});
     }
 
     /// 批量删除成员。
@@ -689,7 +698,9 @@ pub const AddressList = struct {
     ///
     /// 对应 `_ref/wechat/work/addresslist/user.go` 的 `UserAuthSucc`。
     pub fn userAuthSucc(self: *Self, user_id: []const u8) !void {
-        return self.getExpectOK(userAuthSuccURL, "&userid={s}", .{user_id});
+        const escaped = try queryEscape(self.allocator, user_id);
+        defer self.allocator.free(escaped);
+        return self.getExpectOK(userAuthSuccURL, "&userid={s}", .{escaped});
     }
 
     /// 获取加入企业二维码。
@@ -988,7 +999,7 @@ pub const AddressList = struct {
 /// 如 `.../cgi-bin/user/get` → `get`。
 fn apiNameFromURL(url: []const u8) []const u8 {
     const trimmed = std.mem.trimEnd(u8, url, "/");
-    const idx = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return trimmed;
+    const idx = std.mem.findScalarLast(u8, trimmed, '/') orelse return trimmed;
     return trimmed[idx + 1 ..];
 }
 
@@ -1000,8 +1011,7 @@ fn GetSender(comptime fmt: []const u8, comptime Args: type) type {
         args: Args,
 
         pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-            const uri = try std.fmt.allocPrint(
-                allocator,
+            const uri = try allocator.print(
                 "{s}?access_token={s}" ++ fmt,
                 .{ c.url, token } ++ c.args,
             );
@@ -1019,7 +1029,7 @@ const PostSender = struct {
     body: []const u8,
 
     pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-        const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}", .{ c.url, token });
+        const uri = try allocator.print("{s}?access_token={s}", .{ c.url, token });
         defer allocator.free(uri);
 
         const client = util_http.getDefaultClient(allocator);
@@ -1032,7 +1042,7 @@ const PostEmptySender = struct {
     url: []const u8,
 
     pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-        const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}", .{ c.url, token });
+        const uri = try allocator.print("{s}?access_token={s}", .{ c.url, token });
         defer allocator.free(uri);
 
         const client = util_http.getDefaultClient(allocator);
@@ -1214,7 +1224,7 @@ fn dropCapture() void {
 }
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null);
+    try std.testing.expect(std.mem.find(u8, haystack, needle) != null);
 }
 
 test "getUser 解析含 extattr/external_profile 的真实响应" {
@@ -1436,7 +1446,7 @@ test "listUserIDs 请求 body 与游标响应解析" {
     try std.testing.expectEqualStrings("https://qyapi.weixin.qq.com/cgi-bin/user/list_id?access_token=token-abc", cap.uri);
     // cursor 为空字符串应被跳过（omitempty 语义）。
     try expectContains(cap.payload.?, "\"limit\":100");
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload.?, "cursor") == null);
+    try std.testing.expect(std.mem.find(u8, cap.payload.?, "cursor") == null);
     try std.testing.expectEqualStrings("CUR", parsed.value.next_cursor);
     try std.testing.expectEqual(@as(usize, 1), parsed.value.dept_user.len);
     try std.testing.expectEqualStrings("u1", parsed.value.dept_user[0].userid);
@@ -1592,7 +1602,7 @@ test "createDepartment 请求 body 与响应解析" {
     try expectContains(cap.payload.?, "\"parentid\":1");
     try expectContains(cap.payload.?, "\"id\":123");
     // name_en / order 为零值应跳过。
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload.?, "name_en") == null);
+    try std.testing.expect(std.mem.find(u8, cap.payload.?, "name_en") == null);
     try std.testing.expectEqual(@as(i64, 123), parsed.value.id);
 }
 
@@ -1897,7 +1907,7 @@ test "deleteTagUsers 请求 body 与响应解析" {
     try std.testing.expectEqualStrings("https://qyapi.weixin.qq.com/cgi-bin/tag/deltagusers?access_token=token-abc", cap.uri);
     try expectContains(cap.payload.?, "{\"tagid\":12,\"userlist\":[\"u1\"]}");
     // partylist 为空 slice 应被跳过。
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload.?, "partylist") == null);
+    try std.testing.expect(std.mem.find(u8, cap.payload.?, "partylist") == null);
     // 整体比较：原先只断言 errcode，现覆盖 errmsg / invalidlist / invalidparty（空切片）。
     try std.testing.expectEqualDeep(TagUsersResponse{ .errmsg = "ok" }, parsed.value);
 }
@@ -2228,4 +2238,40 @@ test "deleteUser 非 token 类 errcode：直接 ApiError，不作废也不重试
     try std.testing.expectEqual(@as(usize, 0), state.invalidate_calls);
     try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
     try std.testing.expectEqual(@as(usize, 1), state.fetch_calls);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query 转义守护（回归：用户可控参数裸插值进 URL query）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "getUser / deleteUser / userAuthSucc 转义 userid 中的 & 与 = （回归：裸插值截断参数）" {
+    const allocator = std.testing.allocator;
+    var stub = CaptureTransport{ .allocator = allocator, .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"userid\":\"zhangsan\"}" };
+    defer stub.deinit();
+    useCapture(&stub);
+    defer dropCapture();
+
+    var ctx = makeCtx();
+    var a = AddressList.init(&ctx, allocator);
+
+    {
+        var parsed = try a.getUser("zh&ang=san");
+        defer parsed.deinit();
+    }
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/user/get?access_token=token-abc&userid=zh%26ang%3Dsan",
+        stub.uri,
+    );
+
+    try a.deleteUser("zh&ang=san");
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/user/delete?access_token=token-abc&userid=zh%26ang%3Dsan",
+        stub.uri,
+    );
+
+    try a.userAuthSucc("zh&ang=san");
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/user/authsucc?access_token=token-abc&userid=zh%26ang%3Dsan",
+        stub.uri,
+    );
 }

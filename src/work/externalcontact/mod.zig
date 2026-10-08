@@ -12,6 +12,10 @@ const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
+const util_uri = @import("../../util/uri.zig");
+
+/// 按 Go `url.QueryEscape` 语义转义 query 参数值（收敛到 `util.uri.queryEscape`）。
+const queryEscape = util_uri.queryEscape;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL 常量
@@ -1964,10 +1968,15 @@ pub const ExternalContact = struct {
         external_userid: []const u8,
         next_cursor: []const u8,
     ) !std.json.Parsed(ExternalUserDetailResponse) {
+        // `external_userid` / `next_cursor` 均为用户可控参数，转义后拼入 query。
+        const escaped_userid = try queryEscape(self.allocator, external_userid);
+        defer self.allocator.free(escaped_userid);
+        const escaped_cursor = try queryEscape(self.allocator, next_cursor);
+        defer self.allocator.free(escaped_cursor);
         return self.getParsed(
             externalContactGetURL,
             "&external_userid={s}&cursor={s}",
-            .{ external_userid, next_cursor },
+            .{ escaped_userid, escaped_cursor },
             ExternalUserDetailResponse,
         );
     }
@@ -1980,7 +1989,10 @@ pub const ExternalContact = struct {
         self: *Self,
         userid: []const u8,
     ) !std.json.Parsed(ExternalUserListResponse) {
-        return self.getParsed(externalContactListURL, "&userid={s}", .{userid}, ExternalUserListResponse);
+        // `userid` 为企业成员账号（用户可控），转义后拼入 query。
+        const escaped = try queryEscape(self.allocator, userid);
+        defer self.allocator.free(escaped);
+        return self.getParsed(externalContactListURL, "&userid={s}", .{escaped}, ExternalUserListResponse);
     }
 
     // ── external_user 补充：批量获取 / 备注 / 配置了客户联系的成员 ──
@@ -2411,7 +2423,9 @@ pub const ExternalContact = struct {
     ///
     /// 对应 `_ref/wechat/work/externalcontact/moment.go` 的 `GetMomentTaskResult`。
     pub fn getMomentTaskResult(self: *Self, jobid: []const u8) !std.json.Parsed(GetMomentTaskResultResponse) {
-        return self.getParsed(getMomentTaskResultURL, "&jobid={s}", .{jobid}, GetMomentTaskResultResponse);
+        const escaped = try queryEscape(self.allocator, jobid);
+        defer self.allocator.free(escaped);
+        return self.getParsed(getMomentTaskResultURL, "&jobid={s}", .{escaped}, GetMomentTaskResultResponse);
     }
 
     /// 停止发表企业朋友圈。
@@ -2761,7 +2775,7 @@ pub const ExternalContact = struct {
 /// 如 `.../cgi-bin/externalcontact/get` → `get`。
 fn apiNameFromURL(url: []const u8) []const u8 {
     const trimmed = std.mem.trimEnd(u8, url, "/");
-    const idx = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return trimmed;
+    const idx = std.mem.findScalarLast(u8, trimmed, '/') orelse return trimmed;
     return trimmed[idx + 1 ..];
 }
 
@@ -2773,8 +2787,7 @@ fn GetSender(comptime fmt: []const u8, comptime Args: type) type {
         args: Args,
 
         pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-            const uri = try std.fmt.allocPrint(
-                allocator,
+            const uri = try allocator.print(
                 "{s}?access_token={s}" ++ fmt,
                 .{ c.url, token } ++ c.args,
             );
@@ -2792,7 +2805,7 @@ const PostSender = struct {
     body: []const u8,
 
     pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-        const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}", .{ c.url, token });
+        const uri = try allocator.print("{s}?access_token={s}", .{ c.url, token });
         defer allocator.free(uri);
 
         const client = util_http.getDefaultClient(allocator);
@@ -3054,7 +3067,7 @@ test "batchGetExternalUserDetails 批量获取客户详情" {
         .external_contact_list = &items,
         .next_cursor = "CURS",
     }, parsed.value);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"userid_list\":[\"zhangsan\"]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"userid_list\":[\"zhangsan\"]") != null);
 }
 
 test "updateUserRemark 修改客户备注" {
@@ -3083,8 +3096,8 @@ test "updateUserRemark 修改客户备注" {
     });
 
     try std.testing.expectEqual(@as(usize, 1), rt.payloads.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"remark\":\"备注\\\"引号\\\"\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"remark_mobiles\":[\"13800000000\"]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"remark\":\"备注\\\"引号\\\"\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"remark_mobiles\":[\"13800000000\"]") != null);
 }
 
 test "getFollowUserList 获取配置了客户联系功能的成员列表" {
@@ -3148,10 +3161,10 @@ test "addContactWay 配置联系我方式" {
 
     try std.testing.expectEqualStrings("42", parsed.value.config_id);
     try std.testing.expectEqualStrings("https://qr.example.com", parsed.value.qr_code);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"skip_verify\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"user\":[\"zhangsan\"]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"party\":[2]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"conclusions\":{\"text\":{\"content\":\"欢迎语\"}") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"skip_verify\":true") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"user\":[\"zhangsan\"]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"party\":[2]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"conclusions\":{\"text\":{\"content\":\"欢迎语\"}") != null);
 }
 
 test "getContactWay 获取联系我方式" {
@@ -3196,7 +3209,7 @@ test "getContactWay 获取联系我方式" {
             },
         },
     }, parsed.value);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"config_id\":\"42\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"config_id\":\"42\"") != null);
 }
 
 test "updateContactWay 更新联系我方式" {
@@ -3224,8 +3237,8 @@ test "updateContactWay 更新联系我方式" {
         .party = &.{},
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"config_id\":\"42\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"remark\":\"新备注\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"config_id\":\"42\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"remark\":\"新备注\"") != null);
 }
 
 test "listContactWay 获取联系我列表" {
@@ -3252,7 +3265,7 @@ test "listContactWay 获取联系我列表" {
         .contact_way = &want_ways,
         .next_cursor = "NEXT",
     }, parsed.value);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"limit\":100") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"limit\":100") != null);
 }
 
 test "delContactWay 删除联系我方式" {
@@ -3325,7 +3338,7 @@ test "getGroupChatList 获取客户群列表" {
     try std.testing.expectEqual(@as(usize, 1), parsed.value.group_chat_list.len);
     try std.testing.expectEqualStrings("wrAAA", parsed.value.group_chat_list[0].chat_id);
     try std.testing.expectEqualStrings("NC", parsed.value.next_cursor);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"owner_filter\":{\"userid_list\":[\"zhangsan\"]}") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"owner_filter\":{\"userid_list\":[\"zhangsan\"]}") != null);
 }
 
 test "getGroupChatDetail 获取客户群详情" {
@@ -3376,7 +3389,7 @@ test "getGroupChatDetail 获取客户群详情" {
             .member_version = "mv1",
         },
     }, parsed.value);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"need_name\":1") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"need_name\":1") != null);
 }
 
 test "opengidToChatID 客户群 opengid 转换" {
@@ -3433,8 +3446,8 @@ test "addJoinWay 添加入群方式配置" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("9", parsed.value.config_id);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"chat_id_list\":[\"wrAAA\"]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"mark_source\":true") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"chat_id_list\":[\"wrAAA\"]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"mark_source\":true") != null);
 }
 
 test "getJoinWay 获取入群方式配置" {
@@ -3489,8 +3502,8 @@ test "updateJoinWay 更新入群方式配置" {
         .mark_source = false,
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"config_id\":\"9\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"remark\":\"新渠道\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"config_id\":\"9\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"remark\":\"新渠道\"") != null);
 }
 
 test "delJoinWay 删除入群方式配置" {
@@ -3543,8 +3556,8 @@ test "transferCustomer 分配在职成员的客户" {
     try std.testing.expectEqual(@as(usize, 2), parsed.value.customer.len);
     try std.testing.expectEqualStrings("wmBBB", parsed.value.customer[1].external_userid);
     try std.testing.expectEqual(@as(i64, 84061), parsed.value.customer[1].errcode);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"handover_userid\":\"zhangsan\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"external_userid\":[\"wmAAA\",\"wmBBB\"]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"handover_userid\":\"zhangsan\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"external_userid\":[\"wmAAA\",\"wmBBB\"]") != null);
 }
 
 test "transferResult 查询在职客户接替状态" {
@@ -3572,7 +3585,7 @@ test "transferResult 查询在职客户接替状态" {
     try std.testing.expectEqual(@as(usize, 1), parsed.value.customer.len);
     try std.testing.expectEqual(@as(i64, 1), parsed.value.customer[0].status);
     try std.testing.expectEqual(@as(i64, 1600000200), parsed.value.customer[0].takeover_time);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"takeover_userid\":\"lisi\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"takeover_userid\":\"lisi\"") != null);
 }
 
 test "groupChatOnJobTransfer 分配在职成员的客户群" {
@@ -3598,7 +3611,7 @@ test "groupChatOnJobTransfer 分配在职成员的客户群" {
 
     try std.testing.expectEqual(@as(usize, 1), parsed.value.failed_chat_list.len);
     try std.testing.expectEqualStrings("wrAAA", parsed.value.failed_chat_list[0].chat_id);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"new_owner\":\"lisi\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"new_owner\":\"lisi\"") != null);
 }
 
 test "getUnassignedList 获取待分配的离职成员列表" {
@@ -3623,7 +3636,7 @@ test "getUnassignedList 获取待分配的离职成员列表" {
     try std.testing.expectEqualStrings("zhangsan", parsed.value.info[0].handover_userid);
     try std.testing.expectEqual(@as(i64, 1600000000), parsed.value.info[0].dimission_time);
     try std.testing.expect(parsed.value.is_last);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"page_size\":100") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"page_size\":100") != null);
 }
 
 test "resignedTransferCustomer 分配离职成员的客户" {
@@ -3676,7 +3689,7 @@ test "resignedTransferResult 查询离职客户接替状态" {
 
     try std.testing.expectEqual(@as(i64, 2), parsed.value.customer[0].status);
     try std.testing.expectEqualStrings("NC2", parsed.value.next_cursor);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"cursor\":\"C1\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"cursor\":\"C1\"") != null);
 }
 
 test "groupChatTransfer 分配离职成员的客户群" {
@@ -3701,7 +3714,7 @@ test "groupChatTransfer 分配离职成员的客户群" {
     defer parsed.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), parsed.value.failed_chat_list.len);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"chat_id_list\":[\"wrAAA\",\"wrBBB\"]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"chat_id_list\":[\"wrAAA\",\"wrBBB\"]") != null);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3729,8 +3742,8 @@ test "sendWelcomeMsg 发送新客户欢迎语" {
         .attachments = &.{.{ .msgtype = "image", .image = .{ .media_id = "m1", .pic_url = "" } }},
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"welcome_code\":\"wc\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"msgtype\":\"image\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"welcome_code\":\"wc\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"msgtype\":\"image\"") != null);
 }
 
 test "addGroupWelcomeTemplate 添加入群欢迎语素材" {
@@ -3761,7 +3774,7 @@ test "addGroupWelcomeTemplate 添加入群欢迎语素材" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("tpl1", parsed.value.template_id);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"notify\":1") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"notify\":1") != null);
 }
 
 test "editGroupWelcomeTemplate 编辑入群欢迎语素材" {
@@ -3785,8 +3798,8 @@ test "editGroupWelcomeTemplate 编辑入群欢迎语素材" {
         .agentid = 1000,
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"template_id\":\"tpl1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"text\":{\"content\":\"新欢迎语\"}") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"template_id\":\"tpl1\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"text\":{\"content\":\"新欢迎语\"}") != null);
 }
 
 test "getGroupWelcomeTemplate 获取入群欢迎语素材" {
@@ -3861,8 +3874,8 @@ test "addMsgTemplate 创建企业群发" {
 
     try std.testing.expectEqualStrings("msg1", parsed.value.msgid);
     try std.testing.expectEqual(@as(usize, 0), parsed.value.fail_list.len);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"chat_type\":\"single\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"link\":{\"title\":\"标题\",\"picurl\":\"p\",\"desc\":\"d\",\"url\":\"u\"}") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"chat_type\":\"single\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"link\":{\"title\":\"标题\",\"picurl\":\"p\",\"desc\":\"d\",\"url\":\"u\"}") != null);
 }
 
 test "getGroupMsgListV2 获取群发记录列表" {
@@ -3895,7 +3908,7 @@ test "getGroupMsgListV2 获取群发记录列表" {
     try std.testing.expectEqualStrings("msg1", gm.msgid);
     try std.testing.expectEqualStrings("内容", gm.text.content);
     try std.testing.expectEqualStrings("m1", gm.attachments[0].image.media_id);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"filter_type\":2") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"filter_type\":2") != null);
 }
 
 test "getGroupMsgTask 获取群发成员发送任务列表" {
@@ -3919,7 +3932,7 @@ test "getGroupMsgTask 获取群发成员发送任务列表" {
     try std.testing.expectEqual(@as(usize, 1), parsed.value.task_list.len);
     try std.testing.expectEqualStrings("zhangsan", parsed.value.task_list[0].userid);
     try std.testing.expectEqual(@as(i64, 1), parsed.value.task_list[0].status);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"msgid\":\"msg1\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"msgid\":\"msg1\"") != null);
 }
 
 test "getGroupMsgSendResult 获取企业群发成员执行结果" {
@@ -3942,7 +3955,7 @@ test "getGroupMsgSendResult 获取企业群发成员执行结果" {
 
     try std.testing.expectEqual(@as(usize, 1), parsed.value.send_list.len);
     try std.testing.expectEqualStrings("wmAAA", parsed.value.send_list[0].external_userid);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"userid\":\"zhangsan\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"userid\":\"zhangsan\"") != null);
 }
 
 test "remindGroupMsgSend 提醒成员群发" {
@@ -4026,7 +4039,7 @@ test "getUserBehaviorData 获取联系客户统计数据" {
         .errmsg = "ok",
         .behavior_data = &want_data,
     }, parsed.value);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"userid\":[\"zhangsan\"]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"userid\":[\"zhangsan\"]") != null);
 }
 
 test "getGroupChatStat 获取群聊数据统计（按群主聚合）" {
@@ -4074,7 +4087,7 @@ test "getGroupChatStat 获取群聊数据统计（按群主聚合）" {
         .next_offset = 1,
         .items = &want_items,
     }, parsed.value);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"day_begin_time\":1600000000") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"day_begin_time\":1600000000") != null);
 }
 
 test "getGroupChatStatByDay 获取群聊数据统计（按自然日聚合）" {
@@ -4116,7 +4129,7 @@ test "getGroupChatStatByDay 获取群聊数据统计（按自然日聚合）" {
         .errmsg = "ok",
         .items = &want_items,
     }, parsed.value);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"owner_filter\":{\"userid_list\":[]}") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"owner_filter\":{\"userid_list\":[]}") != null);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4144,7 +4157,7 @@ test "listCustomerStrategy 获取规则组列表" {
     try std.testing.expectEqual(@as(usize, 2), parsed.value.strategy.len);
     try std.testing.expectEqual(@as(i64, 2), parsed.value.strategy[1].strategy_id);
     try std.testing.expectEqualStrings("NC", parsed.value.next_cursor);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"limit\":100") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"limit\":100") != null);
 }
 
 test "getCustomerStrategy 获取规则组详情" {
@@ -4171,7 +4184,7 @@ test "getCustomerStrategy 获取规则组详情" {
     try std.testing.expect(st.privilege.view_customer_list);
     try std.testing.expect(st.privilege.send_customer_msg);
     try std.testing.expect(!st.privilege.manage_customer_tag);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"strategy_id\":1") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"strategy_id\":1") != null);
 }
 
 test "getRangeCustomerStrategy 获取规则组管理范围" {
@@ -4222,8 +4235,8 @@ test "createCustomerStrategy 创建规则组" {
     defer parsed.deinit();
 
     try std.testing.expectEqual(@as(i64, 3), parsed.value.strategy_id);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"strategy_name\":\"新规则\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"range\":[{\"type\":1,\"userid\":\"lisi\",\"partyid\":0}]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"strategy_name\":\"新规则\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"range\":[{\"type\":1,\"userid\":\"lisi\",\"partyid\":0}]") != null);
 }
 
 test "editCustomerStrategy 编辑规则组" {
@@ -4250,8 +4263,8 @@ test "editCustomerStrategy 编辑规则组" {
         .range_del = &.{},
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"strategy_id\":3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"range_add\":[]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"strategy_id\":3") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"range_add\":[]") != null);
 }
 
 test "delCustomerStrategy 删除规则组" {
@@ -4304,8 +4317,8 @@ test "addMomentTask 创建朋友圈发表任务" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("job1", parsed.value.jobid);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"msgtype\":\"image\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"sender_list\":{\"user_list\":[\"zhangsan\"],\"department_list\":[]}") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"msgtype\":\"image\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"sender_list\":{\"user_list\":[\"zhangsan\"],\"department_list\":[]}") != null);
 }
 
 test "getMomentTaskResult 获取任务创建结果" {
@@ -4382,7 +4395,7 @@ test "getMomentList 获取企业全部发表列表" {
     try std.testing.expectEqualStrings("mom1", mi.moment_id);
     try std.testing.expectEqualStrings("内容", mi.text.content);
     try std.testing.expectEqualStrings("m1", mi.image[0].media_id);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"limit\":100") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"limit\":100") != null);
 }
 
 test "getMomentTask 获取企业发表的列表" {
@@ -4405,7 +4418,7 @@ test "getMomentTask 获取企业发表的列表" {
 
     try std.testing.expectEqual(@as(usize, 1), parsed.value.task_list.len);
     try std.testing.expectEqual(@as(i64, 1), parsed.value.task_list[0].publish_status);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"moment_id\":\"mom1\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"moment_id\":\"mom1\"") != null);
 }
 
 test "getMomentCustomerList 获取发表时选择的可见范围" {
@@ -4427,7 +4440,7 @@ test "getMomentCustomerList 获取发表时选择的可见范围" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("wmAAA", parsed.value.customer_list[0].external_userid);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"userid\":\"zhangsan\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"userid\":\"zhangsan\"") != null);
 }
 
 test "getMomentSendResult 获取发表后的可见客户列表" {
@@ -4569,7 +4582,7 @@ test "createMomentStrategy 创建朋友圈规则组" {
     defer parsed.deinit();
 
     try std.testing.expectEqual(@as(i64, 8), parsed.value.strategy_id);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"send_moment\":true") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"send_moment\":true") != null);
 }
 
 test "editMomentStrategy 编辑朋友圈规则组" {
@@ -4596,7 +4609,7 @@ test "editMomentStrategy 编辑朋友圈规则组" {
         .range_del = &.{},
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"strategy_id\":8") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"strategy_id\":8") != null);
 }
 
 test "delMomentStrategy 删除朋友圈规则组" {
@@ -4647,7 +4660,7 @@ test "getCropTagList 获取企业标签库" {
     try std.testing.expectEqual(@as(i64, 1), tg.group_order);
     try std.testing.expectEqualStrings("et1", tg.tag[0].id);
     try std.testing.expect(!tg.tag[0].deleted);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"group_id\":[\"grp1\"]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"group_id\":[\"grp1\"]") != null);
 }
 
 test "addCropTag 添加企业客户标签" {
@@ -4676,7 +4689,7 @@ test "addCropTag 添加企业客户标签" {
 
     try std.testing.expectEqualStrings("grp2", parsed.value.tag_group.group_id);
     try std.testing.expectEqualStrings("新标签", parsed.value.tag_group.tag[0].name);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"tag\":[{\"name\":\"新标签\",\"order\":2}]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"tag\":[{\"name\":\"新标签\",\"order\":2}]") != null);
 }
 
 test "editCropTag 修改企业客户标签" {
@@ -4696,8 +4709,8 @@ test "editCropTag 修改企业客户标签" {
     var ec = ExternalContact.init(&ctx, allocator);
     try ec.editCropTag(.{ .id = "et1", .name = "改名标签", .order = 3, .agent_id = "" });
 
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"id\":\"et1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"name\":\"改名标签\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"id\":\"et1\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"name\":\"改名标签\"") != null);
 }
 
 test "deleteCropTag 删除企业客户标签" {
@@ -4717,7 +4730,7 @@ test "deleteCropTag 删除企业客户标签" {
     var ec = ExternalContact.init(&ctx, allocator);
     try ec.deleteCropTag(.{ .tag_id = &.{"et1"}, .group_id = &.{}, .agent_id = "" });
 
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"tag_id\":[\"et1\"]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"tag_id\":[\"et1\"]") != null);
 }
 
 test "markTag 为客户打标签" {
@@ -4742,8 +4755,8 @@ test "markTag 为客户打标签" {
         .remove_tag = &.{"et2"},
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"add_tag\":[\"et1\"]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"remove_tag\":[\"et2\"]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"add_tag\":[\"et1\"]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"remove_tag\":[\"et2\"]") != null);
 }
 
 test "getStrategyTagList 获取规则组下企业客户标签" {
@@ -4767,7 +4780,7 @@ test "getStrategyTagList 获取规则组下企业客户标签" {
     const tg = parsed.value.tag_group[0];
     try std.testing.expectEqual(@as(i64, 7), tg.strategy_id);
     try std.testing.expectEqualStrings("策略标签", tg.tag[0].name);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"strategy_id\":7") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"strategy_id\":7") != null);
 }
 
 test "addStrategyTag 为规则组创建企业客户标签" {
@@ -4796,7 +4809,7 @@ test "addStrategyTag 为规则组创建企业客户标签" {
 
     try std.testing.expectEqualStrings("sg2", parsed.value.tag_group.group_id);
     try std.testing.expectEqualStrings("st2", parsed.value.tag_group.tag[0].id);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"group_name\":\"新策略分组\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"group_name\":\"新策略分组\"") != null);
 }
 
 test "editStrategyTag 编辑规则组下企业客户标签" {
@@ -4816,7 +4829,7 @@ test "editStrategyTag 编辑规则组下企业客户标签" {
     var ec = ExternalContact.init(&ctx, allocator);
     try ec.editStrategyTag(.{ .id = "st1", .name = "改名", .order = 5 });
 
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"id\":\"st1\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"id\":\"st1\"") != null);
 }
 
 test "delStrategyTag 删除规则组下企业客户标签" {
@@ -4836,7 +4849,7 @@ test "delStrategyTag 删除规则组下企业客户标签" {
     var ec = ExternalContact.init(&ctx, allocator);
     try ec.delStrategyTag(.{ .tag_id = &.{"st1"}, .group_id = &.{"sg1"} });
 
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"group_id\":[\"sg1\"]") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"group_id\":[\"sg1\"]") != null);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4863,7 +4876,7 @@ test "listLink 获取获客链接列表" {
 
     try std.testing.expectEqual(@as(usize, 2), parsed.value.link_id_list.len);
     try std.testing.expectEqualStrings("link2", parsed.value.link_id_list[1]);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"limit\":100") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"limit\":100") != null);
 }
 
 test "getCustomerAcquisition 获取获客链接详情" {
@@ -4917,7 +4930,7 @@ test "createCustomerAcquisitionLink 创建获客链接" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("link3", parsed.value.link.link_id);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"link_name\":\"新链接\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"link_name\":\"新链接\"") != null);
 }
 
 test "updateCustomerAcquisitionLink 编辑获客链接" {
@@ -4946,8 +4959,8 @@ test "updateCustomerAcquisitionLink 编辑获客链接" {
     defer parsed.deinit();
 
     try std.testing.expectEqual(@as(i64, 0), parsed.value.errcode);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"link_id\":\"link1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"skip_verify\":true") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"link_id\":\"link1\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"skip_verify\":true") != null);
 }
 
 test "deleteCustomerAcquisitionLink 删除获客链接" {
@@ -4993,7 +5006,7 @@ test "getCustomerInfoWithLink 获取获客链接添加的客户信息" {
     try std.testing.expectEqual(@as(usize, 1), parsed.value.customer_list.len);
     try std.testing.expectEqualStrings("wmAAA", parsed.value.customer_list[0].external_userid);
     try std.testing.expectEqual(@as(i64, 1), parsed.value.customer_list[0].chat_status);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"link_id\":\"link1\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"link_id\":\"link1\"") != null);
 }
 
 test "customerAcquisitionQuota 查询剩余使用量" {
@@ -5045,7 +5058,7 @@ test "customerAcquisitionStatistic 查询链接使用详情" {
 
     try std.testing.expectEqual(@as(i64, 10), parsed.value.click_link_customer_cnt);
     try std.testing.expectEqual(@as(i64, 6), parsed.value.new_customer_cnt);
-    try std.testing.expect(std.mem.indexOf(u8, rt.payloads.items[0], "\"link_id\":\"link1\"") != null);
+    try std.testing.expect(std.mem.find(u8, rt.payloads.items[0], "\"link_id\":\"link1\"") != null);
 }
 
 test "getChatInfo 获取成员多次收消息详情" {
@@ -5196,4 +5209,76 @@ test "updateUserRemark 非 token 类 errcode：直接 ApiError，不作废也不
     try std.testing.expectEqual(@as(usize, 0), state.invalidate_calls);
     try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
     try std.testing.expectEqual(@as(usize, 1), state.fetch_calls);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query 转义守护（回归：用户可控参数裸插值进 URL query）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "getExternalContact 转义 external_userid / cursor 中的 & 与 = （回归：裸插值截断参数）" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    // 未转义时值里的 `&` 会被服务端当成下一个参数的分隔符。
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/externalcontact/get?access_token=token-abc&external_userid=wm%26A%3DB&cursor=c%2B1", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var ctx = makeCtx();
+    var ec = ExternalContact.init(&ctx, allocator);
+    var parsed = try ec.getExternalContact("wm&A=B", "c+1");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/externalcontact/get?access_token=token-abc&external_userid=wm%26A%3DB&cursor=c%2B1",
+        mt.history.items[0],
+    );
+}
+
+test "getExternalContactList / getMomentTaskResult 正常输入 URI 与改造前逐字节一致（回归守护）" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/externalcontact/list?access_token=token-abc&userid=zhangsan", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"external_userid\":[]}",
+    });
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/externalcontact/get_moment_task_result?access_token=token-abc&jobid=job1", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var ctx = makeCtx();
+    var ec = ExternalContact.init(&ctx, allocator);
+    {
+        var parsed = try ec.getExternalContactList("zhangsan");
+        defer parsed.deinit();
+    }
+    {
+        var parsed = try ec.getMomentTaskResult("job1");
+        defer parsed.deinit();
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/externalcontact/list?access_token=token-abc&userid=zhangsan",
+        mt.history.items[0],
+    );
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/externalcontact/get_moment_task_result?access_token=token-abc&jobid=job1",
+        mt.history.items[1],
+    );
 }

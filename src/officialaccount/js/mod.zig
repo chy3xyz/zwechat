@@ -71,8 +71,7 @@ pub const Js = struct {
 
         // 与 Go 对齐：signature = SHA1("jsapi_ticket=..&noncestr=..&timestamp=..&url=..")
         // （Go 侧 util.Signature 以单个字符串入参，排序不影响结果，即对整个拼接串做 SHA1）。
-        const sign_src = try std.fmt.allocPrint(
-            allocator,
+        const sign_src = try allocator.print(
             "jsapi_ticket={s}&noncestr={s}&timestamp={d}&url={s}",
             .{ ticket, nonce_str, timestamp, uri },
         );
@@ -154,8 +153,7 @@ test "getConfig 签名 = SHA1(jsapi_ticket=..&noncestr=..&timestamp=..&url=..)�
     try std.testing.expectEqualStrings("wx-js-sig", cfg.app_id);
     try std.testing.expectEqual(@as(usize, 16), cfg.nonce_str.len);
 
-    const expected = try std.fmt.allocPrint(
-        allocator,
+    const expected = try allocator.print(
         "jsapi_ticket={s}&noncestr={s}&timestamp={d}&url={s}",
         .{ "ticket-fixed", cfg.nonce_str, cfg.timestamp, uri },
     );
@@ -187,7 +185,8 @@ test "getConfig 未注入 ticket handle 返回 JsTicketHandleNotSet" {
 
 // —— io 注入：timestamp / nonceStr 不再直接访问全局单例 ——
 
-/// 冻结时钟的可观测 `Io`：`now` 恒定返回 `frozen_ns`。
+/// 冻结时钟 + 确定性随机源的可观测 `Io`：`now` 恒定返回 `frozen_ns`，
+/// `random` 恒定填 `0xAB`。用来证明 `timestamp` / `nonce_str` 真的取自注入的 `io`。
 const FixedIo = struct {
     vtable: std.Io.VTable = undefined,
 
@@ -197,9 +196,14 @@ const FixedIo = struct {
         return .{ .nanoseconds = frozen_ns };
     }
 
+    fn random(_: ?*anyopaque, buf: []u8) void {
+        @memset(buf, 0xAB);
+    }
+
     fn io(self: *FixedIo) std.Io {
         self.vtable = default_io.io().vtable.*;
         self.vtable.now = now;
+        self.vtable.random = random;
         return .{ .userdata = null, .vtable = &self.vtable };
     }
 };
@@ -216,7 +220,7 @@ test "getConfig 的 timestamp / nonceStr 取自注入的 io" {
     defer cfg.deinit(allocator);
     try std.testing.expectEqual(@as(i64, 1_700_000_000), cfg.timestamp);
 
-    // 注入 io 后 nonceStr 由冻结时钟播种，两次调用可复现（证明走的是注入的 io）。
+    // 注入的确定性 `io.random` 保证可复现；若改走全局单例（真实熵源）两次结果不会相同。
     var cfg2 = try j.getConfig(allocator, "https://example.com/page");
     defer cfg2.deinit(allocator);
     try std.testing.expectEqualStrings(cfg.nonce_str, cfg2.nonce_str);

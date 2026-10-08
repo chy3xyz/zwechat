@@ -124,7 +124,7 @@ const TokenReq = struct {
     payload: ?[]const u8 = null,
 
     pub fn send(self: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-        const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}", .{ self.url, token });
+        const uri = try allocator.print("{s}?access_token={s}", .{ self.url, token });
         defer allocator.free(uri);
         if (self.payload) |p| return self.mod.postJSON(uri, p);
         return self.mod.httpGet(uri);

@@ -16,6 +16,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_uri = @import("../../util/uri.zig");
 const default_io = @import("../../util/default_io.zig");
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -126,8 +127,7 @@ pub const Material = struct {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
+        const uri = try self.allocator.print(
             "{s}?access_token={s}&type={s}",
             .{ uploadTempFileURL, access_token, media_type.wire() },
         );
@@ -219,10 +219,13 @@ pub const Material = struct {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
-        return std.fmt.allocPrint(
-            self.allocator,
+        // `media_id` 由上游响应/调用方提供，可能含 base64 的 `+`/`/`/`=`，必须转义。
+        const escaped_media_id = try util_uri.queryEscape(self.allocator, media_id);
+        defer self.allocator.free(escaped_media_id);
+
+        return self.allocator.print(
             "{s}?access_token={s}&media_id={s}",
-            .{ getTempFileURL, access_token, media_id },
+            .{ getTempFileURL, access_token, escaped_media_id },
         );
     }
 
@@ -248,7 +251,7 @@ pub const Material = struct {
 
 /// 从 `file_path` 末段截取默认 filename（如 `/tmp/foo.png` → `foo.png`）。
 fn defaultFilename(file_path: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, file_path, '/')) |idx| {
+    if (std.mem.findScalarLast(u8, file_path, '/')) |idx| {
         return file_path[idx + 1 ..];
     }
     return file_path;

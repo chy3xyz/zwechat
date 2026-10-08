@@ -34,8 +34,7 @@ pub const Draft = struct {
             articles_json: []const u8,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    a,
+                const uri = try a.print(
                     "https://api.weixin.qq.com/cgi-bin/draft/add?access_token={s}",
                     .{token},
                 );
@@ -58,8 +57,7 @@ pub const Draft = struct {
             media_id: []const u8,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    a,
+                const uri = try a.print(
                     "https://api.weixin.qq.com/cgi-bin/draft/get?access_token={s}",
                     .{token},
                 );
@@ -82,8 +80,7 @@ pub const Draft = struct {
             media_id: []const u8,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    a,
+                const uri = try a.print(
                     "https://api.weixin.qq.com/cgi-bin/draft/delete?access_token={s}",
                     .{token},
                 );
@@ -112,8 +109,7 @@ pub const Draft = struct {
             article_json: []const u8,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    a,
+                const uri = try a.print(
                     "https://api.weixin.qq.com/cgi-bin/draft/update?access_token={s}",
                     .{token},
                 );
@@ -139,8 +135,7 @@ pub const Draft = struct {
     pub fn count(self: *Self) !i64 {
         const Req = struct {
             pub fn send(_: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    a,
+                const uri = try a.print(
                     "https://api.weixin.qq.com/cgi-bin/draft/count?access_token={s}",
                     .{token},
                 );
@@ -178,15 +173,13 @@ pub const Draft = struct {
             no_content: bool,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    a,
+                const uri = try a.print(
                     "https://api.weixin.qq.com/cgi-bin/draft/batchget?access_token={s}",
                     .{token},
                 );
                 defer a.free(uri);
 
-                const body = try std.fmt.allocPrint(
-                    a,
+                const body = try a.print(
                     "{{\"offset\":{d},\"count\":{d},\"no_content\":{}}}",
                     .{ c.offset, c.count_n, c.no_content },
                 );
@@ -219,13 +212,13 @@ fn buildUpdateBody(
     index: i64,
     article_json: []const u8,
 ) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.appendSlice(allocator, "{\"media_id\":\"");
     try util_json.appendEscapedString(allocator, &buf, media_id);
     try buf.appendSlice(allocator, "\",\"index\":");
     var num_buf: [24]u8 = undefined;
-    const num = std.fmt.bufPrint(&num_buf, "{d}", .{index}) catch unreachable;
+    const num = std.mem.print(&num_buf, "{d}", .{index}) catch unreachable;
     try buf.appendSlice(allocator, num);
     try buf.appendSlice(allocator, ",\"articles\":");
     try buf.appendSlice(allocator, article_json);
@@ -348,7 +341,7 @@ test "Draft.list 走 batchget 端点且 no_content 序列化为布尔" {
         cap.uri,
     );
     try std.testing.expectEqualStrings("{\"offset\":0,\"count\":10,\"no_content\":true}", cap.payload);
-    try std.testing.expect(std.mem.indexOf(u8, resp, "\"total_count\":1") != null);
+    try std.testing.expect(std.mem.find(u8, resp, "\"total_count\":1") != null);
 }
 
 test "Draft.list no_content=false 序列化为 false" {
@@ -506,8 +499,8 @@ test "Draft token 失效自愈：40001 → 作废缓存 → 新 token 重试成�
     try std.testing.expectEqualStrings("{\"total_count\":1,\"item\":[]}", resp);
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-ak") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-ak") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[0], "access_token=old-ak") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[1], "access_token=new-ak") != null);
 }
 
 test "Draft.count 走 token 失效自愈后仍解析 total_count" {
@@ -575,5 +568,5 @@ test "Draft.add 走 draft/add 端点并透传 articles JSON" {
         cap.uri,
     );
     try std.testing.expectEqualStrings(articles, cap.payload);
-    try std.testing.expect(std.mem.indexOf(u8, resp, "\"media_id\":\"MEDIA_NEW\"") != null);
+    try std.testing.expect(std.mem.find(u8, resp, "\"media_id\":\"MEDIA_NEW\"") != null);
 }

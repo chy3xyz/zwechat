@@ -17,7 +17,7 @@ const util_uri = @import("../../util/uri.zig");
 /// 再把 `value` 按 Go `url.QueryEscape` 语义编码后追加。
 fn appendEscapedParam(
     allocator: std.mem.Allocator,
-    buf: *std.ArrayListUnmanaged(u8),
+    buf: *std.ArrayList(u8),
     prefix: []const u8,
     value: []const u8,
 ) !void {
@@ -211,7 +211,7 @@ pub const DataCube = struct {
             ad_slot: []const u8,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                var uri_buf: std.ArrayListUnmanaged(u8) = .empty;
+                var uri_buf: std.ArrayList(u8) = .empty;
                 defer uri_buf.deinit(a);
                 try uri_buf.appendSlice(a, "https://api.weixin.qq.com/publisher/stat?access_token=");
                 try uri_buf.appendSlice(a, token);
@@ -224,9 +224,9 @@ pub const DataCube = struct {
                 try appendEscapedParam(a, &uri_buf, "&end_date=", c.end_date);
                 var num_buf: [24]u8 = undefined;
                 try uri_buf.appendSlice(a, "&page=");
-                try uri_buf.appendSlice(a, std.fmt.bufPrint(&num_buf, "{d}", .{c.page}) catch unreachable);
+                try uri_buf.appendSlice(a, std.mem.print(&num_buf, "{d}", .{c.page}) catch unreachable);
                 try uri_buf.appendSlice(a, "&page_size=");
-                try uri_buf.appendSlice(a, std.fmt.bufPrint(&num_buf, "{d}", .{c.page_size}) catch unreachable);
+                try uri_buf.appendSlice(a, std.mem.print(&num_buf, "{d}", .{c.page_size}) catch unreachable);
                 try appendEscapedParam(a, &uri_buf, "&start_date=", c.start_date);
                 const uri = try uri_buf.toOwnedSlice(a);
                 defer a.free(uri);
@@ -270,15 +270,13 @@ pub const DataCube = struct {
             end_date: []const u8,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    a,
+                const uri = try a.print(
                     "https://api.weixin.qq.com/datacube/{s}?access_token={s}",
                     .{ c.endpoint, token },
                 );
                 defer a.free(uri);
 
-                const body = try std.fmt.allocPrint(
-                    a,
+                const body = try a.print(
                     "{{\"begin_date\":\"{s}\",\"end_date\":\"{s}\"}}",
                     .{ c.begin_date, c.end_date },
                 );
@@ -395,7 +393,7 @@ fn makeDc(alloc: std.mem.Allocator, state: *TestTokenState, ctx: *Context) DataC
 }
 
 fn expectDateBody(payload: []const u8, begin: []const u8, end: []const u8) !void {
-    const expected = try std.fmt.allocPrint(std.heap.page_allocator, "{{\"begin_date\":\"{s}\",\"end_date\":\"{s}\"}}", .{ begin, end });
+    const expected = try std.heap.page_allocator.print("{{\"begin_date\":\"{s}\",\"end_date\":\"{s}\"}}", .{ begin, end });
     defer std.heap.page_allocator.free(expected);
     try std.testing.expectEqualStrings(expected, payload);
 }
@@ -447,10 +445,10 @@ test "DataCube 图文统计系列（getArticleTotal/getUserRead/getUserShare）"
     for (cases) |case| {
         const resp = try case.call(&dc, "2024-01-01", "2024-01-07");
         defer alloc.free(resp);
-        const expected_uri = try std.fmt.allocPrint(alloc, "https://api.weixin.qq.com/datacube/{s}?access_token=stub-ak", .{case.endpoint});
+        const expected_uri = try alloc.print("https://api.weixin.qq.com/datacube/{s}?access_token=stub-ak", .{case.endpoint});
         try std.testing.expectEqualStrings(expected_uri, cap.uri);
         try expectDateBody(cap.payload, "2024-01-01", "2024-01-07");
-        try std.testing.expect(std.mem.indexOf(u8, resp, "\"list\"") != null);
+        try std.testing.expect(std.mem.find(u8, resp, "\"list\"") != null);
     }
 }
 
@@ -511,7 +509,7 @@ test "DataCube 消息发送分布七端点" {
     for (cases) |case| {
         const resp = try case.call(&dc, "2024-02-01", "2024-02-07");
         defer alloc.free(resp);
-        const expected_uri = try std.fmt.allocPrint(alloc, "https://api.weixin.qq.com/datacube/{s}?access_token=stub-ak", .{case.endpoint});
+        const expected_uri = try alloc.print("https://api.weixin.qq.com/datacube/{s}?access_token=stub-ak", .{case.endpoint});
         try std.testing.expectEqualStrings(expected_uri, cap.uri);
         try expectDateBody(cap.payload, "2024-02-01", "2024-02-07");
     }
@@ -537,7 +535,7 @@ test "DataCube.getInterfaceSummaryHour 请求与解析" {
         cap.uri,
     );
     try expectDateBody(cap.payload, "2024-01-01", "2024-01-01");
-    try std.testing.expect(std.mem.indexOf(u8, resp, "ref_hour") != null);
+    try std.testing.expect(std.mem.find(u8, resp, "ref_hour") != null);
 }
 
 test "DataCube errcode 非 0 返回 ApiError" {
@@ -582,7 +580,7 @@ test "DataCube.getPublisherAdPosGeneral GET 参数顺序与 base_resp 检查" {
         cap.uri,
     );
     try std.testing.expectEqualStrings("", cap.payload);
-    try std.testing.expect(std.mem.indexOf(u8, resp, "\"total_num\":1") != null);
+    try std.testing.expect(std.mem.find(u8, resp, "\"total_num\":1") != null);
 
     // base_resp.ret != 0 → ApiError。
     cap.response = "{\"base_resp\":{\"ret\":1001,\"err_msg\":\"invalid date\"}}";
@@ -620,7 +618,7 @@ test "DataCube.getPublisherSettlement 结算数据" {
         "https://api.weixin.qq.com/publisher/stat?access_token=stub-ak&action=publisher_settlement&end_date=2024-01-31&page=1&page_size=5&start_date=2024-01-01",
         cap.uri,
     );
-    try std.testing.expect(std.mem.indexOf(u8, resp, "\"sett_no\":\"NO1\"") != null);
+    try std.testing.expect(std.mem.find(u8, resp, "\"sett_no\":\"NO1\"") != null);
 }
 
 test "DataCube token 失效自愈：40001 → 作废缓存 → 新 token 重试成功" {
@@ -647,8 +645,8 @@ test "DataCube token 失效自愈：40001 → 作废缓存 → 新 token 重试�
     try std.testing.expectEqualStrings("{\"list\":[{\"ref_date\":\"2024-01-01\"}]}", resp);
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-ak") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-ak") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[0], "access_token=old-ak") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[1], "access_token=new-ak") != null);
 }
 
 test "DataCube 非 token 类 errcode（45009）直接 ApiError：不作废、只请求一次" {
@@ -700,5 +698,5 @@ test "DataCube.getPublisherAdPosGeneral 走 token 失效自愈（GET 查询串�
     try std.testing.expectEqualStrings("{\"base_resp\":{\"ret\":0,\"err_msg\":\"ok\"},\"total_num\":1}", resp);
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-ak") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[1], "access_token=new-ak") != null);
 }

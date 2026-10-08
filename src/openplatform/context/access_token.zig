@@ -97,8 +97,7 @@ pub fn getComponentAccessToken(
     const ticket_owned = try allocator.dupe(u8, verify_ticket);
     defer allocator.free(ticket_owned);
 
-    const cache_key = try std.fmt.allocPrint(
-        allocator,
+    const cache_key = try allocator.print(
         "openplatform_component_access_token_{s}",
         .{ctx.config.app_id},
     );
@@ -128,8 +127,7 @@ fn getComponentAccessTokenLocked(
         return allocator.dupe(u8, cached);
     }
 
-    const client_body = try std.fmt.allocPrint(
-        allocator,
+    const client_body = try allocator.print(
         "{{\"component_appid\":\"{s}\",\"component_appsecret\":\"{s}\",\"component_verify_ticket\":\"{s}\"}}",
         .{ ctx.config.app_id, ctx.config.app_secret, verify_ticket },
     );
@@ -174,12 +172,12 @@ const AuthrTokenResponse = struct {
 
 /// authorizer_access_token 缓存 key（对照 Go `authorizer_access_token_{appid}`）。
 fn authrTokenKey(allocator: std.mem.Allocator, appid: []const u8) Error![]u8 {
-    return std.fmt.allocPrint(allocator, "authorizer_access_token_{s}", .{appid});
+    return allocator.print("authorizer_access_token_{s}", .{appid});
 }
 
 /// authorizer_refresh_token 缓存 key（对照 Go `authorizer_refresh_token_{appid}`）。
 fn authrRefreshKey(allocator: std.mem.Allocator, appid: []const u8) Error![]u8 {
-    return std.fmt.allocPrint(allocator, "authorizer_refresh_token_{s}", .{appid});
+    return allocator.print("authorizer_refresh_token_{s}", .{appid});
 }
 
 /// 获取被授权方的 authorizer_access_token。
@@ -237,8 +235,7 @@ pub fn getAuthrAccessToken(
 /// `getComponentAccessToken` 回源后再试。
 pub fn getCachedComponentAccessToken(ctx: *Context, allocator: std.mem.Allocator) Error![]u8 {
     const cache_inst = ctx.config.cache orelse return error.CacheUnavailable;
-    const cache_key = try std.fmt.allocPrint(
-        allocator,
+    const cache_key = try allocator.print(
         "openplatform_component_access_token_{s}",
         .{ctx.config.app_id},
     );
@@ -293,8 +290,7 @@ fn refreshAuthrAccessTokenLocked(
     const cache_inst = ctx.config.cache orelse return error.CacheUnavailable;
 
     const component_token = if (verify_ticket.len > 0) blk: {
-        const cache_key = try std.fmt.allocPrint(
-            allocator,
+        const cache_key = try allocator.print(
             "openplatform_component_access_token_{s}",
             .{ctx.config.app_id},
         );
@@ -303,11 +299,10 @@ fn refreshAuthrAccessTokenLocked(
     } else try getCachedComponentAccessToken(ctx, allocator);
     defer allocator.free(component_token);
 
-    const uri = try std.fmt.allocPrint(allocator, refreshAuthrTokenURL, .{component_token});
+    const uri = try allocator.print(refreshAuthrTokenURL, .{component_token});
     defer allocator.free(uri);
 
-    const body_json = try std.fmt.allocPrint(
-        allocator,
+    const body_json = try allocator.print(
         "{{\"component_appid\":\"{s}\",\"authorizer_appid\":\"{s}\",\"authorizer_refresh_token\":\"{s}\"}}",
         .{ ctx.config.app_id, authorizer_appid, authorizer_refresh_token },
     );
@@ -449,7 +444,7 @@ test "getAuthrAccessToken 缓存命中不发第二次请求" {
     const rkey = try authrRefreshKey(allocator, "wx-authr-1");
     defer allocator.free(rkey);
     try memory.asCache().set(rkey, "old_rt", 10 * 365 * 24 * 60 * 60);
-    const ckey = try std.fmt.allocPrint(allocator, "openplatform_component_access_token_{s}", .{"wx-op"});
+    const ckey = try allocator.print("openplatform_component_access_token_{s}", .{"wx-op"});
     defer allocator.free(ckey);
     try memory.asCache().set(ckey, "comp-tok", 7000);
 
@@ -489,7 +484,7 @@ test "getAuthrAccessToken 未命中经 refresh 正常获取（refresh 借用切�
     };
 
     // 预置 component token（verify_ticket 为空仅读缓存）与 refresh token。
-    const ckey = try std.fmt.allocPrint(allocator, "openplatform_component_access_token_{s}", .{"wx-op"});
+    const ckey = try allocator.print("openplatform_component_access_token_{s}", .{"wx-op"});
     defer allocator.free(ckey);
     try memory.asCache().set(ckey, "comp-tok", 7000);
     const rkey = try authrRefreshKey(allocator, "wx-authr-9");

@@ -6,6 +6,7 @@ const Context = @import("../context.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
+const util_uri = @import("../../util/uri.zig");
 
 /// 单个用户基本信息。
 pub const UserInfo = struct {
@@ -129,7 +130,10 @@ pub const User = struct {
     /// 返回的 `std.json.Parsed(UserInfo)` 由调用方持有并负责 `deinit`。
     /// 响应 errcode 非 0 时返回 `WechatError.ApiError`。
     pub fn getUserInfo(self: *Self, open_id: []const u8) !std.json.Parsed(UserInfo) {
-        const suffix = try std.fmt.allocPrint(self.allocator, "&openid={s}&lang=zh_CN", .{open_id});
+        // `open_id` 为用户可控参数，按 Go `url.QueryEscape` 语义转义后拼入 query。
+        const escaped_open_id = try util_uri.queryEscape(self.allocator, open_id);
+        defer self.allocator.free(escaped_open_id);
+        const suffix = try self.allocator.print("&openid={s}&lang=zh_CN", .{escaped_open_id});
         defer self.allocator.free(suffix);
 
         const body = try util_retry.callApi(self.ctx, self.allocator, "GetUserInfo", TokenReq{
@@ -152,7 +156,10 @@ pub const User = struct {
     /// 返回的 `std.json.Parsed(OpenidList)` 由调用方持有并负责 `deinit`。
     /// 响应 errcode 非 0 时返回 `WechatError.ApiError`。
     pub fn getOpenidList(self: *Self, next_openid: []const u8) !std.json.Parsed(OpenidList) {
-        const suffix = try std.fmt.allocPrint(self.allocator, "&next_openid={s}", .{next_openid});
+        // `next_openid` 来自上一次响应的游标（用户可控），转义后拼入 query。
+        const escaped = try util_uri.queryEscape(self.allocator, next_openid);
+        defer self.allocator.free(escaped);
+        const suffix = try self.allocator.print("&next_openid={s}", .{escaped});
         defer self.allocator.free(suffix);
 
         const body = try util_retry.callApi(self.ctx, self.allocator, "GetOpenidList", TokenReq{
@@ -491,7 +498,7 @@ const TokenReq = struct {
     query_suffix: []const u8 = "",
 
     pub fn send(self: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-        const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}{s}", .{ self.url, token, self.query_suffix });
+        const uri = try allocator.print("{s}?access_token={s}{s}", .{ self.url, token, self.query_suffix });
         defer allocator.free(uri);
         if (self.payload) |p| return self.user.post(uri, p);
         return self.user.get(uri);
@@ -837,8 +844,8 @@ test "updateTag 请求体含 id 与 name" {
     try u.updateTag(100, "新名字\"x");
 
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/tags/update?access_token=token-abc", stub.lastUri());
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"id\":100") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "新名字\\\"x") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"id\":100") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "新名字\\\"x") != null);
 }
 
 test "deleteTag 请求体仅含 id" {
@@ -907,8 +914,8 @@ test "openIDListByTag 请求体与粉丝列表解析" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/user/tag/get?access_token=token-abc", stub.lastUri());
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"tagid\":1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"next_openid\":\"oA\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"tagid\":1") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"next_openid\":\"oA\"") != null);
     var want_openids = [_][]const u8{ "oA", "oB" };
     try std.testing.expectEqualDeep(TagOpenIDList{
         .count = 2,
@@ -1202,7 +1209,7 @@ test "listAllUserOpenIDs 多页聚合并携带 next_openid 终止" {
     try std.testing.expectEqualStrings("oB", all[1]);
     try std.testing.expectEqualStrings("oC", all[2]);
     // 第二轮请求必须携带第一页返回的 next_openid 作为游标。
-    try std.testing.expect(std.mem.indexOf(u8, stub.uris.items[1], "next_openid=oB") != null);
+    try std.testing.expect(std.mem.find(u8, stub.uris.items[1], "next_openid=oB") != null);
 }
 
 test "listAllUserOpenIDs 单页 next_openid 为空只调一次" {
@@ -1254,7 +1261,7 @@ test "getAllBlackList 多页聚合去重并终止" {
     try std.testing.expectEqualStrings("oA", all[0]);
     try std.testing.expectEqualStrings("oB", all[1]);
     try std.testing.expectEqualStrings("oC", all[2]);
-    try std.testing.expect(std.mem.indexOf(u8, stub.uris.items[1], "access_token=token-abc") != null);
+    try std.testing.expect(std.mem.find(u8, stub.uris.items[1], "access_token=token-abc") != null);
 }
 
 // —— token 失效自愈 / 非 token 错误不重试 ——
@@ -1533,4 +1540,41 @@ test "getUserInfo 非 token 错误（45009）不重试也不作废" {
 
     try std.testing.expectEqual(@as(usize, 0), tk.invalidates);
     try std.testing.expectEqual(@as(usize, 1), stub.calls);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query 转义守护（回归：用户可控参数裸插值进 URL query）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "getUserInfo / getOpenidList 转义 openid / next_openid 中的 & 与 = （回归：裸插值截断参数）" {
+    const allocator = std.testing.allocator;
+    var stub = SeqResp{ .responses = &.{
+        "{\"subscribe\":1,\"openid\":\"oA\"}",
+        "{\"total\":1,\"count\":1,\"next_openid\":\"\",\"data\":{\"openid\":[\"oA\"]}}",
+    } };
+    var tk = HealToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-user" },
+        .access_token_handle = .{ .ptr = @ptrCast(&tk), .vtable = &HealToken.vtable },
+    };
+    var u = newHealUser(&ctx, allocator, &stub);
+
+    {
+        const parsed = try u.getUserInfo("o&A=B");
+        defer parsed.deinit();
+    }
+    {
+        const parsed = try u.getOpenidList("o&A=B");
+        defer parsed.deinit();
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), stub.calls);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/user/info?access_token=token-abc&openid=o%26A%3DB&lang=zh_CN",
+        stub.uriAt(0),
+    );
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/user/get?access_token=token-abc&next_openid=o%26A%3DB",
+        stub.uriAt(1),
+    );
 }

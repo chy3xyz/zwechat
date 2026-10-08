@@ -83,8 +83,7 @@ pub const Ocr = struct {
                 const escaped = try queryEscape(a, c.img_url);
                 defer a.free(escaped);
 
-                const uri = try std.fmt.allocPrint(
-                    a,
+                const uri = try a.print(
                     "{s}?img_url={s}&access_token={s}",
                     .{ c.url, escaped, token },
                 );
@@ -207,7 +206,7 @@ test "idCard 走 query 参数且 img_url 被转义（回归：body 携带 JSON �
 
     const resp = try o.idCard("https://example.com/a b.jpg");
     defer allocator.free(resp);
-    try std.testing.expect(std.mem.indexOf(u8, resp, "110101199001011234") != null);
+    try std.testing.expect(std.mem.find(u8, resp, "110101199001011234") != null);
 }
 
 test "driving / driverLicense 命中正确 URL" {
@@ -228,11 +227,11 @@ test "driving / driverLicense 命中正确 URL" {
 
     const r1 = try o.driving("u");
     defer allocator.free(r1);
-    try std.testing.expect(std.mem.indexOf(u8, r1, "沪A12345") != null);
+    try std.testing.expect(std.mem.find(u8, r1, "沪A12345") != null);
 
     const r2 = try o.driverLicense("u");
     defer allocator.free(r2);
-    try std.testing.expect(std.mem.indexOf(u8, r2, "310101199001011234") != null);
+    try std.testing.expect(std.mem.find(u8, r2, "310101199001011234") != null);
 }
 
 test "errcode 40001 且 handle 不支持作废：最多两次请求后仍返回 ApiError" {
@@ -281,8 +280,8 @@ test "OCR token 失效自愈：40001 → 作废缓存 → 新 token 重试成功
     try std.testing.expectEqualStrings("{\"type\":\"Front\",\"name\":\"张三\"}", resp);
     try std.testing.expectEqual(@as(usize, 1), stub.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-token") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-token") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[0], "access_token=old-token") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[1], "access_token=new-token") != null);
 }
 
 test "OCR 非 token 类 errcode（45009）直接 ApiError：不作废、只请求一次" {

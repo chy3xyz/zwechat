@@ -92,11 +92,12 @@ test "OpenPlatform.getMiniProgram / getOfficialAccount 各自返回带 app_id �
     var op = OpenPlatform.newOpenPlatform(.{ .app_id = "wx-op-factory" });
     const mp = op.getMiniProgram("wx-mp-1");
     try std.testing.expectEqualStrings("wx-mp-1", mp.app_id);
-    try std.testing.expectEqual(@intFromPtr(&op.ctx), @intFromPtr(mp.open_context));
+    // 指针同一性比较（`@intFromPtr` 在 release 下可能被折叠成无意义的值）。
+    try std.testing.expect(mp.open_context == &op.ctx);
 
     const oa = op.getOfficialAccount("wx-oa-1");
     try std.testing.expectEqualStrings("wx-oa-1", oa.app_id);
-    try std.testing.expectEqual(@intFromPtr(&op.ctx), @intFromPtr(oa.open_context));
+    try std.testing.expect(oa.open_context == &op.ctx);
 }
 
 test "OpenPlatform.getAccountManager 工厂每次返回新实例" {
@@ -105,6 +106,6 @@ test "OpenPlatform.getAccountManager 工厂每次返回新实例" {
     const a1 = op.getAccountManager(allocator);
     const a2 = op.getAccountManager(allocator);
     // 两个 Account 实例独立，但都指向同一个 ctx
-    try std.testing.expectEqual(@intFromPtr(&op.ctx), @intFromPtr(a1.ctx));
-    try std.testing.expectEqual(@intFromPtr(&op.ctx), @intFromPtr(a2.ctx));
+    try std.testing.expect(a1.ctx == &op.ctx);
+    try std.testing.expect(a2.ctx == &op.ctx);
 }

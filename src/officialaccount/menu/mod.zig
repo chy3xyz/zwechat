@@ -36,7 +36,7 @@ pub const Menu = struct {
 
     /// 创建自定义菜单（POST JSON）。
     pub fn setMenu(self: *Self, buttons: []const Button) !void {
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(self.allocator);
         try writeJsonButtons(self.allocator, &buf, buttons);
 
@@ -77,7 +77,7 @@ pub const Menu = struct {
 
     /// 创建个性化菜单（POST JSON），结构为 `{"button":[...],"matchrule":{...}}`。
     pub fn addConditional(self: *Self, buttons: []const Button, match_rule: ?MatchRule) !void {
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(self.allocator);
         try buf.appendSlice(self.allocator, "{\"button\":[");
         for (buttons, 0..) |b, i| {
@@ -102,7 +102,7 @@ pub const Menu = struct {
 
     /// 删除个性化菜单。
     pub fn deleteConditional(self: *Self, menu_id: i64) !void {
-        const req_body = try std.fmt.allocPrint(self.allocator, "{{\"menuid\":{d}}}", .{menu_id});
+        const req_body = try self.allocator.print("{{\"menuid\":{d}}}", .{menu_id});
         defer self.allocator.free(req_body);
 
         const body = try util_retry.callApi(self.ctx, self.allocator, "DeleteConditional", TokenReq{
@@ -184,7 +184,7 @@ const TokenReq = struct {
     payload: ?[]const u8 = null,
 
     pub fn send(self: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-        const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}", .{ self.url, token });
+        const uri = try allocator.print("{s}?access_token={s}", .{ self.url, token });
         defer allocator.free(uri);
         if (self.payload) |p| return self.menu.postJSON(uri, p);
         return self.menu.httpGet(uri);
@@ -321,7 +321,7 @@ pub const ButtonNew = struct {
 // 内部：JSON 序列化辅助
 // ──────────────────────────────────────────────────────────────────────────────
 
-fn writeJsonButton(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), b: *const Button) !void {
+fn writeJsonButton(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), b: *const Button) !void {
     try buf.append(allocator, '{');
     var first = true;
     if (b.type.len > 0) {
@@ -384,7 +384,7 @@ fn writeJsonButton(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8
     try buf.append(allocator, '}');
 }
 
-fn writeJsonButtons(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), buttons: []const Button) !void {
+fn writeJsonButtons(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), buttons: []const Button) !void {
     try buf.appendSlice(allocator, "{\"button\":[");
     for (buttons, 0..) |b, i| {
         if (i > 0) try buf.append(allocator, ',');
@@ -393,7 +393,7 @@ fn writeJsonButtons(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u
     try buf.appendSlice(allocator, "]}");
 }
 
-fn writeJsonMatchRule(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), r: *const MatchRule) !void {
+fn writeJsonMatchRule(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), r: *const MatchRule) !void {
     try buf.append(allocator, '{');
     var first = true;
     const fields = [_]struct { name: []const u8, value: []const u8 }{
@@ -482,7 +482,7 @@ test "writeJsonButtons 输出合法 JSON 且含子菜单" {
         Button.setClick("一级", "V1001"),
         Button.setSub("父菜单", &sub),
     };
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try writeJsonButtons(allocator, &buf, &buttons);
 
@@ -514,7 +514,7 @@ test "addConditional JSON 结构合法（回归：matchrule 曾拼到对象外�
     try m.addConditional(&buttons, .{ .country = "中国", .province = "广东" });
 
     // 用与 addConditional 相同的序列化路径重建期望体，并用 std.json 校验合法性。
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try buf.appendSlice(allocator, "{\"button\":[");
     for (buttons, 0..) |b, i| {

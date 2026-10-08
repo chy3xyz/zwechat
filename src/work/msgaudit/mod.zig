@@ -126,8 +126,7 @@ pub const MsgAudit = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "{s}?access_token={s}",
                     .{ getRoomInfoURL, token },
                 );
@@ -167,8 +166,7 @@ pub const MsgAudit = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "{s}?access_token={s}",
                     .{ getAgreeInfoURL, token },
                 );
@@ -200,7 +198,7 @@ pub const MsgAudit = struct {
 
 /// `roomid` 编码为 `{"roomid":"rid1"}`。
 fn encodeRoomIdJson(allocator: std.mem.Allocator, roomid: []const u8) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
 
     try buf.appendSlice(allocator, "{\"roomid\":\"");
@@ -212,7 +210,7 @@ fn encodeRoomIdJson(allocator: std.mem.Allocator, roomid: []const u8) ![]u8 {
 /// `AgreeInfoRequest` 编码为 `{"info":[{"userid":"u1","exteranalopenid":"o1"},...]}`。
 /// 注意 key 使用微信官方拼写 `exteranalopenid`。
 fn encodeAgreeInfoJson(allocator: std.mem.Allocator, info: []const AgreeInfoEntry) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
 
     try buf.appendSlice(allocator, "{\"info\":[");
@@ -300,7 +298,7 @@ test "encodeAgreeInfoJson 生成正确 JSON（exteranalopenid 拼写）" {
 
 test "appendJsonString 转义控制字符为 \\u00xx（小写 hex，与 std.json 一致）" {
     const alloc = std.testing.allocator;
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(alloc);
     try appendJsonString(alloc, &buf, "a\x01b\x1fc");
     try std.testing.expectEqualStrings("a\\u0001b\\u001fc", buf.items);
@@ -467,8 +465,8 @@ test "getRoomInfo token 失效自愈：40014 → 作废缓存 → 新 token 重�
     try std.testing.expectEqualStrings("研发群", parsed.value.roomname);
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-token") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-token") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[0], "access_token=old-token") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[1], "access_token=new-token") != null);
 }
 
 test "getAgreeInfo 非 token 类 errcode（60011）直接 ApiError，不重试也不作废" {

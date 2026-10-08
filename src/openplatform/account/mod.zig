@@ -63,15 +63,13 @@ pub const Account = struct {
         app_id: []const u8,
         authorizer_access_token: []const u8,
     ) ![]u8 {
-        const body_json = try std.fmt.allocPrint(
-            self.allocator,
+        const body_json = try self.allocator.print(
             "{{\"appid\":\"{s}\"}}",
             .{app_id},
         );
         defer self.allocator.free(body_json);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
+        const uri = try self.allocator.print(
             "{s}?access_token={s}",
             .{ createOpenAccountURL, authorizer_access_token },
         );
@@ -103,15 +101,13 @@ pub const Account = struct {
         app_id: []const u8,
         authorizer_access_token: []const u8,
     ) ![]u8 {
-        const body_json = try std.fmt.allocPrint(
-            self.allocator,
+        const body_json = try self.allocator.print(
             "{{\"appid\":\"{s}\"}}",
             .{app_id},
         );
         defer self.allocator.free(body_json);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
+        const uri = try self.allocator.print(
             "{s}?access_token={s}",
             .{ getOpenAccountURL, authorizer_access_token },
         );
@@ -142,15 +138,13 @@ pub const Account = struct {
         open_app_id: []const u8,
         authorizer_access_token: []const u8,
     ) !void {
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
+        const uri = try self.allocator.print(
             "https://api.weixin.qq.com/cgi-bin/open/bind?access_token={s}",
             .{authorizer_access_token},
         );
         defer self.allocator.free(uri);
 
-        const body_json = try std.fmt.allocPrint(
-            self.allocator,
+        const body_json = try self.allocator.print(
             "{{\"appid\":\"{s}\",\"open_appid\":\"{s}\"}}",
             .{ app_id, open_app_id },
         );
@@ -177,15 +171,13 @@ pub const Account = struct {
         open_app_id: []const u8,
         authorizer_access_token: []const u8,
     ) !void {
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
+        const uri = try self.allocator.print(
             "https://api.weixin.qq.com/cgi-bin/open/unbind?access_token={s}",
             .{authorizer_access_token},
         );
         defer self.allocator.free(uri);
 
-        const body_json = try std.fmt.allocPrint(
-            self.allocator,
+        const body_json = try self.allocator.print(
             "{{\"appid\":\"{s}\",\"open_appid\":\"{s}\"}}",
             .{ app_id, open_app_id },
         );
@@ -248,10 +240,18 @@ const CommonResponse = struct {
 // ──────────────────────────────────────────────────────────────────────────────
 
 test "Account.init 持有 ctx 与 allocator" {
+    // 断言只依赖 `ctx` 指针与 `Allocator.vtable` 的同一性——**不比较**
+    // `Allocator.ptr`：无状态分配器（如 `std.heap.page_allocator`）下该字段是
+    // `undefined`，比较属 UB，在 release 下会随机失败。
+    var fba_buf: [256]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&fba_buf);
+    const allocator = fba.allocator();
+
     var ctx: Context = .{ .config = .{ .app_id = "wx-acc-test" } };
-    const a = Account.init(&ctx, std.heap.page_allocator);
-    try std.testing.expectEqual(@intFromPtr(&ctx), @intFromPtr(a.ctx));
-    try std.testing.expectEqual(std.heap.page_allocator, a.allocator);
+    const a = Account.init(&ctx, allocator);
+    try std.testing.expect(a.ctx == &ctx);
+    try std.testing.expectEqualStrings("wx-acc-test", a.ctx.config.app_id);
+    try std.testing.expect(a.allocator.vtable == allocator.vtable);
 }
 
 test "OpenAccountResponse 默认值" {
@@ -261,10 +261,10 @@ test "OpenAccountResponse 默认值" {
 }
 
 test "createOpenAccountURL / getOpenAccountURL 指向正确主机" {
-    try std.testing.expect(std.mem.indexOf(u8, createOpenAccountURL, "api.weixin.qq.com") != null);
-    try std.testing.expect(std.mem.indexOf(u8, createOpenAccountURL, "/cgi-bin/open/create") != null);
-    try std.testing.expect(std.mem.indexOf(u8, getOpenAccountURL, "api.weixin.qq.com") != null);
-    try std.testing.expect(std.mem.indexOf(u8, getOpenAccountURL, "/cgi-bin/open/get") != null);
+    try std.testing.expect(std.mem.find(u8, createOpenAccountURL, "api.weixin.qq.com") != null);
+    try std.testing.expect(std.mem.find(u8, createOpenAccountURL, "/cgi-bin/open/create") != null);
+    try std.testing.expect(std.mem.find(u8, getOpenAccountURL, "api.weixin.qq.com") != null);
+    try std.testing.expect(std.mem.find(u8, getOpenAccountURL, "/cgi-bin/open/get") != null);
 }
 
 test "createOpenAccount 请求 URL 带 access_token= 参数并解析 open_appid" {
@@ -288,8 +288,8 @@ test "createOpenAccount 请求 URL 带 access_token= 参数并解析 open_appid"
     // 参数名必须是 access_token=，不是 component_access_token=。
     try std.testing.expectEqual(@as(usize, 1), mock.history.items.len);
     const uri = mock.history.items[0];
-    try std.testing.expect(std.mem.indexOf(u8, uri, "access_token=12_authr_tok") != null);
-    try std.testing.expect(std.mem.indexOf(u8, uri, "component_access_token=") == null);
+    try std.testing.expect(std.mem.find(u8, uri, "access_token=12_authr_tok") != null);
+    try std.testing.expect(std.mem.find(u8, uri, "component_access_token=") == null);
 }
 
 test "getOpenAccount 请求 URL 带 access_token= 参数" {
@@ -312,8 +312,8 @@ test "getOpenAccount 请求 URL 带 access_token= 参数" {
 
     try std.testing.expectEqual(@as(usize, 1), mock.history.items.len);
     const uri = mock.history.items[0];
-    try std.testing.expect(std.mem.indexOf(u8, uri, "access_token=12_authr_tok") != null);
-    try std.testing.expect(std.mem.indexOf(u8, uri, "component_access_token=") == null);
+    try std.testing.expect(std.mem.find(u8, uri, "access_token=12_authr_tok") != null);
+    try std.testing.expect(std.mem.find(u8, uri, "component_access_token=") == null);
 }
 
 test "bind 请求 URL 带 access_token= 参数（authorizer token）" {
@@ -334,8 +334,8 @@ test "bind 请求 URL 带 access_token= 参数（authorizer token）" {
 
     try std.testing.expectEqual(@as(usize, 1), mock.history.items.len);
     const uri = mock.history.items[0];
-    try std.testing.expect(std.mem.indexOf(u8, uri, "access_token=12_authr_tok") != null);
-    try std.testing.expect(std.mem.indexOf(u8, uri, "component_access_token=") == null);
+    try std.testing.expect(std.mem.find(u8, uri, "access_token=12_authr_tok") != null);
+    try std.testing.expect(std.mem.find(u8, uri, "component_access_token=") == null);
 }
 
 test "unbind 请求 URL 带 access_token= 参数（authorizer token）" {
@@ -356,8 +356,8 @@ test "unbind 请求 URL 带 access_token= 参数（authorizer token）" {
 
     try std.testing.expectEqual(@as(usize, 1), mock.history.items.len);
     const uri = mock.history.items[0];
-    try std.testing.expect(std.mem.indexOf(u8, uri, "access_token=12_authr_tok") != null);
-    try std.testing.expect(std.mem.indexOf(u8, uri, "component_access_token=") == null);
+    try std.testing.expect(std.mem.find(u8, uri, "access_token=12_authr_tok") != null);
+    try std.testing.expect(std.mem.find(u8, uri, "component_access_token=") == null);
 }
 
 test "bind / unbind errcode 非零返回 ApiError" {

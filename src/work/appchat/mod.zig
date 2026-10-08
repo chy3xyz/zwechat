@@ -10,6 +10,10 @@ const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
 const util_json = @import("../../util/json.zig");
+const util_uri = @import("../../util/uri.zig");
+
+/// 按 Go `url.QueryEscape` 语义转义 query 参数值（收敛到 `util.uri.queryEscape`）。
+const queryEscape = util_uri.queryEscape;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL 常量
@@ -105,8 +109,7 @@ pub const AppChat = struct {
             req: CreateChatRequest,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "{s}?access_token={s}",
                     .{ appchatCreateURL, token },
                 );
@@ -134,14 +137,17 @@ pub const AppChat = struct {
 
     /// 获取群信息。
     ///
-    /// 对应 `/cgi-bin/appchat/get`。
+    /// 对应 `/cgi-bin/appchat/get`。`chat_id` 由调用方提供（用户可控），
+    /// 按 Go `url.QueryEscape` 语义转义后拼入 query。
     pub fn getChatInfo(self: *Self, chat_id: []const u8) !std.json.Parsed(ChatInfo) {
+        const escaped_chat_id = try queryEscape(self.allocator, chat_id);
+        defer self.allocator.free(escaped_chat_id);
+
         const Req = struct {
             chat_id: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "{s}?access_token={s}&chatid={s}",
                     .{ appchatGetURL, token, c.chat_id },
                 );
@@ -152,7 +158,7 @@ pub const AppChat = struct {
             }
         };
 
-        const body = try util_retry.callApi(self.ctx, self.allocator, "AppChatGet", Req{ .chat_id = chat_id });
+        const body = try util_retry.callApi(self.ctx, self.allocator, "AppChatGet", Req{ .chat_id = escaped_chat_id });
         defer self.allocator.free(body);
 
         var parsed = std.json.parseFromSlice(ChatInfo, self.allocator, body, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
@@ -172,8 +178,7 @@ pub const AppChat = struct {
             req: UpdateChatRequest,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "{s}?access_token={s}",
                     .{ appchatUpdateURL, token },
                 );
@@ -206,7 +211,7 @@ pub const AppChat = struct {
 
 /// 手写序列化 `CreateChatRequest`，避免引入 `std.json` 的反射栈。
 fn encodeCreateChatRequest(allocator: std.mem.Allocator, req: CreateChatRequest) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
 
     try buf.appendSlice(allocator, "{\"chatid\":\"");
@@ -227,7 +232,7 @@ fn encodeCreateChatRequest(allocator: std.mem.Allocator, req: CreateChatRequest)
 }
 
 fn encodeUpdateChatRequest(allocator: std.mem.Allocator, req: UpdateChatRequest) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
 
     try buf.appendSlice(allocator, "{\"chatid\":\"");
@@ -471,4 +476,48 @@ test "updateChat 非 token 类 errcode：直接 ApiError，不作废也不重试
     try std.testing.expectEqual(@as(usize, 0), state.invalidate_calls);
     try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
     try std.testing.expectEqual(@as(usize, 1), state.fetch_calls);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query 转义守护（回归：用户可控参数裸插值进 URL query）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "getChatInfo 正常输入 URI 逐字节不变、特殊字符 chatid 被转义" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/appchat/get?access_token=token-abc&chatid=g-1", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"chat_info\":{\"chatid\":\"g-1\"}}",
+    });
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/appchat/get?access_token=token-abc&chatid=g%261%3D2", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"chat_info\":{\"chatid\":\"g&1=2\"}}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var ctx = makeCtx();
+    var ac = AppChat.init(&ctx, allocator);
+    {
+        var parsed = try ac.getChatInfo("g-1");
+        defer parsed.deinit();
+    }
+    {
+        var parsed = try ac.getChatInfo("g&1=2");
+        defer parsed.deinit();
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/appchat/get?access_token=token-abc&chatid=g-1",
+        mt.history.items[0],
+    );
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/appchat/get?access_token=token-abc&chatid=g%261%3D2",
+        mt.history.items[1],
+    );
 }

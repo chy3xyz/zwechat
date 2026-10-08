@@ -43,8 +43,9 @@ test "OpenOfficialAccount.init 持有 app_id 与 ctx" {
     var ooa = OpenOfficialAccount.init(&ctx, "wx-oa-authorized");
 
     try std.testing.expectEqualStrings("wx-oa-authorized", ooa.app_id);
-    try std.testing.expectEqual(@intFromPtr(&ctx), @intFromPtr(ooa.open_context));
-    try std.testing.expectEqual(@intFromPtr(&ctx), @intFromPtr(ooa.getContext()));
+    // 指针同一性比较（`@intFromPtr` 在 release 下可能被折叠成无意义的值）。
+    try std.testing.expect(ooa.open_context == &ctx);
+    try std.testing.expect(ooa.getContext() == &ctx);
 }
 
 test "OpenOfficialAccount 默认 app_id 兼容空字符串" {

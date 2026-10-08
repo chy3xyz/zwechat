@@ -176,7 +176,7 @@ pub const Server = struct {
     /// 构造被动回复的 XML（明文模式）。
     /// 返回的切片由调用方负责 `allocator.free`。
     pub fn buildReply(self: *Self, to_user: []const u8, from_user: []const u8, content: []const u8) ![]u8 {
-        const ts_str = try std.fmt.allocPrint(self.allocator, "{d}", .{util_time.getCurrTSWithIo(self.io)});
+        const ts_str = try self.allocator.print("{d}", .{util_time.getCurrTSWithIo(self.io)});
         defer self.allocator.free(ts_str);
 
         const nonce = try util_util.randomStrWithIo(self.allocator, self.io, 16);
@@ -218,7 +218,7 @@ pub const Server = struct {
         defer self.allocator.free(cipher_b64);
         _ = std.base64.standard.Encoder.encode(cipher_b64, cipher);
 
-        const ts_str = try std.fmt.allocPrint(self.allocator, "{d}", .{timestamp});
+        const ts_str = try self.allocator.print("{d}", .{timestamp});
         defer self.allocator.free(ts_str);
 
         // 消息签名：SHA1(sort([token, timestamp, nonce, encrypted]))
@@ -350,8 +350,8 @@ test "Server.buildReply 输出合法 XML" {
     s.io = std.testing.io;
     const xml = try s.buildReply("user1", "gh_x", "hello back");
     defer fba.allocator().free(xml);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<![CDATA[hello back]]>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<ToUserName><![CDATA[user1]]>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<![CDATA[hello back]]>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<ToUserName><![CDATA[user1]]>") != null);
 }
 
 test "Server.io 默认值可用（未注入时取 default_io）" {
@@ -364,7 +364,7 @@ test "Server.io 默认值可用（未注入时取 default_io）" {
     var s = Server.init(&ctx, fba.allocator());
     const xml = try s.buildReply("u", "gh", "hi");
     defer fba.allocator().free(xml);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<CreateTime>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<CreateTime>") != null);
 }
 
 test "Server.serve 端到端：handler 收到 text 消息，返回 text 回复" {
@@ -405,8 +405,8 @@ test "Server.serve 端到端：handler 收到 text 消息，返回 text 回复" 
     const response = try s.serve(q);
     defer allocator.free(response);
 
-    try std.testing.expect(std.mem.indexOf(u8, response, "<![CDATA[echo me]]>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response, "<MsgType><![CDATA[text]]>") != null);
+    try std.testing.expect(std.mem.find(u8, response, "<![CDATA[echo me]]>") != null);
+    try std.testing.expect(std.mem.find(u8, response, "<MsgType><![CDATA[text]]>") != null);
 }
 
 test "Server.serve 无 handler 时返回 success" {
@@ -466,7 +466,7 @@ fn buildEncryptedBody(
     defer allocator.free(b64);
     _ = std.base64.standard.Encoder.encode(b64, cipher);
 
-    const body = try std.fmt.allocPrint(allocator, "<xml><Encrypt><![CDATA[{s}]]></Encrypt></xml>", .{b64});
+    const body = try allocator.print("<xml><Encrypt><![CDATA[{s}]]></Encrypt></xml>", .{b64});
     const msg_sig = try util_sig.signature(allocator, &[_][]const u8{ token, timestamp, nonce, b64 });
     return .{ .body = body, .msg_sig = msg_sig };
 }
@@ -585,7 +585,7 @@ test "buildEncryptedReply 输出可解密的合法加密包（回归：base64 �
     defer allocator.free(decoded.raw_xml_msg);
     defer allocator.free(decoded.app_id);
     try std.testing.expectEqualStrings(app_id, decoded.app_id);
-    try std.testing.expect(std.mem.indexOf(u8, decoded.raw_xml_msg, "<![CDATA[hi]]>") != null);
+    try std.testing.expect(std.mem.find(u8, decoded.raw_xml_msg, "<![CDATA[hi]]>") != null);
 }
 
 test "serve 安全模式端到端：解密入站消息并加密回复" {
@@ -638,7 +638,7 @@ test "serve 安全模式端到端：解密入站消息并加密回复" {
     defer allocator.free(decoded.random);
     defer allocator.free(decoded.raw_xml_msg);
     defer allocator.free(decoded.app_id);
-    try std.testing.expect(std.mem.indexOf(u8, decoded.raw_xml_msg, "<![CDATA[加密你好]]>") != null);
+    try std.testing.expect(std.mem.find(u8, decoded.raw_xml_msg, "<![CDATA[加密你好]]>") != null);
 }
 
 test "serve 安全模式 msg_signature 错误返回 SignatureMismatch" {

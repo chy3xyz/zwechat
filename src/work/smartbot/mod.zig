@@ -210,7 +210,7 @@ pub const Server = struct {
 
     /// 构造明文回复 XML（用于不加密模式，或作为加密前的内部 XML）。
     pub fn buildReplyXml(self: *Self, to_user: []const u8, from_user: []const u8, msg_type: []const u8, content: []const u8) ![]u8 {
-        const ts_str = try std.fmt.allocPrint(self.allocator, "{d}", .{util_time.getCurrTSWithIo(self.io)});
+        const ts_str = try self.allocator.print("{d}", .{util_time.getCurrTSWithIo(self.io)});
         defer self.allocator.free(ts_str);
 
         var elements = [_]util_xml.XmlElement{
@@ -259,7 +259,7 @@ pub const Server = struct {
         defer self.allocator.free(cipher_b64);
         _ = std.base64.standard.Encoder.encode(cipher_b64, cipher);
 
-        const ts_str = try std.fmt.allocPrint(self.allocator, "{d}", .{timestamp});
+        const ts_str = try self.allocator.print("{d}", .{timestamp});
         defer self.allocator.free(ts_str);
 
         // 计算签名
@@ -346,7 +346,7 @@ fn makeEncryptedBody(
     const cipher_b64 = try allocator.alloc(u8, b64_len);
     defer allocator.free(cipher_b64);
     _ = std.base64.standard.Encoder.encode(cipher_b64, cipher);
-    return std.fmt.allocPrint(allocator, "<xml><Encrypt>{s}</Encrypt></xml>", .{cipher_b64});
+    return allocator.print("<xml><Encrypt>{s}</Encrypt></xml>", .{cipher_b64});
 }
 
 test "smartbot module: Server public surface" {
@@ -496,7 +496,7 @@ test "smartbot buildEncryptedReply 加密回复可被解密回原文" {
     defer allocator.free(dec.raw_xml_msg);
     defer allocator.free(dec.app_id);
     try std.testing.expectEqualStrings(test_corp_id, dec.app_id);
-    try std.testing.expect(std.mem.indexOf(u8, dec.raw_xml_msg, "收到 **收到**") != null);
+    try std.testing.expect(std.mem.find(u8, dec.raw_xml_msg, "收到 **收到**") != null);
 }
 
 const ServeHandlerState = struct {
@@ -561,11 +561,11 @@ test "smartbot serve POST 全流程：解密 → handler → 加密回复可再�
     defer allocator.free(dec.random);
     defer allocator.free(dec.raw_xml_msg);
     defer allocator.free(dec.app_id);
-    try std.testing.expect(std.mem.indexOf(u8, dec.raw_xml_msg, "pong") != null);
+    try std.testing.expect(std.mem.find(u8, dec.raw_xml_msg, "pong") != null);
     // 回复方向：ToUserName 是发送者 lisi，FromUserName 是 corp_id。
     // serialize 用 CDATA 包裹值。
-    try std.testing.expect(std.mem.indexOf(u8, dec.raw_xml_msg, "<ToUserName><![CDATA[lisi]]></ToUserName>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, dec.raw_xml_msg, "<FromUserName><![CDATA[ww1234567890abcdef]]></FromUserName>") != null);
+    try std.testing.expect(std.mem.find(u8, dec.raw_xml_msg, "<ToUserName><![CDATA[lisi]]></ToUserName>") != null);
+    try std.testing.expect(std.mem.find(u8, dec.raw_xml_msg, "<FromUserName><![CDATA[ww1234567890abcdef]]></FromUserName>") != null);
 }
 
 test "smartbot serve GET 握手验签通过返回 echostr 明文" {
@@ -626,7 +626,7 @@ test "smartbot buildReplyXml 的 CreateTime 取自注入的 io（冻结时钟 �
 
     const xml = try server.buildReplyXml("lisi", test_corp_id, "text", "pong");
     defer allocator.free(xml);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<CreateTime><![CDATA[1700000000]]></CreateTime>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<CreateTime><![CDATA[1700000000]]></CreateTime>") != null);
 }
 
 test "smartbot serve 回复的 TimeStamp 与加密 IV 取自注入的 io（冻结 io → 回复可复现）" {

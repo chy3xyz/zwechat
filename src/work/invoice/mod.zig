@@ -144,8 +144,7 @@ pub const Invoice = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "{s}?access_token={s}",
                     .{ getInvoiceInfoURL, token },
                 );
@@ -183,8 +182,7 @@ pub const Invoice = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "{s}?access_token={s}",
                     .{ getInvoiceInfoBatchURL, token },
                 );
@@ -219,7 +217,7 @@ pub const Invoice = struct {
 /// `card_id` / `encrypt_code` 来自调用方，此前 `getInvoiceInfo` 直接 `allocPrint`
 /// 裸插值，含 `"` / `\` / 控制字符时会拼出非法 JSON。
 fn encodeInvoiceRefJson(allocator: std.mem.Allocator, card_id: []const u8, encrypt_code: []const u8) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try appendInvoiceRefJson(allocator, &buf, card_id, encrypt_code);
     return buf.toOwnedSlice(allocator);
@@ -228,7 +226,7 @@ fn encodeInvoiceRefJson(allocator: std.mem.Allocator, card_id: []const u8, encry
 /// 把单张发票引用追加到 `buf`（`encodeInvoiceRefJson` 与批量编码共用）。
 fn appendInvoiceRefJson(
     allocator: std.mem.Allocator,
-    buf: *std.ArrayListUnmanaged(u8),
+    buf: *std.ArrayList(u8),
     card_id: []const u8,
     encrypt_code: []const u8,
 ) !void {
@@ -241,7 +239,7 @@ fn appendInvoiceRefJson(
 
 /// `GetInvoiceBatchRequest` 编码为 `{"item_list":[{"card_id":"...","encrypt_code":"..."},...]}`。
 fn encodeInvoiceBatchJson(allocator: std.mem.Allocator, item_list: []const InvoiceRef) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
 
     try buf.appendSlice(allocator, "{\"item_list\":[");
@@ -438,8 +436,8 @@ test "getInvoiceInfo token 失效自愈：40001 → 作废缓存 → 新 token �
     try std.testing.expectEqual(@as(i64, 100), parsed.value.user_info.fee);
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[0], "access_token=old-token") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-token") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[0], "access_token=old-token") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[1], "access_token=new-token") != null);
 }
 
 test "getInvoiceBatch token 失效自愈：41001 → 作废缓存 → 新 token 重试成功" {
@@ -471,5 +469,5 @@ test "getInvoiceBatch token 失效自愈：41001 → 作废缓存 → 新 token 
     try std.testing.expectEqualStrings("card_1", parsed.value.item_list[0].card_id);
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
-    try std.testing.expect(std.mem.indexOf(u8, mt.history.items[1], "access_token=new-token") != null);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[1], "access_token=new-token") != null);
 }

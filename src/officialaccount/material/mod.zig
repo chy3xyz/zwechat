@@ -9,6 +9,7 @@ const Context = @import("../context.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_json = @import("../../util/json.zig");
+const util_uri = @import("../../util/uri.zig");
 const default_io = @import("../../util/default_io.zig");
 
 pub const PermanentMaterialType = enum {
@@ -126,7 +127,7 @@ pub const Material = struct {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ addNewsURL, access_token });
+        const uri = try self.allocator.print("{s}?access_token={s}", .{ addNewsURL, access_token });
         defer self.allocator.free(uri);
 
         const body = try serializeArticles(self.allocator, articles);
@@ -157,7 +158,7 @@ pub const Material = struct {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ updateNewsURL, access_token });
+        const uri = try self.allocator.print("{s}?access_token={s}", .{ updateNewsURL, access_token });
         defer self.allocator.free(uri);
 
         const body = try buildUpdateNewsBody(self.allocator, article, media_id, index);
@@ -198,7 +199,7 @@ pub const Material = struct {
         introduction: []const u8,
     ) !std.json.Parsed(AddMaterialResult) {
         // multipart 文件名取路径末段（对照 Go `path.Base`）。
-        const filename = std.fs.path.basename(file_path);
+        const filename = std.Io.Dir.path.basename(file_path);
         return self.postVideo("", file_path, filename, title, introduction);
     }
 
@@ -214,7 +215,7 @@ pub const Material = struct {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}&type=video", .{ addMaterialURL, access_token });
+        const uri = try self.allocator.print("{s}?access_token={s}&type=video", .{ addMaterialURL, access_token });
         defer self.allocator.free(uri);
 
         // description 字段为 JSON：`{"title":"...","introduction":"..."}`，统一走 Stringify 转义。
@@ -284,7 +285,7 @@ pub const Material = struct {
         file_path: []const u8,
     ) !std.json.Parsed(AddMaterialResult) {
         // multipart 文件名取路径末段（对照 Go `path.Base`）。
-        const filename = std.fs.path.basename(file_path);
+        const filename = std.Io.Dir.path.basename(file_path);
         return self.postMaterial(mtype, "", file_path, filename);
     }
 
@@ -299,7 +300,7 @@ pub const Material = struct {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}&type={s}", .{ addMaterialURL, access_token, @tagName(mtype) });
+        const uri = try self.allocator.print("{s}?access_token={s}&type={s}", .{ addMaterialURL, access_token, @tagName(mtype) });
         defer self.allocator.free(uri);
 
         const fields = [_]util_http.MultipartField{
@@ -333,7 +334,7 @@ pub const Material = struct {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ getMaterialURL, access_token });
+        const uri = try self.allocator.print("{s}?access_token={s}", .{ getMaterialURL, access_token });
         defer self.allocator.free(uri);
 
         const body = try util_json.stringFieldObject(self.allocator, "media_id", media_id);
@@ -360,10 +361,13 @@ pub const Material = struct {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
-        return std.fmt.allocPrint(
-            self.allocator,
+        // `media_id` 由调用方/上游响应提供，可能含 base64 的 `+`/`/`/`=`，必须转义。
+        const escaped_media_id = try util_uri.queryEscape(self.allocator, media_id);
+        defer self.allocator.free(escaped_media_id);
+
+        return self.allocator.print(
             "{s}?access_token={s}&media_id={s}",
-            .{ mediaGetURL, access_token, media_id },
+            .{ mediaGetURL, access_token, escaped_media_id },
         );
     }
 
@@ -445,7 +449,7 @@ pub const Material = struct {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ delMaterialURL, access_token });
+        const uri = try self.allocator.print("{s}?access_token={s}", .{ delMaterialURL, access_token });
         defer self.allocator.free(uri);
 
         const body = try util_json.stringFieldObject(self.allocator, "media_id", media_id);
@@ -467,7 +471,7 @@ pub const Material = struct {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ getMaterialCountURL, access_token });
+        const uri = try self.allocator.print("{s}?access_token={s}", .{ getMaterialCountURL, access_token });
         defer self.allocator.free(uri);
 
         const client = util_http.getDefaultClient(self.allocator);
@@ -489,12 +493,11 @@ pub const Material = struct {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
-        const uri = try std.fmt.allocPrint(self.allocator, "{s}?access_token={s}", .{ batchGetMaterialURL, access_token });
+        const uri = try self.allocator.print("{s}?access_token={s}", .{ batchGetMaterialURL, access_token });
         defer self.allocator.free(uri);
 
         const type_str = @tagName(mtype);
-        const body = try std.fmt.allocPrint(
-            self.allocator,
+        const body = try self.allocator.print(
             "{{\"type\":\"{s}\",\"offset\":{d},\"count\":{d}}}",
             .{ type_str, offset, count },
         );
@@ -514,7 +517,7 @@ pub const Material = struct {
     }
 
     fn serializeArticles(allocator: std.mem.Allocator, articles: []const Article) ![]u8 {
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(allocator);
         try buf.appendSlice(allocator, "{\"articles\":[");
         for (articles, 0..) |a, i| {
@@ -526,7 +529,7 @@ pub const Material = struct {
         return buf.toOwnedSlice(allocator);
     }
 
-    fn writeArticleJson(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), a: *const Article) !void {
+    fn writeArticleJson(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), a: *const Article) !void {
         try buf.append(allocator, '{');
         var first = true;
         const fields = [_]struct { name: []const u8, value: []const u8 }{
@@ -552,7 +555,7 @@ pub const Material = struct {
         if (!first) try buf.append(allocator, ',');
         try buf.appendSlice(allocator, "\"show_cover_pic\":");
         var num_buf: [24]u8 = undefined;
-        const num = std.fmt.bufPrint(&num_buf, "{d}", .{a.show_cover_pic}) catch unreachable;
+        const num = std.mem.print(&num_buf, "{d}", .{a.show_cover_pic}) catch unreachable;
         try buf.appendSlice(allocator, num);
         try buf.append(allocator, '}');
     }
@@ -565,13 +568,13 @@ pub const Material = struct {
 /// 组装 `update_news` 请求体：`{"media_id":"...","index":N,"articles":{...}}`。
 /// 纯函数，便于单元测试。
 fn buildUpdateNewsBody(allocator: std.mem.Allocator, article: *const Article, media_id: []const u8, index: i64) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
     try buf.appendSlice(allocator, "{\"media_id\":\"");
     try util_json.appendEscapedString(allocator, &buf, media_id);
     try buf.appendSlice(allocator, "\",\"index\":");
     var num_buf: [24]u8 = undefined;
-    const num = std.fmt.bufPrint(&num_buf, "{d}", .{index}) catch unreachable;
+    const num = std.mem.print(&num_buf, "{d}", .{index}) catch unreachable;
     try buf.appendSlice(allocator, num);
     try buf.appendSlice(allocator, ",\"articles\":");
     try Material.writeArticleJson(allocator, &buf, article);
@@ -838,11 +841,11 @@ test "Material.addVideoFromBytes multipart 含 media 与 description 字段" {
         cap.uri,
     );
     try std.testing.expect(std.mem.startsWith(u8, cap.ctype, "multipart/form-data; boundary="));
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "name=\"media\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "filename=\"clip.mp4\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "fake-video-bytes") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "name=\"description\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "{\"title\":\"标\\\"题\",\"introduction\":\"介\\n绍\"}") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "name=\"media\"") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "filename=\"clip.mp4\"") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "fake-video-bytes") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "name=\"description\"") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "{\"title\":\"标\\\"题\",\"introduction\":\"介\\n绍\"}") != null);
 
     // errcode 非 0 → ApiError。
     cap.response = "{\"errcode\":40009,\"errmsg\":\"invalid image size\"}";
@@ -881,8 +884,8 @@ test "Material.addVideo 从临时文件读取视频内容" {
     defer parsed.deinit();
     try std.testing.expectEqualStrings("VIDEO_TMP", parsed.value.media_id);
     // 文件名取路径末段，文件内容进入 media 字段。
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "tmp-video-content") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "filename=\"zwechat_oa_material_addvideo_test.bin\"") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "tmp-video-content") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "filename=\"zwechat_oa_material_addvideo_test.bin\"") != null);
 }
 
 test "Material.getMediaURL 拼接含 access_token 的下载地址" {
@@ -1044,11 +1047,11 @@ test "Material.addMaterialFromBytes 图片上传：URL type=image 且 multipart 
         cap.uri,
     );
     try std.testing.expect(std.mem.startsWith(u8, cap.ctype, "multipart/form-data; boundary="));
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "name=\"media\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "filename=\"cover.png\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "fake-png-bytes") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "name=\"media\"") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "filename=\"cover.png\"") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "fake-png-bytes") != null);
     // 图片 / 语音上传不提交 description 字段。
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "name=\"description\"") == null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "name=\"description\"") == null);
 
     // errcode 非 0 → ApiError。
     cap.response = "{\"errcode\":40009,\"errmsg\":\"invalid image size\"}";
@@ -1090,6 +1093,27 @@ test "Material.addMaterial 语音素材：type=voice、文件名取路径末段"
         "https://api.weixin.qq.com/cgi-bin/material/add_material?access_token=stub-ak&type=voice",
         cap.uri,
     );
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "tmp-audio-content") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "filename=\"zwechat_oa_material_addvoice_test.bin\"") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "tmp-audio-content") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "filename=\"zwechat_oa_material_addvoice_test.bin\"") != null);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query 转义守护（回归：用户可控参数裸插值进 URL query）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Material.getMediaURL 转义 media_id 中的 & 与 = （回归：裸插值截断参数）" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var m = Material.init(&ctx, alloc);
+
+    const url = try m.getMediaURL("MEDIA&ID=1");
+    defer alloc.free(url);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/media/get?access_token=stub-ak&media_id=MEDIA%26ID%3D1",
+        url,
+    );
 }

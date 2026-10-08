@@ -33,6 +33,10 @@ const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
 const util_json = @import("../../util/json.zig");
+const util_uri = @import("../../util/uri.zig");
+
+/// 按 Go `url.QueryEscape` 语义转义 query 参数值（收敛到 `util.uri.queryEscape`）。
+const queryEscape = util_uri.queryEscape;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL 常量
@@ -1202,8 +1206,7 @@ pub const Kf = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "{s}?access_token={s}",
                     .{ c.url, token },
                 );
@@ -1226,8 +1229,7 @@ pub const Kf = struct {
             url: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "{s}?access_token={s}",
                     .{ c.url, token },
                 );
@@ -1328,16 +1330,19 @@ pub const Kf = struct {
     /// 获取接待人员列表。
     ///
     /// 对应 `_ref/wechat/work/kf/servicer.go` 的 `ReceptionistList`。
-    /// `open_kfid` 直接拼接在 query 上（与 Go 一致，不做额外转义）。
+    /// `open_kfid` 由调用方提供，按 Go `url.QueryEscape` 语义转义后拼入 query
+    /// （合法值形如 `wkxxxxxxxx`，转义对正常输入是恒等变换）。
     pub fn getServicerList(self: *Self, open_kfid: []const u8) !std.json.Parsed(ServicerListResponse) {
         if (open_kfid.len == 0) return util_error.WechatError.InvalidArgument;
+
+        const escaped_kfid = try queryEscape(self.allocator, open_kfid);
+        defer self.allocator.free(escaped_kfid);
 
         const Req = struct {
             open_kfid: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "{s}?access_token={s}&open_kfid={s}",
                     .{ servicerListURL, token, c.open_kfid },
                 );
@@ -1348,7 +1353,7 @@ pub const Kf = struct {
             }
         };
 
-        const body = try util_retry.callApi(self.ctx, self.allocator, apiNameFromURL(servicerListURL), Req{ .open_kfid = open_kfid });
+        const body = try util_retry.callApi(self.ctx, self.allocator, apiNameFromURL(servicerListURL), Req{ .open_kfid = escaped_kfid });
         defer self.allocator.free(body);
 
         return self.parseChecked(ServicerListResponse, body);
@@ -1391,8 +1396,7 @@ pub const Kf = struct {
             msg: TextMessage,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "{s}?access_token={s}",
                     .{ sendMsgURL, token },
                 );
@@ -1634,14 +1638,14 @@ pub const Kf = struct {
 /// 如 `.../cgi-bin/kf/account/list` → `list`。
 fn apiNameFromURL(url: []const u8) []const u8 {
     const trimmed = std.mem.trimEnd(u8, url, "/");
-    const idx = std.mem.lastIndexOfScalar(u8, trimmed, '/') orelse return trimmed;
+    const idx = std.mem.findScalarLast(u8, trimmed, '/') orelse return trimmed;
     return trimmed[idx + 1 ..];
 }
 
 /// 编码 `TextMessage` 为
 /// `{"touser":"...","open_kfid":"...","msgtype":"text","text":{"content":"..."}}`。
 fn encodeTextMessageJson(allocator: std.mem.Allocator, msg: TextMessage) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
 
     try buf.appendSlice(allocator, "{\"touser\":\"");
@@ -1658,7 +1662,7 @@ fn encodeTextMessageJson(allocator: std.mem.Allocator, msg: TextMessage) ![]u8 {
 ///
 /// `voice_format` 为 0、`open_kfid` 为空时不写入请求体（对齐 Go 的 `omitempty`）。
 fn encodeSyncMsgJson(allocator: std.mem.Allocator, req: SyncMsgRequest) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
 
     try buf.appendSlice(allocator, "{\"cursor\":\"");
@@ -1667,10 +1671,10 @@ fn encodeSyncMsgJson(allocator: std.mem.Allocator, req: SyncMsgRequest) ![]u8 {
     try appendJsonString(allocator, &buf, req.token);
     try buf.appendSlice(allocator, "\",\"limit\":");
     var num: [20]u8 = undefined;
-    try buf.appendSlice(allocator, std.fmt.bufPrint(&num, "{d}", .{req.limit}) catch unreachable);
+    try buf.appendSlice(allocator, std.mem.print(&num, "{d}", .{req.limit}) catch unreachable);
     if (req.voice_format != 0) {
         try buf.appendSlice(allocator, ",\"voice_format\":");
-        try buf.appendSlice(allocator, std.fmt.bufPrint(&num, "{d}", .{req.voice_format}) catch unreachable);
+        try buf.appendSlice(allocator, std.mem.print(&num, "{d}", .{req.voice_format}) catch unreachable);
     }
     if (req.open_kfid.len > 0) {
         try buf.appendSlice(allocator, ",\"open_kfid\":\"");
@@ -2463,10 +2467,10 @@ test "encodeTextMessageJson 生成正确 JSON" {
         .content = "hello \"world\"\n",
     });
     defer alloc.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"touser\":\"ext_user_abc\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"open_kfid\":\"kf_001\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"msgtype\":\"text\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"text\":{\"content\":\"hello \\\"world\\\"\\n\"}") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"touser\":\"ext_user_abc\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"open_kfid\":\"kf_001\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"msgtype\":\"text\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"text\":{\"content\":\"hello \\\"world\\\"\\n\"}") != null);
 }
 
 test "encodeTextMessageJson 转义控制字符生成合法 JSON" {
@@ -2479,9 +2483,9 @@ test "encodeTextMessageJson 转义控制字符生成合法 JSON" {
     defer alloc.free(body);
 
     // <0x20 控制字符必须被转义，不能原样写入。
-    try std.testing.expect(std.mem.indexOf(u8, body, "\\u0007") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\\u000b") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\x07") == null);
+    try std.testing.expect(std.mem.find(u8, body, "\\u0007") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\\u000b") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\x07") == null);
 
     // 输出可被 std.json 解析回原文。
     const Decoded = struct {
@@ -2612,7 +2616,7 @@ test "addContactWay POST add_contact_way 并解析 url" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.addContactWay(.{ .open_kfid = "wkf_1", .scene = "s_123" });
     defer parsed.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, parsed.value.url, "enc_scene=") != null);
+    try std.testing.expect(std.mem.find(u8, parsed.value.url, "enc_scene=") != null);
 }
 
 // ── 接待人员 ──────────────────────────────────────────────────────────────────
@@ -2848,20 +2852,20 @@ test "jsonStringifySendMessage 各消息类型 body JSON" {
     });
     defer alloc.free(voice);
     // msgid 为空时不写入（对齐 Go omitempty）。
-    try std.testing.expect(std.mem.indexOf(u8, voice, "msgid") == null);
-    try std.testing.expect(std.mem.indexOf(u8, voice, "\"msgtype\":\"voice\",\"voice\":{\"media_id\":\"media_v\"}") != null);
+    try std.testing.expect(std.mem.find(u8, voice, "msgid") == null);
+    try std.testing.expect(std.mem.find(u8, voice, "\"msgtype\":\"voice\",\"voice\":{\"media_id\":\"media_v\"}") != null);
 
     const video = try jsonStringifySendMessage(alloc, .{
         .video = .{ .open_kfid = "kf_1", .touser = "wm_1", .media_id = "media_vid" },
     });
     defer alloc.free(video);
-    try std.testing.expect(std.mem.indexOf(u8, video, "\"msgtype\":\"video\",\"video\":{\"media_id\":\"media_vid\"}") != null);
+    try std.testing.expect(std.mem.find(u8, video, "\"msgtype\":\"video\",\"video\":{\"media_id\":\"media_vid\"}") != null);
 
     const file = try jsonStringifySendMessage(alloc, .{
         .file = .{ .open_kfid = "kf_1", .touser = "wm_1", .media_id = "media_f" },
     });
     defer alloc.free(file);
-    try std.testing.expect(std.mem.indexOf(u8, file, "\"msgtype\":\"file\",\"file\":{\"media_id\":\"media_f\"}") != null);
+    try std.testing.expect(std.mem.find(u8, file, "\"msgtype\":\"file\",\"file\":{\"media_id\":\"media_f\"}") != null);
 
     const link = try jsonStringifySendMessage(alloc, .{
         .link = .{
@@ -2874,8 +2878,8 @@ test "jsonStringifySendMessage 各消息类型 body JSON" {
         },
     });
     defer alloc.free(link);
-    try std.testing.expect(std.mem.indexOf(u8, link, "\"msgtype\":\"link\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, link, "\"link\":{\"title\":\"标题 \\\"引号\\\"\",\"desc\":\"描述\",\"url\":\"https://example.com/faq\",\"thumb_media_id\":\"media_t\"}") != null);
+    try std.testing.expect(std.mem.find(u8, link, "\"msgtype\":\"link\"") != null);
+    try std.testing.expect(std.mem.find(u8, link, "\"link\":{\"title\":\"标题 \\\"引号\\\"\",\"desc\":\"描述\",\"url\":\"https://example.com/faq\",\"thumb_media_id\":\"media_t\"}") != null);
 
     const miniprogram = try jsonStringifySendMessage(alloc, .{
         .miniprogram = .{
@@ -2888,8 +2892,8 @@ test "jsonStringifySendMessage 各消息类型 body JSON" {
         },
     });
     defer alloc.free(miniprogram);
-    try std.testing.expect(std.mem.indexOf(u8, miniprogram, "\"msgtype\":\"miniprogram\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, miniprogram, "\"miniprogram\":{\"appid\":\"wx_mp_1\",\"title\":\"小程序标题\",\"thumb_media_id\":\"media_t\",\"pagepath\":\"pages/faq/index\"}") != null);
+    try std.testing.expect(std.mem.find(u8, miniprogram, "\"msgtype\":\"miniprogram\"") != null);
+    try std.testing.expect(std.mem.find(u8, miniprogram, "\"miniprogram\":{\"appid\":\"wx_mp_1\",\"title\":\"小程序标题\",\"thumb_media_id\":\"media_t\",\"pagepath\":\"pages/faq/index\"}") != null);
 
     const location = try jsonStringifySendMessage(alloc, .{
         .location = .{
@@ -2902,9 +2906,9 @@ test "jsonStringifySendMessage 各消息类型 body JSON" {
         },
     });
     defer alloc.free(location);
-    try std.testing.expect(std.mem.indexOf(u8, location, "\"msgtype\":\"location\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, location, "\"name\":\"天安门\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, location, "\"address\":\"北京市东城区\"") != null);
+    try std.testing.expect(std.mem.find(u8, location, "\"msgtype\":\"location\"") != null);
+    try std.testing.expect(std.mem.find(u8, location, "\"name\":\"天安门\"") != null);
+    try std.testing.expect(std.mem.find(u8, location, "\"address\":\"北京市东城区\"") != null);
 
     const menu = try jsonStringifySendMessage(alloc, .{
         .menu = .{
@@ -2920,12 +2924,12 @@ test "jsonStringifySendMessage 各消息类型 body JSON" {
         },
     });
     defer alloc.free(menu);
-    try std.testing.expect(std.mem.indexOf(u8, menu, "\"msgtype\":\"msgmenu\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, menu, "\"head_content\":\"请选择要咨询的内容\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, menu, "{\"type\":\"click\",\"click\":{\"id\":\"c1\",\"content\":\"人工客服\"}}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, menu, "{\"type\":\"view\",\"view\":{\"url\":\"https://example.com/faq\",\"content\":\"常见问题\"}}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, menu, "{\"type\":\"miniprogram\",\"miniprogram\":{\"appid\":\"wx_mp_1\",\"pagepath\":\"pages/faq\",\"content\":\"小程序答疑\"}}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, menu, "\"tail_content\":\"感谢咨询\"") != null);
+    try std.testing.expect(std.mem.find(u8, menu, "\"msgtype\":\"msgmenu\"") != null);
+    try std.testing.expect(std.mem.find(u8, menu, "\"head_content\":\"请选择要咨询的内容\"") != null);
+    try std.testing.expect(std.mem.find(u8, menu, "{\"type\":\"click\",\"click\":{\"id\":\"c1\",\"content\":\"人工客服\"}}") != null);
+    try std.testing.expect(std.mem.find(u8, menu, "{\"type\":\"view\",\"view\":{\"url\":\"https://example.com/faq\",\"content\":\"常见问题\"}}") != null);
+    try std.testing.expect(std.mem.find(u8, menu, "{\"type\":\"miniprogram\",\"miniprogram\":{\"appid\":\"wx_mp_1\",\"pagepath\":\"pages/faq\",\"content\":\"小程序答疑\"}}") != null);
+    try std.testing.expect(std.mem.find(u8, menu, "\"tail_content\":\"感谢咨询\"") != null);
 }
 
 test "sendMsgRich image POST send_msg 成功解析" {
@@ -3390,9 +3394,9 @@ test "syncMsg 保留 OriginData 原始 JSON（含强类型未覆盖的新字段�
     // 原始 JSON：微信新增字段（强类型结构体里并不存在）也完整保留。
     const origin = try list[0].getOriginData(allocator);
     defer allocator.free(origin);
-    try std.testing.expect(std.mem.indexOf(u8, origin, "\"content\":\"你好\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, origin, "\"new_wechat_field\":\"v1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, origin, "\"new_text_field\":\"tx\"") != null);
+    try std.testing.expect(std.mem.find(u8, origin, "\"content\":\"你好\"") != null);
+    try std.testing.expect(std.mem.find(u8, origin, "\"new_wechat_field\":\"v1\"") != null);
+    try std.testing.expect(std.mem.find(u8, origin, "\"new_text_field\":\"tx\"") != null);
 
     // 二次解析后可取到强类型结构里没有的字段——本特性的核心价值。
     var reparsed = try std.json.parseFromSlice(std.json.Value, allocator, origin, .{});
@@ -3406,7 +3410,7 @@ test "syncMsg 保留 OriginData 原始 JSON（含强类型未覆盖的新字段�
     try std.testing.expectEqualStrings("", list[1].text.content);
     const new_origin = try list[1].getOriginData(allocator);
     defer allocator.free(new_origin);
-    try std.testing.expect(std.mem.indexOf(u8, new_origin, "\"order_id\":\"12345\"") != null);
+    try std.testing.expect(std.mem.find(u8, new_origin, "\"order_id\":\"12345\"") != null);
     // 键序按微信下发顺序保留，语义等同于微信下发的原始元素 JSON。
     try std.testing.expect(std.mem.startsWith(u8, new_origin, "{\"msgid\":\"m_new\",\"open_kfid\":\"kf_1\""));
 }
@@ -3939,8 +3943,8 @@ test "kf 请求体编码：账号 / 联系链接 / 客户批量" {
 
     const add = try jsonStringifyAccountAdd(alloc, .{ .name = "客服\"一号", .media_id = "m_1" });
     defer alloc.free(add);
-    try std.testing.expect(std.mem.indexOf(u8, add, "\"name\":\"客服\\\"一号\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, add, "\"media_id\":\"m_1\"") != null);
+    try std.testing.expect(std.mem.find(u8, add, "\"name\":\"客服\\\"一号\"") != null);
+    try std.testing.expect(std.mem.find(u8, add, "\"media_id\":\"m_1\"") != null);
 
     const del = try jsonStringifyAccountDel(alloc, "wkf_1");
     defer alloc.free(del);
@@ -3948,8 +3952,8 @@ test "kf 请求体编码：账号 / 联系链接 / 客户批量" {
 
     const upd = try jsonStringifyAccountUpdate(alloc, .{ .open_kfid = "wkf_1", .name = "n", .media_id = "m" });
     defer alloc.free(upd);
-    try std.testing.expect(std.mem.indexOf(u8, upd, "\"open_kfid\":\"wkf_1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, upd, "\"name\":\"n\"") != null);
+    try std.testing.expect(std.mem.find(u8, upd, "\"open_kfid\":\"wkf_1\"") != null);
+    try std.testing.expect(std.mem.find(u8, upd, "\"name\":\"n\"") != null);
 
     const page = try jsonStringifyAccountPage(alloc, .{ .offset = 10, .limit = 20 });
     defer alloc.free(page);
@@ -3957,7 +3961,7 @@ test "kf 请求体编码：账号 / 联系链接 / 客户批量" {
 
     const cw = try jsonStringifyContactWay(alloc, .{ .open_kfid = "wkf_1", .scene = "s_1" });
     defer alloc.free(cw);
-    try std.testing.expect(std.mem.indexOf(u8, cw, "\"scene\":\"s_1\"") != null);
+    try std.testing.expect(std.mem.find(u8, cw, "\"scene\":\"s_1\"") != null);
 
     const cb = try jsonStringifyCustomerBatchGet(alloc, .{ .external_userid_list = &.{ "wm_1", "wm_2" } });
     defer alloc.free(cb);
@@ -3973,8 +3977,8 @@ test "kf 请求体编码：接待人员与会话状态" {
         .department_id_list = &.{ 2, 3 },
     });
     defer alloc.free(sv);
-    try std.testing.expect(std.mem.indexOf(u8, sv, "\"userid_list\":[\"u1\",\"u2\"]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sv, "\"department_id_list\":[2,3]") != null);
+    try std.testing.expect(std.mem.find(u8, sv, "\"userid_list\":[\"u1\",\"u2\"]") != null);
+    try std.testing.expect(std.mem.find(u8, sv, "\"department_id_list\":[2,3]") != null);
 
     const get = try jsonStringifyServiceStateGet(alloc, .{ .open_kfid = "wkf_1", .external_userid = "wm_1" });
     defer alloc.free(get);
@@ -3987,8 +3991,8 @@ test "kf 请求体编码：接待人员与会话状态" {
         .servicer_userid = "zhangsan",
     });
     defer alloc.free(trans);
-    try std.testing.expect(std.mem.indexOf(u8, trans, "\"service_state\":3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, trans, "\"servicer_userid\":\"zhangsan\"") != null);
+    try std.testing.expect(std.mem.find(u8, trans, "\"service_state\":3") != null);
+    try std.testing.expect(std.mem.find(u8, trans, "\"servicer_userid\":\"zhangsan\"") != null);
 }
 
 test "encodeSyncMsgJson voice_format/open_kfid 条件写入" {
@@ -4008,9 +4012,9 @@ test "encodeSyncMsgJson voice_format/open_kfid 条件写入" {
         .open_kfid = "wkf_1",
     });
     defer alloc.free(full);
-    try std.testing.expect(std.mem.indexOf(u8, full, "\"voice_format\":1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, full, "\"open_kfid\":\"wkf_1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, full, "\"limit\":1000") != null);
+    try std.testing.expect(std.mem.find(u8, full, "\"voice_format\":1") != null);
+    try std.testing.expect(std.mem.find(u8, full, "\"open_kfid\":\"wkf_1\"") != null);
+    try std.testing.expect(std.mem.find(u8, full, "\"limit\":1000") != null);
 }
 
 test "kf 请求体编码：事件响应消息与升级服务" {
@@ -4018,10 +4022,10 @@ test "kf 请求体编码：事件响应消息与升级服务" {
 
     const evt = try jsonStringifyTextEventMessage(alloc, .{ .code = "wc_1", .msgid = "m_1", .content = "欢迎\x07语" });
     defer alloc.free(evt);
-    try std.testing.expect(std.mem.indexOf(u8, evt, "\"code\":\"wc_1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, evt, "\"msgtype\":\"text\"") != null);
+    try std.testing.expect(std.mem.find(u8, evt, "\"code\":\"wc_1\"") != null);
+    try std.testing.expect(std.mem.find(u8, evt, "\"msgtype\":\"text\"") != null);
     // 控制字符必须被转义（Stringify 负责转义）。
-    try std.testing.expect(std.mem.indexOf(u8, evt, "\x07") == null);
+    try std.testing.expect(std.mem.find(u8, evt, "\x07") == null);
 
     const up = try jsonStringifyUpgradeService(alloc, .{
         .open_kfid = "wkf_1",
@@ -4031,9 +4035,9 @@ test "kf 请求体编码：事件响应消息与升级服务" {
         .groupchat = .{ .chat_id = "gc_1", .wording = "群" },
     });
     defer alloc.free(up);
-    try std.testing.expect(std.mem.indexOf(u8, up, "\"type\":1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, up, "\"member\":{\"userid\":\"sp_1\",\"wording\":\"专员\"}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, up, "\"groupchat\":{\"chat_id\":\"gc_1\",\"wording\":\"群\"}") != null);
+    try std.testing.expect(std.mem.find(u8, up, "\"type\":1") != null);
+    try std.testing.expect(std.mem.find(u8, up, "\"member\":{\"userid\":\"sp_1\",\"wording\":\"专员\"}") != null);
+    try std.testing.expect(std.mem.find(u8, up, "\"groupchat\":{\"chat_id\":\"gc_1\",\"wording\":\"群\"}") != null);
 
     const upm = try jsonStringifyUpgradeMemberService(alloc, .{
         .open_kfid = "wkf_1",
@@ -4042,8 +4046,8 @@ test "kf 请求体编码：事件响应消息与升级服务" {
         .member = .{ .userid = "sp_1", .wording = "" },
     });
     defer alloc.free(upm);
-    try std.testing.expect(std.mem.indexOf(u8, upm, "\"member\":{") != null);
-    try std.testing.expect(std.mem.indexOf(u8, upm, "groupchat") == null);
+    try std.testing.expect(std.mem.find(u8, upm, "\"member\":{") != null);
+    try std.testing.expect(std.mem.find(u8, upm, "groupchat") == null);
 
     const upg = try jsonStringifyUpgradeGroupChatService(alloc, .{
         .open_kfid = "wkf_1",
@@ -4052,9 +4056,9 @@ test "kf 请求体编码：事件响应消息与升级服务" {
         .groupchat = .{ .chat_id = "gc_1", .wording = "" },
     });
     defer alloc.free(upg);
-    try std.testing.expect(std.mem.indexOf(u8, upg, "\"type\":2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, upg, "\"groupchat\":{") != null);
-    try std.testing.expect(std.mem.indexOf(u8, upg, "\"member\":{") == null);
+    try std.testing.expect(std.mem.find(u8, upg, "\"type\":2") != null);
+    try std.testing.expect(std.mem.find(u8, upg, "\"groupchat\":{") != null);
+    try std.testing.expect(std.mem.find(u8, upg, "\"member\":{") == null);
 
     const cancel = try jsonStringifyUpgradeServiceCancel(alloc, .{ .open_kfid = "wkf_1", .external_userid = "wm_1" });
     defer alloc.free(cancel);
@@ -4109,10 +4113,10 @@ test "kf 请求体编码：知识库问答嵌套结构" {
         },
     });
     defer alloc.free(add);
-    try std.testing.expect(std.mem.indexOf(u8, add, "\"group_id\":\"grp_1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, add, "\"question\":{\"text\":{\"content\":\"如何退款\"}}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, add, "\"items\":[{\"text\":{\"content\":\"怎么退货\"}}]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, add, "\"link\":{\"title\":\"退款政策\",\"picurl\":\"http://a/1.png\",\"desc\":\"详见\",\"url\":\"https://example.com/r\"}") != null);
+    try std.testing.expect(std.mem.find(u8, add, "\"group_id\":\"grp_1\"") != null);
+    try std.testing.expect(std.mem.find(u8, add, "\"question\":{\"text\":{\"content\":\"如何退款\"}}") != null);
+    try std.testing.expect(std.mem.find(u8, add, "\"items\":[{\"text\":{\"content\":\"怎么退货\"}}]") != null);
+    try std.testing.expect(std.mem.find(u8, add, "\"link\":{\"title\":\"退款政策\",\"picurl\":\"http://a/1.png\",\"desc\":\"详见\",\"url\":\"https://example.com/r\"}") != null);
 
     const mod = try jsonStringifyKnowledgeIntentMod(alloc, .{
         .intent_id = "intent_1",
@@ -4121,8 +4125,8 @@ test "kf 请求体编码：知识库问答嵌套结构" {
         .answers = &.{},
     });
     defer alloc.free(mod);
-    try std.testing.expect(std.mem.indexOf(u8, mod, "\"intent_id\":\"intent_1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mod, "\"answers\":[]") != null);
+    try std.testing.expect(std.mem.find(u8, mod, "\"intent_id\":\"intent_1\"") != null);
+    try std.testing.expect(std.mem.find(u8, mod, "\"answers\":[]") != null);
 
     const list = try jsonStringifyKnowledgeIntentList(alloc, .{ .cursor = "c1", .limit = 10, .group_id = "g", .intent_id = "i" });
     defer alloc.free(list);
@@ -4138,8 +4142,8 @@ test "kf 请求体编码：统计" {
 
     const svc = try jsonStringifyServicerStatistic(alloc, .{ .open_kfid = "wkf_1", .servicer_userid = "zhangsan", .start_time = 1, .end_time = 2 });
     defer alloc.free(svc);
-    try std.testing.expect(std.mem.indexOf(u8, svc, "\"servicer_userid\":\"zhangsan\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, svc, "\"start_time\":1") != null);
+    try std.testing.expect(std.mem.find(u8, svc, "\"servicer_userid\":\"zhangsan\"") != null);
+    try std.testing.expect(std.mem.find(u8, svc, "\"start_time\":1") != null);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4235,4 +4239,43 @@ test "sendMsg 非 token 类 errcode：直接 ApiError，不作废也不重试" {
     try std.testing.expectEqual(@as(usize, 0), state.invalidate_calls);
     try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
     try std.testing.expectEqual(@as(usize, 1), state.fetch_calls);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query 转义守护（回归：用户可控参数裸插值进 URL query）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "getServicerList 正常输入 URI 逐字节不变、特殊字符 open_kfid 被转义" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/kf/servicer/list?access_token=token-abc&open_kfid=wkf_1", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"servicer_list\":[]}",
+    });
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/kf/servicer/list?access_token=token-abc&open_kfid=wk%26f%3D1", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"servicer_list\":[]}",
+    });
+    const client = useMock(allocator, &mt);
+    defer dropMock(client);
+
+    var ctx = makeCtx();
+    var k = Kf.init(&ctx, allocator);
+    {
+        var parsed = try k.getServicerList("wkf_1");
+        defer parsed.deinit();
+    }
+    {
+        var parsed = try k.getServicerList("wk&f=1");
+        defer parsed.deinit();
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/kf/servicer/list?access_token=token-abc&open_kfid=wkf_1",
+        mt.history.items[0],
+    );
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/kf/servicer/list?access_token=token-abc&open_kfid=wk%26f%3D1",
+        mt.history.items[1],
+    );
 }

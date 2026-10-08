@@ -211,7 +211,7 @@ pub fn getPreCode(ctx: *Context, allocator: std.mem.Allocator) Error![]u8 {
     const component_token = try requireComponentToken(ctx, allocator);
     defer allocator.free(component_token);
 
-    const uri = try std.fmt.allocPrint(allocator, getPreCodeURL, .{component_token});
+    const uri = try allocator.print(getPreCodeURL, .{component_token});
     defer allocator.free(uri);
 
     var out: std.Io.Writer.Allocating = .init(allocator);
@@ -260,7 +260,7 @@ pub fn queryAuthCode(
     const component_token = try requireComponentToken(ctx, allocator);
     defer allocator.free(component_token);
 
-    const uri = try std.fmt.allocPrint(allocator, queryAuthURL, .{component_token});
+    const uri = try allocator.print(queryAuthURL, .{component_token});
     defer allocator.free(uri);
 
     var out: std.Io.Writer.Allocating = .init(allocator);
@@ -310,11 +310,11 @@ pub fn queryAuthCode(
     ctx.token_mutex.lock();
     defer ctx.token_mutex.unlock();
 
-    const akey = try std.fmt.allocPrint(allocator, "authorizer_access_token_{s}", .{result.appid});
+    const akey = try allocator.print("authorizer_access_token_{s}", .{result.appid});
     defer allocator.free(akey);
     try cache_inst.set(akey, result.access_token, credential.tokenTTL(result.expires_in));
 
-    const rkey = try std.fmt.allocPrint(allocator, "authorizer_refresh_token_{s}", .{result.appid});
+    const rkey = try allocator.print("authorizer_refresh_token_{s}", .{result.appid});
     defer allocator.free(rkey);
     try cache_inst.set(rkey, result.refresh_token, 10 * 365 * 24 * 60 * 60);
 
@@ -338,7 +338,7 @@ pub fn getAuthrInfo(
     const component_token = try requireComponentToken(ctx, allocator);
     defer allocator.free(component_token);
 
-    const uri = try std.fmt.allocPrint(allocator, getComponentInfoURL, .{component_token});
+    const uri = try allocator.print(getComponentInfoURL, .{component_token});
     defer allocator.free(uri);
 
     var out: std.Io.Writer.Allocating = .init(allocator);
@@ -371,7 +371,10 @@ pub fn getAuthrInfo(
 /// 内部先调 `getPreCode` 取预授权码，再纯本地拼链接：
 /// `https://mp.weixin.qq.com/cgi-bin/componentloginpage?component_appid=...&pre_auth_code=...&redirect_uri=...&auth_type=...&biz_appid=...`
 ///
-/// `redirect_uri` 会按 URI query 规则转义；返回的链接由调用方 `allocator.free`。
+/// `redirect_uri` 与 `biz_appid` 会按 URI query 规则转义（Go 参考只转义
+/// `redirect_uri`，这里对同为调用方传入的 `biz_appid` 一并收紧）；
+/// `pre_auth_code` 由 `getPreCode` 从服务端取得、字符集受限，不额外转义。
+/// 返回的链接由调用方 `allocator.free`。
 pub fn getComponentLoginPage(
     ctx: *Context,
     allocator: std.mem.Allocator,
@@ -384,13 +387,15 @@ pub fn getComponentLoginPage(
 
     const escaped = try escapeQuery(allocator, redirect_uri);
     defer allocator.free(escaped);
+    const escaped_biz = try escapeQuery(allocator, biz_app_id);
+    defer allocator.free(escaped_biz);
 
-    return std.fmt.allocPrint(allocator, componentLoginURL, .{
+    return allocator.print(componentLoginURL, .{
         ctx.config.app_id,
         code,
         escaped,
         auth_type,
-        biz_app_id,
+        escaped_biz,
     });
 }
 
@@ -410,13 +415,15 @@ pub fn getBindComponentURL(
 
     const escaped = try escapeQuery(allocator, redirect_uri);
     defer allocator.free(escaped);
+    const escaped_biz = try escapeQuery(allocator, biz_app_id);
+    defer allocator.free(escaped_biz);
 
-    return std.fmt.allocPrint(allocator, bindComponentURL, .{
+    return allocator.print(bindComponentURL, .{
         auth_type,
         ctx.config.app_id,
         code,
         escaped,
-        biz_app_id,
+        escaped_biz,
     });
 }
 
@@ -436,13 +443,15 @@ pub fn getBindComponentURLV2(
 
     const escaped = try escapeQuery(allocator, redirect_uri);
     defer allocator.free(escaped);
+    const escaped_biz = try escapeQuery(allocator, biz_app_id);
+    defer allocator.free(escaped_biz);
 
-    return std.fmt.allocPrint(allocator, bindComponentURLV2, .{
+    return allocator.print(bindComponentURLV2, .{
         auth_type,
         ctx.config.app_id,
         code,
         escaped,
-        biz_app_id,
+        escaped_biz,
     });
 }
 
@@ -490,7 +499,7 @@ const RecordingTransport = struct {
 
 /// 构造带内存 cache + 预置 component token 的测试 Context。
 fn testCtx(allocator: std.mem.Allocator, memory: *@import("../../cache/memory.zig").Memory) !Context {
-    const ckey = try std.fmt.allocPrint(allocator, "openplatform_component_access_token_{s}", .{"wx-op"});
+    const ckey = try allocator.print("openplatform_component_access_token_{s}", .{"wx-op"});
     defer allocator.free(ckey);
     try memory.asCache().set(ckey, "comp-tok", 7000);
     return .{ .config = .{ .app_id = "wx-op", .app_secret = "sec", .cache = memory.asCache() } };
@@ -584,11 +593,11 @@ test "queryAuthCode mock：解析授权信息并回写双缓存" {
 
     // 双缓存回写：access token 与 refresh token 均可被 getAuthrAccessToken 链路直接消费。
     const cache_inst = ctx.config.cache.?;
-    const akey = try std.fmt.allocPrint(allocator, "authorizer_access_token_{s}", .{"wx-authr-1"});
+    const akey = try allocator.print("authorizer_access_token_{s}", .{"wx-authr-1"});
     defer allocator.free(akey);
     try std.testing.expectEqualStrings("qa_tok", (try cache_inst.get(akey)).?);
 
-    const rkey = try std.fmt.allocPrint(allocator, "authorizer_refresh_token_{s}", .{"wx-authr-1"});
+    const rkey = try allocator.print("authorizer_refresh_token_{s}", .{"wx-authr-1"});
     defer allocator.free(rkey);
     try std.testing.expectEqualStrings("qa_rt", (try cache_inst.get(rkey)).?);
 }
@@ -762,4 +771,31 @@ test "getBindComponentURL / V2 构造链接跳转授权链接" {
 
     // 两个链接各触发一次 getPreCode（本测试中 pre_auth_code 不缓存）。
     try std.testing.expectEqual(@as(usize, 2), rec.uris.items.len);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query 转义守护（回归：用户可控参数裸插值进 URL query）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "getComponentLoginPage 转义 biz_appid 中的 & 与 = （回归：裸插值截断参数）" {
+    const allocator = std.testing.allocator;
+
+    const memory = try @import("../../cache/memory.zig").Memory.create(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+
+    var rec = RecordingTransport.init(allocator, "{\"pre_auth_code\":\"pre-auth-9\"}");
+    defer rec.deinit();
+    var ctx = try testCtx(allocator, memory);
+    ctx.transport = RecordingTransport.dispatch;
+    ctx.transport_ctx = @ptrCast(&rec);
+
+    const url = try getComponentLoginPage(&ctx, allocator, "https://cb.example.com/cb", 3, "wx&biz=1");
+    defer allocator.free(url);
+    try std.testing.expectEqualStrings(
+        "https://mp.weixin.qq.com/cgi-bin/componentloginpage?component_appid=wx-op&pre_auth_code=pre-auth-9&redirect_uri=https%3A%2F%2Fcb.example.com%2Fcb&auth_type=3&biz_appid=wx%26biz%3D1",
+        url,
+    );
 }

@@ -43,8 +43,7 @@ pub const Device = struct {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
+        const uri = try self.allocator.print(
             "https://api.weixin.qq.com/device/transmsg?access_token={s}",
             .{access_token},
         );
@@ -80,14 +79,13 @@ pub const Device = struct {
         const access_token = try self.ctx.getAccessToken(self.allocator);
         defer self.allocator.free(access_token);
 
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
+        const uri = try self.allocator.print(
             "https://api.weixin.qq.com/device/create_qrcode?access_token={s}",
             .{access_token},
         );
         defer self.allocator.free(uri);
 
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(self.allocator);
         try buf.appendSlice(self.allocator, "{\"device_num\":");
         try buf.print(self.allocator, "{d}", .{device_ids.len});

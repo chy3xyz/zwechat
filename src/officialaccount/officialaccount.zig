@@ -159,7 +159,8 @@ test "OfficialAccount.newOfficialAccount 注入 config 与 handle" {
     const handle = makeFakeHandle(&state);
     const oa = OfficialAccount.newOfficialAccount(.{ .app_id = "wx-new" }, handle);
     try std.testing.expectEqualStrings("wx-new", oa.ctx.config.app_id);
-    try std.testing.expectEqual(@intFromPtr(&state), @intFromPtr(oa.ctx.access_token_handle.ptr));
+    // 指针同一性比较（`@intFromPtr` 在 release 下可能被折叠成无意义的值）。
+    try std.testing.expect(oa.ctx.access_token_handle.ptr == @as(*anyopaque, @ptrCast(&state)));
     try std.testing.expectEqual(&fake_access_token_vtable, oa.ctx.access_token_handle.vtable);
 }
 

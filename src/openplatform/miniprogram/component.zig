@@ -96,7 +96,7 @@ pub const Component = struct {
         const component_token = try self.requireComponentToken(allocator);
         defer allocator.free(component_token);
 
-        const uri = try std.fmt.allocPrint(allocator, fastRegisterWeappURL, .{ "create", component_token });
+        const uri = try allocator.print(fastRegisterWeappURL, .{ "create", component_token });
         defer allocator.free(uri);
 
         var out: std.Io.Writer.Allocating = .init(allocator);
@@ -142,7 +142,7 @@ pub const Component = struct {
         const component_token = try self.requireComponentToken(allocator);
         defer allocator.free(component_token);
 
-        const uri = try std.fmt.allocPrint(allocator, fastRegisterWeappURL, .{ "search", component_token });
+        const uri = try allocator.print(fastRegisterWeappURL, .{ "search", component_token });
         defer allocator.free(uri);
 
         var out: std.Io.Writer.Allocating = .init(allocator);
@@ -214,7 +214,7 @@ const RecordingTransport = struct {
 
 /// 构造带内存 cache + 预置 component token 的测试 Context。
 fn testCtx(allocator: std.mem.Allocator, memory: *@import("../../cache/memory.zig").Memory) !Context {
-    const ckey = try std.fmt.allocPrint(allocator, "openplatform_component_access_token_{s}", .{"wx-op"});
+    const ckey = try allocator.print("openplatform_component_access_token_{s}", .{"wx-op"});
     defer allocator.free(ckey);
     try memory.asCache().set(ckey, "comp-tok", 7000);
     return .{ .config = .{ .app_id = "wx-op", .app_secret = "sec", .cache = memory.asCache() } };

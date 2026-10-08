@@ -199,7 +199,7 @@ pub const Basic = struct {
         const authr_token = try self.requireAuthrToken(allocator);
         defer allocator.free(authr_token);
 
-        const uri = try std.fmt.allocPrint(allocator, getAccountBasicInfoURL, .{authr_token});
+        const uri = try allocator.print(getAccountBasicInfoURL, .{authr_token});
         defer allocator.free(uri);
 
         const resp = try self.get(allocator, uri);
@@ -220,7 +220,7 @@ pub const Basic = struct {
         const authr_token = try self.requireAuthrToken(allocator);
         defer allocator.free(authr_token);
 
-        const uri = try std.fmt.allocPrint(allocator, checkNickNameURL, .{authr_token});
+        const uri = try allocator.print(checkNickNameURL, .{authr_token});
         defer allocator.free(uri);
 
         var out: std.Io.Writer.Allocating = .init(allocator);
@@ -260,7 +260,7 @@ pub const Basic = struct {
         const authr_token = try self.requireAuthrToken(allocator);
         defer allocator.free(authr_token);
 
-        const uri = try std.fmt.allocPrint(allocator, setNickNameURL, .{authr_token});
+        const uri = try allocator.print(setNickNameURL, .{authr_token});
         defer allocator.free(uri);
 
         var out: std.Io.Writer.Allocating = .init(allocator);
@@ -298,7 +298,7 @@ pub const Basic = struct {
         const authr_token = try self.requireAuthrToken(allocator);
         defer allocator.free(authr_token);
 
-        const uri = try std.fmt.allocPrint(allocator, setSignatureURL, .{authr_token});
+        const uri = try allocator.print(setSignatureURL, .{authr_token});
         defer allocator.free(uri);
 
         var out: std.Io.Writer.Allocating = .init(allocator);
@@ -328,7 +328,7 @@ pub const Basic = struct {
         const authr_token = try self.requireAuthrToken(allocator);
         defer allocator.free(authr_token);
 
-        const uri = try std.fmt.allocPrint(allocator, getSearchStatusURL, .{authr_token});
+        const uri = try allocator.print(getSearchStatusURL, .{authr_token});
         defer allocator.free(uri);
 
         const resp = try self.get(allocator, uri);
@@ -349,7 +349,7 @@ pub const Basic = struct {
         const authr_token = try self.requireAuthrToken(allocator);
         defer allocator.free(authr_token);
 
-        const uri = try std.fmt.allocPrint(allocator, setSearchStatusURL, .{authr_token});
+        const uri = try allocator.print(setSearchStatusURL, .{authr_token});
         defer allocator.free(uri);
 
         var out: std.Io.Writer.Allocating = .init(allocator);
@@ -391,7 +391,7 @@ pub const Basic = struct {
         const authr_token = try self.requireAuthrToken(allocator);
         defer allocator.free(authr_token);
 
-        const uri = try std.fmt.allocPrint(allocator, setHeadImageURL, .{authr_token});
+        const uri = try allocator.print(setHeadImageURL, .{authr_token});
         defer allocator.free(uri);
 
         var out: std.Io.Writer.Allocating = .init(allocator);
@@ -474,7 +474,7 @@ const RecordingTransport = struct {
 
 /// 构造带内存 cache + 预置 authorizer token 的测试 Context。
 fn testCtx(allocator: std.mem.Allocator, memory: *@import("../../cache/memory.zig").Memory) !Context {
-    const akey = try std.fmt.allocPrint(allocator, "authorizer_access_token_{s}", .{"wx-mp-1"});
+    const akey = try allocator.print("authorizer_access_token_{s}", .{"wx-mp-1"});
     defer allocator.free(akey);
     try memory.asCache().set(akey, "authr-tok", 7000);
     return .{ .config = .{ .app_id = "wx-op", .app_secret = "sec", .cache = memory.asCache() } };

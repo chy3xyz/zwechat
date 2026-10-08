@@ -89,8 +89,9 @@ test "OpenMiniProgram.init 持有 app_id 与 ctx" {
     var omp = OpenMiniProgram.init(&ctx, "wx-mp-authorized");
 
     try std.testing.expectEqualStrings("wx-mp-authorized", omp.app_id);
-    try std.testing.expectEqual(@intFromPtr(&ctx), @intFromPtr(omp.open_context));
-    try std.testing.expectEqual(@intFromPtr(&ctx), @intFromPtr(omp.getContext()));
+    // 指针同一性比较（`@intFromPtr` 在 release 下可能被折叠成无意义的值）。
+    try std.testing.expect(omp.open_context == &ctx);
+    try std.testing.expect(omp.getContext() == &ctx);
 }
 
 test "OpenMiniProgram 默认 app_id 兼容空字符串" {

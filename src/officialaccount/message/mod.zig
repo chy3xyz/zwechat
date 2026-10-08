@@ -230,7 +230,7 @@ pub const Reply = struct {
 
 /// 统一的 `CreateTime` 取值：由调用方注入的 `io` 驱动（不再直接访问全局单例）。
 fn createTimeStr(allocator: std.mem.Allocator, io: std.Io) std.mem.Allocator.Error![]u8 {
-    return std.fmt.allocPrint(allocator, "{d}", .{util_time.getCurrTSWithIo(io)});
+    return allocator.print("{d}", .{util_time.getCurrTSWithIo(io)});
 }
 
 /// 序列化为微信被动回复的文本 XML（明文模式）。
@@ -250,7 +250,7 @@ fn formatText(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []
 fn formatImage(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []const u8, media_id: []const u8) ![]u8 {
     const ts_str = try createTimeStr(allocator, io);
     defer allocator.free(ts_str);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try buf.print(allocator, "<xml><ToUserName><![CDATA[{s}]]></ToUserName>", .{to});
     try buf.print(allocator, "<FromUserName><![CDATA[{s}]]></FromUserName>", .{from});
@@ -263,7 +263,7 @@ fn formatImage(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: [
 fn formatTransfer(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []const u8, trans_info: ?TransInfo) ![]u8 {
     const ts_str = try createTimeStr(allocator, io);
     defer allocator.free(ts_str);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try buf.print(allocator, "<xml><ToUserName><![CDATA[{s}]]></ToUserName>", .{to});
     try buf.print(allocator, "<FromUserName><![CDATA[{s}]]></FromUserName>", .{from});
@@ -279,7 +279,7 @@ fn formatTransfer(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from
 fn formatVoice(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []const u8, media_id: []const u8) ![]u8 {
     const ts_str = try createTimeStr(allocator, io);
     defer allocator.free(ts_str);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try buf.print(allocator, "<xml><ToUserName><![CDATA[{s}]]></ToUserName>", .{to});
     try buf.print(allocator, "<FromUserName><![CDATA[{s}]]></FromUserName>", .{from});
@@ -292,7 +292,7 @@ fn formatVoice(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: [
 fn formatVideo(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []const u8, media_id: []const u8, title: []const u8, description: []const u8) ![]u8 {
     const ts_str = try createTimeStr(allocator, io);
     defer allocator.free(ts_str);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try buf.print(allocator, "<xml><ToUserName><![CDATA[{s}]]></ToUserName>", .{to});
     try buf.print(allocator, "<FromUserName><![CDATA[{s}]]></FromUserName>", .{from});
@@ -339,7 +339,7 @@ fn formatNews(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []
 fn formatMiniprogramPage(allocator: std.mem.Allocator, io: std.Io, to: []const u8, from: []const u8, mp: MiniprogramPageReply) ![]u8 {
     const ts_str = try createTimeStr(allocator, io);
     defer allocator.free(ts_str);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try buf.print(allocator, "<xml><ToUserName><![CDATA[{s}]]></ToUserName>", .{to});
     try buf.print(allocator, "<FromUserName><![CDATA[{s}]]></FromUserName>", .{from});
@@ -775,7 +775,7 @@ const TokenReq = struct {
     payload: []const u8,
 
     pub fn send(self: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-        const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}", .{ self.url, token });
+        const uri = try allocator.print("{s}?access_token={s}", .{ self.url, token });
         defer allocator.free(uri);
         return self.msg.post(uri, self.payload);
     }
@@ -822,9 +822,9 @@ test "serializeTemplate produces valid JSON and escapes quotes" {
     defer allocator.free(body);
 
     // 验证特殊字符被正确转义。
-    try std.testing.expect(std.mem.indexOf(u8, body, "user\\\"quote") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "hello \\\"world\\\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "line1\\nline2") != null);
+    try std.testing.expect(std.mem.find(u8, body, "user\\\"quote") != null);
+    try std.testing.expect(std.mem.find(u8, body, "hello \\\"world\\\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "line1\\nline2") != null);
 
     // 验证 JSON 可解析且结构正确。
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
@@ -903,8 +903,8 @@ test "sendCustomerText 走 transport 并序列化 text" {
 
     try std.testing.expectEqual(std.http.Method.POST, stub.last_method);
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=token-abc", stub.lastUri());
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"text\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "说 \\\"hi\\\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"msgtype\":\"text\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "说 \\\"hi\\\"") != null);
 }
 
 test "sendCustomer 图片消息 body 含 image.media_id" {
@@ -922,8 +922,8 @@ test "sendCustomer 图片消息 body 含 image.media_id" {
         .image = .{ .media_id = "media_img" },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"image\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"image\":{\"media_id\":\"media_img\"}") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"msgtype\":\"image\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"image\":{\"media_id\":\"media_img\"}") != null);
 }
 
 test "sendCustomer 语音消息 body 含 voice.media_id" {
@@ -941,8 +941,8 @@ test "sendCustomer 语音消息 body 含 voice.media_id" {
         .voice = .{ .media_id = "media_voice" },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"voice\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"voice\":{\"media_id\":\"media_voice\"}") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"msgtype\":\"voice\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"voice\":{\"media_id\":\"media_voice\"}") != null);
 }
 
 test "sendCustomer 视频消息 body 含 video 四字段" {
@@ -965,11 +965,11 @@ test "sendCustomer 视频消息 body 含 video 四字段" {
         },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"video\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"media_id\":\"m_video\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"thumb_media_id\":\"m_thumb\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"title\":\"标题\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"description\":\"描述\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"msgtype\":\"video\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"media_id\":\"m_video\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"thumb_media_id\":\"m_thumb\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"title\":\"标题\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"description\":\"描述\"") != null);
 }
 
 test "sendCustomer 音乐消息 body 含 music 五字段" {
@@ -993,10 +993,10 @@ test "sendCustomer 音乐消息 body 含 music 五字段" {
         },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"music\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"musicurl\":\"https://a/1.mp3\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"hqmusicurl\":\"https://a/1hq.mp3\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"thumb_media_id\":\"m_thumb\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"msgtype\":\"music\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"musicurl\":\"https://a/1.mp3\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"hqmusicurl\":\"https://a/1hq.mp3\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"thumb_media_id\":\"m_thumb\"") != null);
 }
 
 test "sendCustomer 图文 news 消息 body 含 articles 数组" {
@@ -1018,9 +1018,9 @@ test "sendCustomer 图文 news 消息 body 含 articles 数组" {
         .news = .{ .articles = &articles },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"news\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"articles\":[{\"title\":\"t1\",\"description\":\"d1\",\"url\":\"https://u/1\",\"picurl\":\"https://p/1.png\"}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "{\"title\":\"t2\",\"description\":\"\",\"url\":\"\",\"picurl\":\"\"}") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"msgtype\":\"news\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"articles\":[{\"title\":\"t1\",\"description\":\"d1\",\"url\":\"https://u/1\",\"picurl\":\"https://p/1.png\"}") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "{\"title\":\"t2\",\"description\":\"\",\"url\":\"\",\"picurl\":\"\"}") != null);
 }
 
 test "sendCustomer mpnews 消息 body 含 mpnews.media_id" {
@@ -1038,8 +1038,8 @@ test "sendCustomer mpnews 消息 body 含 mpnews.media_id" {
         .mpnews = .{ .media_id = "media_mpnews" },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"mpnews\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"mpnews\":{\"media_id\":\"media_mpnews\"}") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"msgtype\":\"mpnews\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"mpnews\":{\"media_id\":\"media_mpnews\"}") != null);
 }
 
 test "sendCustomer wxcard 消息 body 含 wxcard.card_id" {
@@ -1057,8 +1057,8 @@ test "sendCustomer wxcard 消息 body 含 wxcard.card_id" {
         .wxcard = .{ .card_id = "card_123" },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"wxcard\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"wxcard\":{\"card_id\":\"card_123\"}") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"msgtype\":\"wxcard\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"wxcard\":{\"card_id\":\"card_123\"}") != null);
 }
 
 test "sendCustomer 小程序卡片 body 含 miniprogrampage 四字段" {
@@ -1081,10 +1081,10 @@ test "sendCustomer 小程序卡片 body 含 miniprogrampage 四字段" {
         },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"miniprogrampage\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"appid\":\"wx_appid\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"pagepath\":\"pages/index\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"thumb_media_id\":\"m_thumb\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"msgtype\":\"miniprogrampage\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"appid\":\"wx_appid\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"pagepath\":\"pages/index\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"thumb_media_id\":\"m_thumb\"") != null);
 }
 
 test "sendCustomer 菜单消息 body 含 msgmenu 且转义用户文本" {
@@ -1110,11 +1110,11 @@ test "sendCustomer 菜单消息 body 含 msgmenu 且转义用户文本" {
         },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"msgmenu\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"head_content\":\"您对本次服务是否满意呢？\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "满意\\\"非常满意\\\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "{\"id\":\"102\",\"content\":\"不满意\"}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"tail_content\":\"欢迎再次光临\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"msgtype\":\"msgmenu\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"head_content\":\"您对本次服务是否满意呢？\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "满意\\\"非常满意\\\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "{\"id\":\"102\",\"content\":\"不满意\"}") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"tail_content\":\"欢迎再次光临\"") != null);
 }
 
 test "sendCustomer mpnewsarticle 消息 body 含 article_id" {
@@ -1132,8 +1132,8 @@ test "sendCustomer mpnewsarticle 消息 body 含 article_id" {
         .mpnewsarticle = .{ .article_id = "art_123" },
     });
 
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"msgtype\":\"mpnewsarticle\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"mpnewsarticle\":{\"article_id\":\"art_123\"}") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"msgtype\":\"mpnewsarticle\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"mpnewsarticle\":{\"article_id\":\"art_123\"}") != null);
 }
 
 test "sendCustomer errcode 非 0 返回 ApiError" {
@@ -1164,11 +1164,11 @@ test "sendTypingStatus 请求端点与 body" {
 
     try m.sendTypingStatus("oA", .typing);
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/message/custom/typing?access_token=token-abc", stub.lastUri());
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"touser\":\"oA\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"command\":\"Typing\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"touser\":\"oA\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"command\":\"Typing\"") != null);
 
     try m.sendTypingStatus("oA", .cancel_typing);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"command\":\"CancelTyping\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"command\":\"CancelTyping\"") != null);
 }
 
 test "TransferCustomer 带 KfAccount 的被动回复 XML" {
@@ -1177,8 +1177,8 @@ test "TransferCustomer 带 KfAccount 的被动回复 XML" {
     const reply = tc.toReply();
     const xml = try reply.format(allocator, "toUser", "fromUser");
     defer allocator.free(xml);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<MsgType><![CDATA[transfer_customer_service]]></MsgType>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<TransInfo><KfAccount><![CDATA[kf1@test]]></KfAccount></TransInfo>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<MsgType><![CDATA[transfer_customer_service]]></MsgType>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<TransInfo><KfAccount><![CDATA[kf1@test]]></KfAccount></TransInfo>") != null);
 }
 
 test "TransferCustomer 不指定客服时 XML 无 TransInfo" {
@@ -1187,8 +1187,8 @@ test "TransferCustomer 不指定客服时 XML 无 TransInfo" {
     const reply = tc.toReply();
     const xml = try reply.format(allocator, "toUser", "fromUser");
     defer allocator.free(xml);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<MsgType><![CDATA[transfer_customer_service]]></MsgType>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "TransInfo") == null);
+    try std.testing.expect(std.mem.find(u8, xml, "<MsgType><![CDATA[transfer_customer_service]]></MsgType>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "TransInfo") == null);
 }
 
 test "Reply.format image produces nested XML" {
@@ -1199,8 +1199,8 @@ test "Reply.format image produces nested XML" {
     };
     const xml = try reply.format(allocator, "toUser", "fromUser");
     defer allocator.free(xml);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<Image><MediaId><![CDATA[media_123]]></MediaId></Image>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<MsgType><![CDATA[image]]></MsgType>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<Image><MediaId><![CDATA[media_123]]></MediaId></Image>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<MsgType><![CDATA[image]]></MsgType>") != null);
 }
 
 test "Reply.format voice produces nested XML" {
@@ -1211,8 +1211,8 @@ test "Reply.format voice produces nested XML" {
     };
     const xml = try reply.format(allocator, "toUser", "fromUser");
     defer allocator.free(xml);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<Voice><MediaId><![CDATA[voice_123]]></MediaId></Voice>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<MsgType><![CDATA[voice]]></MsgType>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<Voice><MediaId><![CDATA[voice_123]]></MediaId></Voice>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<MsgType><![CDATA[voice]]></MsgType>") != null);
 }
 
 test "Reply.format video produces nested XML" {
@@ -1223,9 +1223,9 @@ test "Reply.format video produces nested XML" {
     };
     const xml = try reply.format(allocator, "toUser", "fromUser");
     defer allocator.free(xml);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<Video><MediaId><![CDATA[video_123]]></MediaId>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<Title><![CDATA[title\"x]]></Title>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<Description><![CDATA[desc\\y]]></Description></Video>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<Video><MediaId><![CDATA[video_123]]></MediaId>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<Title><![CDATA[title\"x]]></Title>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<Description><![CDATA[desc\\y]]></Description></Video>") != null);
 }
 
 test "Reply.format miniprogrampage produces nested XML" {
@@ -1241,12 +1241,12 @@ test "Reply.format miniprogrampage produces nested XML" {
     };
     const xml = try reply.format(allocator, "toUser", "fromUser");
     defer allocator.free(xml);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<MiniprogramPage>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<Title><![CDATA[title]]></Title>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<AppId><![CDATA[appid]]></AppId>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<PagePath><![CDATA[pages/index]]></PagePath>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<ThumbMediaId><![CDATA[thumb_123]]></ThumbMediaId>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "</MiniprogramPage>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<MiniprogramPage>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<Title><![CDATA[title]]></Title>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<AppId><![CDATA[appid]]></AppId>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<PagePath><![CDATA[pages/index]]></PagePath>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<ThumbMediaId><![CDATA[thumb_123]]></ThumbMediaId>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "</MiniprogramPage>") != null);
 }
 
 // —— io 注入：被动回复的 CreateTime 不再直接访问全局单例 ——
@@ -1284,7 +1284,7 @@ test "Reply.format 的 CreateTime 取自注入的 io（冻结时钟 → 固定�
     };
     const xml = try reply.format(allocator, "toUser", "fromUser");
     defer allocator.free(xml);
-    try std.testing.expect(std.mem.indexOf(u8, xml, "<CreateTime>1700000000</CreateTime>") != null);
+    try std.testing.expect(std.mem.find(u8, xml, "<CreateTime>1700000000</CreateTime>") != null);
 }
 
 test "Reply.io 默认值可用（未注入时取真实当前时间）" {
@@ -1297,8 +1297,8 @@ test "Reply.io 默认值可用（未注入时取真实当前时间）" {
     defer allocator.free(xml);
 
     const open = "<CreateTime>";
-    const start = std.mem.indexOf(u8, xml, open).? + open.len;
-    const end = std.mem.indexOfScalarPos(u8, xml, start, '<').?;
+    const start = std.mem.find(u8, xml, open).? + open.len;
+    const end = std.mem.findScalarPos(u8, xml, start, '<').?;
     const ts = try std.fmt.parseInt(i64, xml[start..end], 10);
 
     const now = util_time.getCurrTSWithIo(default_io.io());

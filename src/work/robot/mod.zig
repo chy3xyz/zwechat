@@ -13,6 +13,21 @@ const std = @import("std");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_json = @import("../../util/json.zig");
+const util_uri = @import("../../util/uri.zig");
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query 转义
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 按 Go `url.QueryEscape` 语义转义 query 参数值（收敛到 `util.uri.queryEscape`）。
+const queryEscape = util_uri.queryEscape;
+
+/// 组装 `webhook/send?key={escaped_key}` 的 URI。
+fn webhookURI(allocator: std.mem.Allocator, webhook_key: []const u8) ![]u8 {
+    const escaped = try queryEscape(allocator, webhook_key);
+    defer allocator.free(escaped);
+    return allocator.print("{s}?key={s}", .{ webhookSendURL, escaped });
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // URL 常量
@@ -74,11 +89,7 @@ pub const Robot = struct {
         webhook_key: []const u8,
         msg: TextMessage,
     ) !std.json.Parsed(WebhookSendResponse) {
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?key={s}",
-            .{ webhookSendURL, webhook_key },
-        );
+        const uri = try webhookURI(self.allocator, webhook_key);
         defer self.allocator.free(uri);
 
         const body = try encodeTextMessage(self.allocator, msg);
@@ -93,11 +104,7 @@ pub const Robot = struct {
         webhook_key: []const u8,
         msg: MarkdownMessage,
     ) !std.json.Parsed(WebhookSendResponse) {
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}?key={s}",
-            .{ webhookSendURL, webhook_key },
-        );
+        const uri = try webhookURI(self.allocator, webhook_key);
         defer self.allocator.free(uri);
 
         const body = try encodeMarkdownMessage(self.allocator, msg);
@@ -128,7 +135,7 @@ pub const Robot = struct {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn encodeTextMessage(allocator: std.mem.Allocator, msg: TextMessage) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
 
     try buf.appendSlice(allocator, "{\"msgtype\":\"text\",\"text\":{");
@@ -160,7 +167,7 @@ fn encodeTextMessage(allocator: std.mem.Allocator, msg: TextMessage) ![]u8 {
 }
 
 fn encodeMarkdownMessage(allocator: std.mem.Allocator, msg: MarkdownMessage) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
 
     try buf.appendSlice(allocator, "{\"msgtype\":\"markdown\",\"markdown\":{\"content\":\"");
@@ -181,8 +188,9 @@ test "Robot.init 持有 allocator" {
     var fbabuf: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&fbabuf);
     const r = Robot.init(fba.allocator());
-    // allocator 是 std.mem.Allocator（值类型），通过 vtable 指针比较即可
-    try std.testing.expectEqual(@intFromPtr(fba.allocator().vtable), @intFromPtr(r.allocator.vtable));
+    // allocator 是 std.mem.Allocator（值类型），逐字段按指针比较
+    try std.testing.expect(r.allocator.ptr == fba.allocator().ptr);
+    try std.testing.expect(r.allocator.vtable == fba.allocator().vtable);
 }
 
 test "TextMessage 默认值" {
@@ -205,18 +213,18 @@ test "encodeTextMessage 生成合法 JSON" {
         .mentioned_list = &users,
     });
     defer alloc.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"msgtype\":\"text\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\\\"world\\\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"mentioned_list\":[\"user1\",\"user2\"]") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"msgtype\":\"text\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\\\"world\\\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\\n") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"mentioned_list\":[\"user1\",\"user2\"]") != null);
 }
 
 test "encodeMarkdownMessage 生成合法 JSON" {
     const alloc = std.testing.allocator;
     const body = try encodeMarkdownMessage(alloc, .{ .content = "# title" });
     defer alloc.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"msgtype\":\"markdown\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"markdown\":{\"content\":\"# title\"}") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"msgtype\":\"markdown\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"markdown\":{\"content\":\"# title\"}") != null);
 }
 
 test "encodeTextMessage 转义控制字符生成合法 JSON" {
@@ -229,10 +237,10 @@ test "encodeTextMessage 转义控制字符生成合法 JSON" {
     defer alloc.free(body);
 
     // <0x20 控制字符必须被转义，不能原样写入。
-    try std.testing.expect(std.mem.indexOf(u8, body, "\\u0007") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\\u000b") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\\u0001") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\x07") == null);
+    try std.testing.expect(std.mem.find(u8, body, "\\u0007") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\\u000b") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\\u0001") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\x07") == null);
 
     // 输出可被 std.json 解析回原文。
     const Decoded = struct {
@@ -246,4 +254,58 @@ test "encodeTextMessage 转义控制字符生成合法 JSON" {
     defer parsed.deinit();
     try std.testing.expectEqualStrings("a\x07\x0bb", parsed.value.text.content);
     try std.testing.expectEqualStrings("u\x01", parsed.value.text.mentioned_list[0]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// query 转义守护（回归：用户可控参数裸插值进 URL query）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "webhookURI 正常输入与改造前逐字节一致、特殊字符 key 被转义" {
+    const allocator = std.testing.allocator;
+
+    const plain = try webhookURI(allocator, "693a91f6-7f3e-4bc4-97a0-0ec2sifa5aaa");
+    defer allocator.free(plain);
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=693a91f6-7f3e-4bc4-97a0-0ec2sifa5aaa",
+        plain,
+    );
+
+    const escaped = try webhookURI(allocator, "k&ey=1");
+    defer allocator.free(escaped);
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k%26ey%3D1",
+        escaped,
+    );
+}
+
+test "sendText / sendMarkdown 用转义后的 key 发请求" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k%26ey%3D1", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var r = Robot.init(allocator);
+    {
+        var parsed = try r.sendText("k&ey=1", .{ .content = "hi" });
+        defer parsed.deinit();
+    }
+    {
+        var parsed = try r.sendMarkdown("k&ey=1", .{ .content = "# hi" });
+        defer parsed.deinit();
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=k%26ey%3D1",
+        mt.history.items[0],
+    );
 }

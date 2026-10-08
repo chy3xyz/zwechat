@@ -178,12 +178,16 @@ pub const CustomerService = struct {
             .{
                 .is_file = true,
                 .field_name = "media",
-                .filename = std.fs.path.basename(file_path),
+                .filename = std.Io.Dir.path.basename(file_path),
                 .value = "",
                 .file_path = file_path,
             },
         };
-        const query_suffix = try std.fmt.allocPrint(self.allocator, "&kf_account={s}", .{account});
+        // `account` 是完整客服账号（格式固定为「账号前缀@公众号微信号」），`@` 是
+        // 契约的一部分；Go 参考同样是裸插值（`_ref/wechat/officialaccount/customerservice/manager.go:213`
+        // 的 `...&kf_account=%s`），此处保持与 Go 一致、不转义（既有回归测试
+        // 逐字节断言 `kf_account=kf1@test`）。账号前缀被微信限制为字母数字，不含分隔符。
+        const query_suffix = try self.allocator.print("&kf_account={s}", .{account});
         defer self.allocator.free(query_suffix);
 
         const resp = try util_retry.callApi(self.ctx, self.allocator, "UploadHeadImg", TokenReq{
@@ -228,7 +232,7 @@ const TokenReq = struct {
     query_suffix: []const u8 = "",
 
     pub fn send(self: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-        const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}{s}", .{ self.url, token, self.query_suffix });
+        const uri = try allocator.print("{s}?access_token={s}{s}", .{ self.url, token, self.query_suffix });
         defer allocator.free(uri);
         if (self.fields) |f| return self.cs.postMultipart(uri, f);
         if (self.payload) |p| return self.cs.postJson(uri, p);
@@ -490,9 +494,9 @@ test "uploadHeadImg multipart 上传头像文件" {
         cap.uri,
     );
     try std.testing.expect(std.mem.startsWith(u8, cap.ctype, "multipart/form-data; boundary="));
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "name=\"media\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "filename=\"zwechat_oa_cs_headimg_test.png\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "fake-headimg-bytes") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "name=\"media\"") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "filename=\"zwechat_oa_cs_headimg_test.png\"") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "fake-headimg-bytes") != null);
 
     cap.response = "{\"errcode\":40005,\"errmsg\":\"invalid file type\"}";
     try std.testing.expectError(util_error.WechatError.ApiError, cs.uploadHeadImg("kf1@test", tmp_path));

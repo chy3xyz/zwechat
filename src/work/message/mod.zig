@@ -174,8 +174,7 @@ pub const Message = struct {
 
             /// 用 `token` 拼出完整 URI 并 POST 请求体，返回响应体（所有权交给调用方）。
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "{s}?access_token={s}",
                     .{ sendURL, token },
                 );
@@ -213,7 +212,7 @@ pub const Message = struct {
 /// 是嵌套对象。手写可以避免无关字段（"msgtype" vs "msg_type"）被序列化。
 fn serializeRequest(allocator: std.mem.Allocator, req: anytype) ![]u8 {
     const T = @TypeOf(req);
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
 
     const c = req.common;
@@ -327,11 +326,11 @@ test "serializeRequest 文本消息 JSON 含 msgtype/text/content" {
         .content = "hi \"you\"\n",
     });
     defer alloc.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"msgtype\":\"text\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"touser\":\"UserA|UserB\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"agentid\":\"1000002\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\\\"you\\\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\\n") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"msgtype\":\"text\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"touser\":\"UserA|UserB\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"agentid\":\"1000002\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\\\"you\\\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\\n") != null);
 }
 
 test "serializeRequest 图片消息 JSON 含 msgtype/image/media_id" {
@@ -345,8 +344,8 @@ test "serializeRequest 图片消息 JSON 含 msgtype/image/media_id" {
         .media_id = "MEDIA_ID_123",
     });
     defer alloc.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"msgtype\":\"image\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"image\":{\"media_id\":\"MEDIA_ID_123\"}") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"msgtype\":\"image\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"image\":{\"media_id\":\"MEDIA_ID_123\"}") != null);
 }
 
 test "serializeRequest 空 content 返回 InvalidArgument" {
@@ -368,10 +367,10 @@ test "serializeRequest 群推送 chat_id 序列化为 chatid 且与 touser 互�
         .content = "群周报",
     });
     defer alloc.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"chatid\":\"wrk_group_1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"touser\":") == null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"msgtype\":\"markdown\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"markdown\":{\"content\":\"群周报\"}") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"chatid\":\"wrk_group_1\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"touser\":") == null);
+    try std.testing.expect(std.mem.find(u8, body, "\"msgtype\":\"markdown\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"markdown\":{\"content\":\"群周报\"}") != null);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
