@@ -3041,6 +3041,101 @@ test "注入 transport 但 transport_ctx 为空时 panic 提示（既有契约�
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// postJSON / post 的 method 与 Content-Type 契约
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 按 `HttpClient.Transport`（无请求头参数）签名记录 method / uri / payload /
+/// content_type 的捕获桩。
+const PlainCapture = struct {
+    allocator: std.mem.Allocator,
+    response: []const u8 = "{}",
+    method: std.http.Method = .GET,
+    uri: []u8 = &.{},
+    payload: []u8 = &.{},
+    content_type: []u8 = &.{},
+    calls: usize = 0,
+
+    fn init(allocator: std.mem.Allocator, response: []const u8) PlainCapture {
+        return .{ .allocator = allocator, .response = response };
+    }
+
+    fn deinit(self: *PlainCapture) void {
+        self.allocator.free(self.uri);
+        self.allocator.free(self.payload);
+        self.allocator.free(self.content_type);
+    }
+
+    fn dispatch(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        method: std.http.Method,
+        payload: []const u8,
+        content_type: ?[]const u8,
+    ) anyerror![]u8 {
+        const self: *PlainCapture = @ptrCast(@alignCast(ctx));
+        self.calls += 1;
+        self.method = method;
+        self.allocator.free(self.uri);
+        self.allocator.free(self.payload);
+        self.allocator.free(self.content_type);
+        self.uri = try self.allocator.dupe(u8, uri);
+        self.payload = try self.allocator.dupe(u8, payload);
+        self.content_type = try self.allocator.dupe(u8, content_type orelse "");
+        return allocator.dupe(u8, self.response);
+    }
+};
+
+test "postJSON 发出 POST + application/json;charset=utf-8 并原样带回 payload" {
+    const allocator = std.testing.allocator;
+    var cap = PlainCapture.init(allocator, "{\"errcode\":0,\"errmsg\":\"ok\"}");
+    defer cap.deinit();
+
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+    client.setTransport(PlainCapture.dispatch, @ptrCast(&cap));
+
+    const body = try client.postJSON(
+        "https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token=tok",
+        "{\"touser\":\"openid\"}",
+    );
+    defer allocator.free(body);
+
+    try std.testing.expectEqualStrings("{\"errcode\":0,\"errmsg\":\"ok\"}", body);
+    try std.testing.expectEqual(@as(usize, 1), cap.calls);
+    try std.testing.expectEqual(std.http.Method.POST, cap.method);
+    try std.testing.expectEqualStrings(
+        "application/json;charset=utf-8",
+        cap.content_type,
+    );
+    try std.testing.expectEqualStrings("{\"touser\":\"openid\"}", cap.payload);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token=tok",
+        cap.uri,
+    );
+}
+
+test "post 的 content_type 由调用方决定（null 时不设置）" {
+    const allocator = std.testing.allocator;
+    var cap = PlainCapture.init(allocator, "<xml/>");
+    defer cap.deinit();
+
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+    client.setTransport(PlainCapture.dispatch, @ptrCast(&cap));
+
+    const with_ct = try client.post("https://example.com/p", "a=1", "application/x-www-form-urlencoded");
+    defer allocator.free(with_ct);
+    try std.testing.expectEqual(std.http.Method.POST, cap.method);
+    try std.testing.expectEqualStrings("application/x-www-form-urlencoded", cap.content_type);
+
+    const no_ct = try client.post("https://example.com/p", "a=1", null);
+    defer allocator.free(no_ct);
+    try std.testing.expectEqual(@as(usize, 2), cap.calls);
+    try std.testing.expectEqualStrings("", cap.content_type);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // multipart 头部转义
 // ─────────────────────────────────────────────────────────────────────────────
 

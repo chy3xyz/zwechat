@@ -112,6 +112,69 @@ test "shortlink 请求体省略 is_permanent（临时链接语义）" {
     try std.testing.expect(std.mem.find(u8, body, "\\\"1\\\"") != null);
 }
 
+// ── 可注入 transport 测试 ────────────────────────────────────────────────
+
+const credential = @import("../../credential/mod.zig");
+
+const StubToken = struct {
+    fn getToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        return allocator.dupe(u8, "token-abc");
+    }
+};
+const token_vtable = credential.AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+
+/// 记录 method / uri / payload 的 transport（generate 走线程默认 client）。
+const CapturingTransport = struct {
+    method: std.http.Method = .GET,
+    uri: []u8 = &.{},
+    payload: []u8 = &.{},
+    response: []const u8 = "",
+
+    fn dispatch(ctx: *anyopaque, allocator: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = content_type;
+        const self: *CapturingTransport = @ptrCast(@alignCast(ctx));
+        self.method = method;
+        if (self.uri.len > 0) allocator.free(self.uri);
+        if (self.payload.len > 0) allocator.free(self.payload);
+        self.uri = try allocator.dupe(u8, uri);
+        self.payload = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, self.response);
+    }
+
+    fn deinit(self: *CapturingTransport, allocator: std.mem.Allocator) void {
+        if (self.uri.len > 0) allocator.free(self.uri);
+        if (self.payload.len > 0) allocator.free(self.payload);
+    }
+};
+
+test "generateShortLinkTemp POST 临时短链：URL/body 省略 is_permanent 且解析 link" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"link\":\"https://wxa.run/tmp1\"}" };
+    defer tt.deinit(allocator);
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(CapturingTransport.dispatch, @ptrCast(&tt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-sl" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var sl = ShortLink.init(&ctx, allocator);
+
+    const link = try sl.generateShortLinkTemp("pages/index", "首页");
+    defer allocator.free(link);
+
+    try std.testing.expectEqual(std.http.Method.POST, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/genwxashortlink?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"page_url\":\"pages/index\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "is_permanent") == null);
+    try std.testing.expectEqualStrings("https://wxa.run/tmp1", link);
+}
+
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
 
 const retry_testing = @import("../retry_testing.zig");

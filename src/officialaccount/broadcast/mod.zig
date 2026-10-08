@@ -640,6 +640,33 @@ test "Broadcast.sendTextToOpenIDs 走 mass/send 且 touser 为数组" {
     );
 }
 
+test "Broadcast.sendNewsToOpenIDs 走 mass/send 且 mpnews 用 media_id" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{ .allocator = alloc, .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"msg_id\":10004}" };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var b = Broadcast.init(&ctx, alloc);
+
+    const openids = [_][]const u8{ "openid-a", "openid-b" };
+    const msg_id = try b.sendNewsToOpenIDs(&openids, "MEDIA1");
+    try std.testing.expectEqual(@as(i64, 10004), msg_id);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/message/mass/send?access_token=stub-ak",
+        cap.uri,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"touser\":[\"openid-a\",\"openid-b\"],\"msgtype\":\"mpnews\",\"mpnews\":{\"media_id\":\"MEDIA1\"}}",
+        cap.payload,
+    );
+    try std.testing.expectEqual(std.http.Method.POST, cap.method);
+}
+
 test "Broadcast errcode 非 0 返回 ApiError" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

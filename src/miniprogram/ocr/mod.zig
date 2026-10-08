@@ -326,6 +326,45 @@ test "img_url 含 & 与 ? 时按 Go url.QueryEscape 转义（回归：曾被 for
     try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
 }
 
+test "bankCard 银行卡 OCR 并解析卡号" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/bankcard?img_url=https%3A%2F%2Fexample.com%2Fbank.jpg&access_token=token-abc", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"number\":\"6212345678901234\"}",
+    });
+
+    var ctx = makeCtx();
+    var o = OCR.init(&ctx, allocator);
+    o.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try o.bankCard("https://example.com/bank.jpg");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("6212345678901234", parsed.value.number);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+}
+
+test "drivingLicense 驾驶证 OCR 并解析" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/drivinglicense?img_url=https%3A%2F%2Fexample.com%2Fdl.jpg&access_token=token-abc", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"id_num\":\"11010119900307xxxx\",\"name\":\"张三\",\"car_class\":\"C1\"}",
+    });
+
+    var ctx = makeCtx();
+    var o = OCR.init(&ctx, allocator);
+    o.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try o.drivingLicense("https://example.com/dl.jpg");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("张三", parsed.value.name);
+    try std.testing.expectEqualStrings("C1", parsed.value.car_class);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+}
+
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
 
 const retry_testing = @import("../retry_testing.zig");

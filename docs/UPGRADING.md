@@ -41,7 +41,90 @@ Zig 是编译期检查语言，**签名变更全部会变成编译错误**，编
 
 ## 1. 版本升级速查
 
-### 1.0 v0.4.5 → 下一版（未发布）：默认零依赖，mTLS 改为 `-Dmtls` 可选
+### 1.0 v0.6.0 → 下一版（未发布）：`virtualpayment` 投诉 / 上传 / 签名三组接口契约修正（**破坏性**）
+
+这一版只影响 **`virtualpayment`（小程序虚拟支付）** 的使用方。两组接口此前
+**在真实调用下不可能成功**（请求体缺官方必填字段），另有一组字段名与官方不符。
+如果你不用 `virtualpayment`，可以跳过本节。
+
+#### ① 需要改的行：10 个旧符号的对照表
+
+```zig
+// ❌ 旧（v0.6.0 及以前）
+var req = virtualpayment.GetComplaintListRequest{
+    .page = 0, .page_size = 20, .begin_date = "2024-01-01", .end_date = "2024-01-31",
+};
+```
+```zig
+// ✅ 新（官方字段名是 offset / limit；两者官方必填，会被强制写进请求体）
+var req = virtualpayment.GetComplaintListRequest{
+    .offset = 0, .limit = 20, .begin_date = "2024-01-01", .end_date = "2024-01-31",
+};
+```
+
+| 旧符号 | 新符号 | 说明 |
+|---|---|---|
+| `GetComplaintListRequest.page` | `GetComplaintListRequest.offset` | 官方字段名 |
+| `GetComplaintListRequest.page_size` | `GetComplaintListRequest.limit` | 官方字段名 |
+| `GetComplaintListResponse.complaint_list` | `GetComplaintListResponse.complaints` | 元素类型也变（见下） |
+| `ComplaintInfo` | `ComplaintItem` | 3 字段 → 16 字段 + 3 子结构 |
+| `ComplaintInfo.complaint_id` | `ComplaintItem.complaint_id` | `[]const u8` 不变 |
+| `ComplaintInfo.create_time` | `ComplaintItem.complaint_time` | 类型 `i64` → `[]const u8`（官方是 RFC3339 字符串） |
+| `ComplaintInfo.state` | `ComplaintItem.complaint_state` | 类型 `i64` → `[]const u8`（官方是枚举字符串） |
+| `GetComplaintDetailResponse.complaint_id` | `GetComplaintDetailResponse.complaint`（`?ComplaintItem`） | 详情整体进 `complaint` 对象，不在顶层 |
+| `GetComplaintDetailResponse.state` | 同上 | 合并进 `complaint` |
+| `GetUploadFileSignRequest.file_id` | `GetUploadFileSignRequest.wxpay_url` | 官方字段名；另新增 `convert_cos` / `complaint_id` |
+
+新增类型：`ComplaintItem` / `ComplaintOrderInfo` / `ComplaintServiceOrderInfo` /
+`ComplaintMedia` / `NegotiationHistory`；新增字段：`UploadVPFileRequest.base64_img` /
+`.img_url` / `.file_name`、`ResponseComplaintRequest.response_images`、
+`GetUploadFileSignResponse.cos_url`、`GetNegotiationHistoryResponse.total` / `.history`、
+`QueryWithdrawOrderResponse.fail_reason`。
+
+#### ② 行为变化：三个官方必填字段现在「零值也写出」
+
+`virtualpayment` 的请求体序列化用「零值省略」近似 Go 的 `omitempty`，但官方把
+`offset` / `limit`（`get_complaint_list` / `get_negotiation_history`）与
+`response_images`（`response_complaint`）标为**必填**。现在这三个字段即使取 `0` / `[]`
+也会写进请求体（此前省略 → 服务端返回 `268490002`）。
+
+**你要做的事**：`limit` 默认值是 `0`，而 `0` 不是有效取值 —— 调用方**必须**显式给正数
+（如 `10` / `20`）。`offset` 从 `0` 开始（首屏就是 `0`）。`response_images` 为空时无需处理，
+库会写 `[]`。
+
+#### ③ 两处「此前必然失败」的接口（现在才真的能用）
+
+- `upload_vp_file`：旧请求体只有 `{"env":…}`，缺 `base64_img` / `img_url` / `file_name`；
+- `get_upload_file_sign`：旧请求体是 `{"env":…,"file_id":"…"}`，官方字段是
+  `wxpay_url` / `convert_cos` / `complaint_id`。
+
+如果你的代码此前"调不通、绕过去了"，现在可以直接用。
+
+#### ④ `tcb` 的变化（**不改也能编译过**，且公开字段名不变）
+
+- `DownloadedFile` / `Pager` 新增 `jsonParse` 钩子，收取微信真实返回的 `fileid` 与
+  PascalCase 的 `Offset` / `Limit` / `Total`；**公开字段名仍是 `file_id` 等**，调用点无需改。
+- `tcb` 的解析入口 `parseParsed` 现在带 `.ignore_unknown_fields = true`（与全仓纪律一致）：
+  上游新增字段不再导致 `DecodeError`，代价是字段名写错会**静默变零值**（详见
+  [`OPEN_ITEMS.md` 第 2 条](OPEN_ITEMS.md)）。
+
+### 1.0.2 v0.5.2 → v0.6.0（已发布）：HTTP 超时 / v3 回调验签 / 0.17 弃用别名清扫
+
+大多数下游**一行都不用改**，但有三处可能让你「编译不过」或「`switch` 漏分支」：
+
+- **`HttpClient` 新增两个错误变体** `error.ConnectTimeout` / `error.ReadTimeout`
+  （默认 connect 10s / read 30s；`0` = 不限）。若你的调用点对 HTTP 错误做了穷尽 `switch`，
+  需要补这两个分支。**新增 HTTP 调用不要绕过 `HttpClient`**（否则失去超时保护）。
+- **v3 回调必须走 `NotifyVerifier.verifyAndDecrypt(headers, body)`**：原纯解密
+  `decryptNotifyResource` 仍在且签名不变，但它**只保证密文完整性、不保证来源**。
+  生产回调请改用 `verifyAndDecrypt`（含平台证书拉取/缓存/轮换、时间戳窗口、公钥模式）。
+- **`Subscribe.getCategory` 的返回类型具名化为 `CategoryList`**：此前它返回一个匿名 struct，
+  该函数**一旦被调用就编译失败**（懒分析陷阱）。若你已有调用点，返回值类型名从匿名 struct
+  变成 `CategoryList`，字段不变。
+- **`Redis.idle` 字段类型**：`std.ArrayListUnmanaged(*Conn)` → `std.ArrayList(*Conn)`
+  （0.17 的**同一类型改名**，不是语义变化）。直接访问该字段的代码需跟随改名。
+
+### 1.0.1 v0.4.5 → v0.5.0（已发布）：默认零依赖，mTLS 改为 `-Dmtls` 可选
 
 这一版**只动构建与依赖**，不改任何业务 API 签名。影响面只有一类人：
 **用微信支付 v2 + 客户端证书（mTLS）的下游**。其余项目大概率一行代码都不用改。
@@ -622,7 +705,7 @@ zig fetch --save=zwechat "git+https://github.com/<your-org>/zwechat?ref=v0.4.4"
 # 1) 先格式化门禁：CI 里 zig build fmt 是绿灯前提（等价 zig fmt --check）
 zig build fmt
 
-# 2) 全量单元测试（1004 个内联测试，零内存泄漏）
+# 2) 全量单元测试（1326 个内联测试，零内存泄漏）
 #    在 zwechat 自己的 checkout 里跑；它同时是"编译门"，会实例化绝大多数公开 API
 #    若你用 v2 mTLS，记得带上 -Dmtls=true，否则 mTLS 用例覆盖不到
 cd path/to/zwechat && zig build test
@@ -689,7 +772,7 @@ bash tools/api_surface_check.sh
 
 ### 3.3 测试与格式化门禁
 
-- **`zig build test`**：在 zwechat checkout 里是"1004 个内联测试 + 零泄漏"的完整回归；
+- **`zig build test`**：在 zwechat checkout 里是"1326 个内联测试 + 零泄漏"的完整回归；
   在**你的项目**里跑则只覆盖你的调用点。CI 同时跑两者才有意义。
   （`zig build` 里的 `src/test_runner.zig` 是编译门，强制 `@import` 每个子文件——
   否则 Zig 的 dead-strip 会静默跳过带 inline test 的文件，报出 "All 1 tests passed" 的假绿。）

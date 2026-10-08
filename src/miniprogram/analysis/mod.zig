@@ -10,6 +10,7 @@ const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
+const util_json = @import("../../util/json.zig");
 
 pub const RetainItem = struct {
     key: i64 = 0,
@@ -245,10 +246,10 @@ pub const Analysis = struct {
 
     /// datacube 日期区间查询公共路径；`comptime T` 为响应类型。
     fn fetchDateRange(self: *Self, endpoint: []const u8, begin_date: []const u8, end_date: []const u8, comptime T: type) !std.json.Parsed(T) {
-        const body = try self.allocator.print(
-            "{{\"begin_date\":\"{s}\",\"end_date\":\"{s}\"}}",
-            .{ begin_date, end_date },
-        );
+        const body = try util_json.stringFieldsObject(self.allocator, &.{
+            .{ .name = "begin_date", .value = begin_date },
+            .{ .name = "end_date", .value = end_date },
+        });
         defer self.allocator.free(body);
 
         const Sender = struct {
@@ -412,6 +413,176 @@ test "getAnalysisVisitPage POST datacube 并解析页面访问" {
     try std.testing.expectEqual(@as(usize, 1), parsed.value.list.len);
     try std.testing.expectEqualStrings("pages/index", parsed.value.list[0].page_path);
     try std.testing.expectEqual(@as(i64, 100), parsed.value.list[0].page_visit_pv);
+}
+
+test "getAnalysisMonthlyRetain POST datacube 月度留存并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"ref_date\":\"202409\",\"visit_uv_new\":[{\"key\":0,\"value\":3}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var a = Analysis.init(&ctx, allocator);
+    a.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try a.getAnalysisMonthlyRetain("20240901", "20240930");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/datacube/getweanalysisappidmonthlyretaininfo?access_token=token-abc", tt.uri);
+    try std.testing.expectEqualStrings("{\"begin_date\":\"20240901\",\"end_date\":\"20240930\"}", tt.payload);
+    try std.testing.expectEqualStrings("202409", parsed.value.ref_date);
+    try std.testing.expectEqual(@as(i64, 3), parsed.value.visit_uv_new[0].value);
+}
+
+test "getAnalysisWeeklyRetain POST datacube 周留存并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"ref_date\":\"20240902\",\"visit_uv_new\":[{\"key\":0,\"value\":5}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var a = Analysis.init(&ctx, allocator);
+    a.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try a.getAnalysisWeeklyRetain("20240902", "20240908");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/datacube/getweanalysisappidweeklyretaininfo?access_token=token-abc", tt.uri);
+    try std.testing.expectEqualStrings("{\"begin_date\":\"20240902\",\"end_date\":\"20240908\"}", tt.payload);
+    try std.testing.expectEqualStrings("20240902", parsed.value.ref_date);
+    try std.testing.expectEqual(@as(i64, 5), parsed.value.visit_uv_new[0].value);
+}
+
+test "getAnalysisDailySummary POST datacube 数据概况并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"list\":[{\"ref_date\":\"20240901\",\"visit_total\":100,\"share_pv\":7,\"share_uv\":3}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var a = Analysis.init(&ctx, allocator);
+    a.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try a.getAnalysisDailySummary("20240901", "20240907");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/datacube/getweanalysisappiddailysummarytrend?access_token=token-abc", tt.uri);
+    try std.testing.expectEqualStrings("{\"begin_date\":\"20240901\",\"end_date\":\"20240907\"}", tt.payload);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.list.len);
+    try std.testing.expectEqual(@as(i64, 100), parsed.value.list[0].visit_total);
+    try std.testing.expectEqual(@as(i64, 3), parsed.value.list[0].share_uv);
+}
+
+test "getAnalysisDailyVisitTrend POST datacube 日访问趋势并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"list\":[{\"ref_date\":\"20240901\",\"session_cnt\":9,\"visit_pv\":20,\"visit_uv\":8,\"visit_uv_new\":2,\"stay_time_uv\":1.5}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var a = Analysis.init(&ctx, allocator);
+    a.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try a.getAnalysisDailyVisitTrend("20240901", "20240907");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/datacube/getweanalysisappiddailyvisittrend?access_token=token-abc", tt.uri);
+    try std.testing.expectEqual(@as(i64, 9), parsed.value.list[0].session_cnt);
+    try std.testing.expectEqual(@as(i64, 2), parsed.value.list[0].visit_uv_new);
+    try std.testing.expectEqual(@as(f64, 1.5), parsed.value.list[0].stay_time_uv);
+}
+
+test "getAnalysisMonthlyVisitTrend POST datacube 月访问趋势并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"list\":[{\"ref_date\":\"202409\",\"visit_pv\":200,\"visit_uv\":80}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var a = Analysis.init(&ctx, allocator);
+    a.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try a.getAnalysisMonthlyVisitTrend("20240901", "20240930");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/datacube/getweanalysisappidmonthlyvisittrend?access_token=token-abc", tt.uri);
+    try std.testing.expectEqual(@as(i64, 200), parsed.value.list[0].visit_pv);
+    try std.testing.expectEqual(@as(i64, 80), parsed.value.list[0].visit_uv);
+}
+
+test "getAnalysisWeeklyVisitTrend POST datacube 周访问趋势并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"list\":[{\"ref_date\":\"20240902\",\"visit_pv\":50,\"visit_uv\":20}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var a = Analysis.init(&ctx, allocator);
+    a.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try a.getAnalysisWeeklyVisitTrend("20240902", "20240908");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/datacube/getweanalysisappidweeklyvisittrend?access_token=token-abc", tt.uri);
+    try std.testing.expectEqual(@as(i64, 50), parsed.value.list[0].visit_pv);
+    try std.testing.expectEqual(@as(i64, 20), parsed.value.list[0].visit_uv);
+}
+
+test "getAnalysisUserPortrait POST datacube 用户画像并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"ref_date\":\"20240901\",\"visit_uv\":{\"index\":1,\"province\":[{\"id\":31,\"name\":\"广东\",\"value\":7}]}}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var a = Analysis.init(&ctx, allocator);
+    a.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try a.getAnalysisUserPortrait("20240901", "20240907");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/datacube/getweanalysisappiduserportrait?access_token=token-abc", tt.uri);
+    try std.testing.expectEqualStrings("20240901", parsed.value.ref_date);
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.visit_uv.index);
+    try std.testing.expectEqualStrings("广东", parsed.value.visit_uv.province[0].name);
+    try std.testing.expectEqual(@as(i64, 7), parsed.value.visit_uv.province[0].value);
+}
+
+test "getAnalysisVisitDistribution POST datacube 访问分布并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"ref_date\":\"20240901\",\"list\":[{\"index\":\"access_source_session_cnt\",\"item_list\":[{\"key\":1001,\"value\":12,\"access_source_visit_uv\":9}]}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var a = Analysis.init(&ctx, allocator);
+    a.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try a.getAnalysisVisitDistribution("20240901", "20240907");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/datacube/getweanalysisappidvisitdistribution?access_token=token-abc", tt.uri);
+    try std.testing.expectEqualStrings("access_source_session_cnt", parsed.value.list[0].index);
+    try std.testing.expectEqual(@as(i64, 12), parsed.value.list[0].item_list[0].value);
+    try std.testing.expectEqual(@as(i64, 9), parsed.value.list[0].item_list[0].access_source_visit_uv);
+}
+
+test "getPerformanceData POST boot 性能数据并解析（回归：泛型 T 参数错位）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"body\":{\"tables\":[{\"id\":\"1\",\"zh\":\"耗时\",\"lines\":[{\"fields\":[{\"refdate\":\"20240901\",\"value\":\"123\"}]}]}],\"count\":1}}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var a = Analysis.init(&ctx, allocator);
+    a.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try a.getPerformanceData(.{
+        .module = "10001",
+        .time = .{ .begin_timestamp = 1725000000, .end_timestamp = 1725600000 },
+        .params = &[_]PerformanceDataParams{.{ .field = "networktype", .value = "wifi" }},
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/business/performance/boot?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"module\":\"10001\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"begin_timestamp\":1725000000") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"field\":\"networktype\"") != null);
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.body.count);
+    try std.testing.expectEqualStrings("123", parsed.value.body.tables[0].lines[0].fields[0].value);
 }
 
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────

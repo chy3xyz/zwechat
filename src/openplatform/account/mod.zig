@@ -19,6 +19,7 @@ const std = @import("std");
 const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_json = @import("../../util/json.zig");
 
 /// 微信开放平台（第三方平台）账号管理。
 ///
@@ -63,10 +64,7 @@ pub const Account = struct {
         app_id: []const u8,
         authorizer_access_token: []const u8,
     ) ![]u8 {
-        const body_json = try self.allocator.print(
-            "{{\"appid\":\"{s}\"}}",
-            .{app_id},
-        );
+        const body_json = try util_json.stringFieldObject(self.allocator, "appid", app_id);
         defer self.allocator.free(body_json);
 
         const uri = try self.allocator.print(
@@ -101,10 +99,7 @@ pub const Account = struct {
         app_id: []const u8,
         authorizer_access_token: []const u8,
     ) ![]u8 {
-        const body_json = try self.allocator.print(
-            "{{\"appid\":\"{s}\"}}",
-            .{app_id},
-        );
+        const body_json = try util_json.stringFieldObject(self.allocator, "appid", app_id);
         defer self.allocator.free(body_json);
 
         const uri = try self.allocator.print(
@@ -144,10 +139,10 @@ pub const Account = struct {
         );
         defer self.allocator.free(uri);
 
-        const body_json = try self.allocator.print(
-            "{{\"appid\":\"{s}\",\"open_appid\":\"{s}\"}}",
-            .{ app_id, open_app_id },
-        );
+        const body_json = try util_json.stringFieldsObject(self.allocator, &.{
+            .{ .name = "appid", .value = app_id },
+            .{ .name = "open_appid", .value = open_app_id },
+        });
         defer self.allocator.free(body_json);
 
         const resp = try self.postJSON(uri, body_json);
@@ -177,10 +172,10 @@ pub const Account = struct {
         );
         defer self.allocator.free(uri);
 
-        const body_json = try self.allocator.print(
-            "{{\"appid\":\"{s}\",\"open_appid\":\"{s}\"}}",
-            .{ app_id, open_app_id },
-        );
+        const body_json = try util_json.stringFieldsObject(self.allocator, &.{
+            .{ .name = "appid", .value = app_id },
+            .{ .name = "open_appid", .value = open_app_id },
+        });
         defer self.allocator.free(body_json);
 
         const resp = try self.postJSON(uri, body_json);
@@ -314,6 +309,92 @@ test "getOpenAccount 请求 URL 带 access_token= 参数" {
     const uri = mock.history.items[0];
     try std.testing.expect(std.mem.find(u8, uri, "access_token=12_authr_tok") != null);
     try std.testing.expect(std.mem.find(u8, uri, "component_access_token=") == null);
+}
+
+/// 记录请求体的测试 transport：`util_http.MockTransport` 只记录 URI、不记录
+/// payload，无法断言**实际发出**的请求体（模式同 `openplatform/miniprogram/component.zig`）。
+const RecordingTransport = struct {
+    allocator: std.mem.Allocator,
+    response: []const u8,
+    payloads: std.ArrayList([]u8) = .empty,
+
+    fn deinit(self: *RecordingTransport) void {
+        for (self.payloads.items) |p| self.allocator.free(p);
+        self.payloads.deinit(self.allocator);
+    }
+
+    fn dispatch(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        method: std.http.Method,
+        payload: []const u8,
+        content_type: ?[]const u8,
+    ) anyerror![]u8 {
+        _ = uri;
+        _ = method;
+        _ = content_type;
+        const self: *RecordingTransport = @ptrCast(@alignCast(ctx));
+        try self.payloads.append(self.allocator, try self.allocator.dupe(u8, payload));
+        return allocator.dupe(u8, self.response);
+    }
+};
+
+test "createOpenAccount：app_id 含引号时请求体仍是合法 JSON 且值原样回传" {
+    const allocator = std.testing.allocator;
+
+    var rec = RecordingTransport{
+        .allocator = allocator,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"open_appid\":\"wx-open-1\"}",
+    };
+    defer rec.deinit();
+
+    var ctx: Context = .{ .config = .{ .app_id = "wx-op" } };
+    var a = Account.init(&ctx, allocator);
+    a.setTransport(RecordingTransport.dispatch, @ptrCast(&rec));
+
+    // app_id 来自调用方，故意含 `"`：裸 allocPrint 插值会拼出非法 JSON。
+    const app_id = "wx\"trick";
+    const open_appid = try a.createOpenAccount(app_id, "12_tok");
+    defer allocator.free(open_appid);
+    try std.testing.expectEqualStrings("wx-open-1", open_appid);
+
+    try std.testing.expectEqual(@as(usize, 1), rec.payloads.items.len);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, rec.payloads.items[0], .{});
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings(app_id, obj.get("appid").?.string);
+}
+
+test "getOpenAccount：app_id 含引号时请求体仍是合法 JSON 且值原样回传" {
+    const allocator = std.testing.allocator;
+
+    var rec = RecordingTransport{
+        .allocator = allocator,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"open_appid\":\"wx-open-2\"}",
+    };
+    defer rec.deinit();
+
+    var ctx: Context = .{ .config = .{ .app_id = "wx-op" } };
+    var a = Account.init(&ctx, allocator);
+    a.setTransport(RecordingTransport.dispatch, @ptrCast(&rec));
+
+    const app_id = "wx\"trick";
+    const open_appid = try a.getOpenAccount(app_id, "12_tok");
+    defer allocator.free(open_appid);
+    try std.testing.expectEqualStrings("wx-open-2", open_appid);
+
+    try std.testing.expectEqual(@as(usize, 1), rec.payloads.items.len);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, rec.payloads.items[0], .{});
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings(app_id, obj.get("appid").?.string);
 }
 
 test "bind 请求 URL 带 access_token= 参数（authorizer token）" {

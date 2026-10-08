@@ -230,6 +230,64 @@ test "checkText errcode 非 0 返回 ApiError" {
     try std.testing.expectError(util_error.WechatError.ApiError, result);
 }
 
+/// 记录 method / uri / payload 的 transport（checkImage 走线程默认 client，无法用 setTransport 注入）。
+const MultipartCapture = struct {
+    method: std.http.Method = .GET,
+    uri: []u8 = &.{},
+    payload: []u8 = &.{},
+    response: []const u8 = "",
+
+    fn dispatch(ctx: *anyopaque, allocator: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = content_type;
+        const self: *MultipartCapture = @ptrCast(@alignCast(ctx));
+        self.method = method;
+        if (self.uri.len > 0) allocator.free(self.uri);
+        if (self.payload.len > 0) allocator.free(self.payload);
+        self.uri = try allocator.dupe(u8, uri);
+        self.payload = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, self.response);
+    }
+
+    fn deinit(self: *MultipartCapture, allocator: std.mem.Allocator) void {
+        if (self.uri.len > 0) allocator.free(self.uri);
+        if (self.payload.len > 0) allocator.free(self.payload);
+    }
+};
+
+test "checkImage multipart 上传图片并断言 URL/方法/字段" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const tmp_path = "zwechat_content_checkimage_test.bin";
+    const file = try std.Io.Dir.cwd().createFile(io, tmp_path, .{});
+    defer {
+        file.close(io);
+        std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+    }
+    try file.writePositionalAll(io, "fake-image-bytes", 0);
+
+    var cap = MultipartCapture{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    defer cap.deinit(allocator);
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(MultipartCapture.dispatch, @ptrCast(&cap));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-ct" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var c = Content.init(&ctx, allocator);
+    try c.checkImage(tmp_path);
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/img_sec_check?access_token=token-abc", cap.uri);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "name=\"media\"") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "fake-image-bytes") != null);
+}
+
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
 
 const retry_testing = @import("../retry_testing.zig");

@@ -803,6 +803,46 @@ test "URL 常量值" {
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/message/custom/send", customSendURL);
 }
 
+test "TypingStatus.jsonValue 返回微信要求的驼峰字符串" {
+    try std.testing.expectEqualStrings("Typing", TypingStatus.typing.jsonValue());
+    try std.testing.expectEqualStrings("CancelTyping", TypingStatus.cancel_typing.jsonValue());
+}
+
+test "Message.setTransport 记录注入值、置 null 复原并真实路由请求" {
+    const allocator = std.testing.allocator;
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-msg" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var m = Message.init(&ctx, allocator);
+    try std.testing.expect(m.transport == null);
+    try std.testing.expect(m.transport_ctx == null);
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute(
+        "https://api.weixin.qq.com/cgi-bin/message/custom/typing?access_token=token-abc",
+        .{ .body = "{\"errcode\":0,\"errmsg\":\"ok\"}" },
+    );
+
+    m.setTransport(util_http.MockTransport.dispatch, &mt);
+    try std.testing.expect(m.transport != null);
+    try std.testing.expect(m.transport_ctx == @as(*anyopaque, @ptrCast(&mt)));
+
+    // 注入生效：请求确实被该 transport 接住（而非真实 HTTP）。
+    try m.sendTypingStatus("oA", .typing);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/message/custom/typing?access_token=token-abc",
+        mt.history.items[0],
+    );
+
+    // 置 null 复原：不再持有注入的 transport。
+    m.setTransport(null, null);
+    try std.testing.expect(m.transport == null);
+    try std.testing.expect(m.transport_ctx == null);
+}
+
 test "serializeTemplate produces valid JSON and escapes quotes" {
     const allocator = std.testing.allocator;
     const msg = TemplateMessage{

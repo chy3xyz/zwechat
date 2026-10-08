@@ -196,12 +196,78 @@ pub const QueryWithdrawOrderResponse = struct {
     errcode: i64 = 0,
     errmsg: []const u8 = "",
     withdraw_no: []const u8 = "",
+    /// 1-创建成功/提现中 2-提现成功 3-提现失败。
     status: i64 = 0,
     withdraw_amount: []const u8 = "",
     wx_withdraw_no: []const u8 = "",
     withdraw_success_timestamp: i64 = 0,
     create_time: []const u8 = "",
+    /// 提现失败的原因（官方文档字段名为 `fail_reason`）。
+    fail_reason: []const u8 = "",
+
+    /// 自定义 JSON 解析（`std.json` 自动调用，调用方无需直接调用）。
+    ///
+    /// 本响应有两处上游写法不统一，这里「官方为主、Go 参考兜底」都收，避免
+    /// 静默丢掉业务值：
+    /// - 提现失败原因：官方文档是 `fail_reason`，Go 参考与部分网关返回 `failReason`；
+    /// - `withdraw_success_timestamp`：官方文档标注为 string，Go 参考与既有夹具是
+    ///   number，两种形态都能解出秒级时间戳。
+    pub fn jsonParse(
+        allocator: std.mem.Allocator,
+        source: anytype,
+        options: std.json.ParseOptions,
+    ) !@This() {
+        const value = try std.json.Value.jsonParse(allocator, source, options);
+        if (value != .object) return error.UnexpectedToken;
+        var out: @This() = .{};
+        var it = value.object.iterator();
+        while (it.next()) |kv| {
+            const key = kv.key_ptr.*;
+            const raw = kv.value_ptr.*;
+            if (std.mem.eql(u8, key, "errcode")) {
+                out.errcode = jsonValueInt(raw);
+            } else if (std.mem.eql(u8, key, "errmsg")) {
+                out.errmsg = jsonValueString(raw);
+            } else if (std.mem.eql(u8, key, "withdraw_no")) {
+                out.withdraw_no = jsonValueString(raw);
+            } else if (std.mem.eql(u8, key, "status")) {
+                out.status = jsonValueInt(raw);
+            } else if (std.mem.eql(u8, key, "withdraw_amount")) {
+                out.withdraw_amount = jsonValueString(raw);
+            } else if (std.mem.eql(u8, key, "wx_withdraw_no")) {
+                out.wx_withdraw_no = jsonValueString(raw);
+            } else if (std.mem.eql(u8, key, "withdraw_success_timestamp")) {
+                out.withdraw_success_timestamp = jsonValueInt(raw);
+            } else if (std.mem.eql(u8, key, "create_time")) {
+                out.create_time = jsonValueString(raw);
+            } else if (std.mem.eql(u8, key, "fail_reason") or std.mem.eql(u8, key, "failReason")) {
+                // 两种写法同时出现时以官方下划线写法为准。
+                if (out.fail_reason.len == 0) out.fail_reason = jsonValueString(raw);
+            }
+        }
+        return out;
+    }
 };
+
+/// `std.json.Value` 的字面量取值：非字符串一律回退空串。
+fn jsonValueString(raw: std.json.Value) []const u8 {
+    return switch (raw) {
+        .string => |s| s,
+        else => "",
+    };
+}
+
+/// `std.json.Value` 的整型取值：兼容 number / float / 数字字符串
+/// （微信多数时间戳字段在文档里是 string，在既有夹具里是 number）。
+fn jsonValueInt(raw: std.json.Value) i64 {
+    return switch (raw) {
+        .integer => |n| n,
+        .float => |f| std.math.lossyCast(i64, f),
+        .number_string => |s| std.fmt.parseInt(i64, s, 10) catch 0,
+        .string => |s| std.fmt.parseInt(i64, std.mem.trim(u8, s, " "), 10) catch 0,
+        else => 0,
+    };
+}
 
 pub const UploadItem = struct {
     id: []const u8 = "",
@@ -453,8 +519,14 @@ pub const DownloadAdverFundsOrderResponse = struct {
 
 pub const GetComplaintListRequest = struct {
     env: Env = .production,
-    page: i64 = 0,
-    page_size: i64 = 0,
+    /// 筛选偏移，从 0 开始（官方必填）。
+    offset: i64 = 0,
+    /// 筛选最多返回条数（官方必填）。
+    ///
+    /// ⚠ `0` **不是**有效值 —— 官方把本字段标为必填且给出的是「最多返回条数」语义，
+    /// 传 0 会被服务端按参数错误拒（`268490002`）。本结构体保留 `0` 作默认只是
+    /// 「未设置」的标记，调用方必须显式给一个正数（如 10 / 20）。
+    limit: i64 = 0,
     begin_date: []const u8 = "",
     end_date: []const u8 = "",
 };
@@ -463,13 +535,68 @@ pub const GetComplaintListResponse = struct {
     errcode: i64 = 0,
     errmsg: []const u8 = "",
     total: i64 = 0,
-    complaint_list: []const ComplaintInfo = &.{},
+    complaints: []const ComplaintItem = &.{},
 };
 
-pub const ComplaintInfo = struct {
+/// 投诉单关联订单信息（官方 `complaints[].complaint_order_info`）。
+pub const ComplaintOrderInfo = struct {
+    /// 投诉单关联的微信支付交易单号。
+    transaction_id: []const u8 = "",
+    /// 渠道单号，`query_order` 返回的 `channel_order_id`。
+    out_trade_no: []const u8 = "",
+    /// 订单金额，单位分。
+    amount: i64 = 0,
+    /// 商户单号，商家在拉起支付时传的单号。
+    wxa_out_trade_no: []const u8 = "",
+    /// 小程序侧单号。
+    wx_order_id: []const u8 = "",
+};
+
+/// 投诉单关联服务单信息（官方 `complaints[].service_order_info`）。
+pub const ComplaintServiceOrderInfo = struct {
+    /// 微信支付服务订单号。
+    order_id: []const u8 = "",
+    /// 商户系统内部服务订单号。
+    out_order_no: []const u8 = "",
+    /// DOING-进行中 REVOKED-已取消 WAITPAY-待支付 DONE-已完成。
+    state: []const u8 = "",
+};
+
+/// 投诉相关资料凭证（官方 `complaints[].complaint_media_list`，协商历史同构复用）。
+pub const ComplaintMedia = struct {
+    /// USER_COMPLAINT_IMAGE-用户提交投诉时上传；OPERATION_IMAGE-协商过程中上传。
+    media_type: []const u8 = "",
+    /// 媒体文件请求 url（官方为字符串数组，不是单个字符串）。
+    media_url: []const []const u8 = &.{},
+};
+
+/// 投诉单（官方 `complaints[]` 元素，`get_complaint_detail` 的 `complaint` 同构）。
+pub const ComplaintItem = struct {
     complaint_id: []const u8 = "",
-    create_time: i64 = 0,
-    state: i64 = 0,
+    /// 投诉时间，格式 `yyyy-mm-dd'T'HH:MM:ssXXX`（官方为 string，不是时间戳）。
+    complaint_time: []const u8 = "",
+    complaint_detail: []const u8 = "",
+    /// PENDING-待处理 PROCESSING-处理中 PROCESSED-已处理完成（官方为 string）。
+    complaint_state: []const u8 = "",
+    payer_phone: []const u8 = "",
+    payer_openid: []const u8 = "",
+    complaint_order_info: []const ComplaintOrderInfo = &.{},
+    /// 投诉单下所有订单是否已全部全额退款。
+    complaint_full_refunded: bool = false,
+    /// 投诉单是否有待回复的用户留言。
+    incoming_user_response: bool = false,
+    /// 用户投诉次数（首次记为 1，之后每继续投诉一次加 1）。
+    user_complaint_times: i64 = 0,
+    complaint_media_list: []const ComplaintMedia = &.{},
+    /// 用户发起投诉前选择的 faq 标题。
+    problem_description: []const u8 = "",
+    /// REFUND-申请退款 SERVICE_NOT_WORK-服务权益未生效 OTHERS-其他类型。
+    problem_type: []const u8 = "",
+    /// 问题类型为申请退款时有值，单位分。
+    apply_refund_amount: i64 = 0,
+    /// TRUSTED-满足极速退款条件 HIGH_RISK-高风险投诉。
+    user_tag_list: []const []const u8 = &.{},
+    service_order_info: []const ComplaintServiceOrderInfo = &.{},
 };
 
 pub const GetComplaintDetailRequest = struct {
@@ -480,24 +607,50 @@ pub const GetComplaintDetailRequest = struct {
 pub const GetComplaintDetailResponse = struct {
     errcode: i64 = 0,
     errmsg: []const u8 = "",
-    complaint_id: []const u8 = "",
-    state: i64 = 0,
+    /// 详情在 `complaint` 对象里（与 `complaints[]` 元素结构一致），不在顶层。
+    complaint: ?ComplaintItem = null,
 };
 
 pub const GetNegotiationHistoryRequest = struct {
     env: Env = .production,
     complaint_id: []const u8 = "",
+    /// 筛选偏移，从 0 开始（官方必填）。
+    offset: i64 = 0,
+    /// 筛选最多返回条数（官方必填）。
+    limit: i64 = 0,
+};
+
+/// 一条协商历史记录（官方 `history[]`）。
+pub const NegotiationHistory = struct {
+    /// 操作流水号。
+    log_id: []const u8 = "",
+    /// 当前投诉协商记录的操作人。
+    operator: []const u8 = "",
+    /// 当前操作时间，格式 `yyyy-mm-dd'T'HH:MM:ssXXX`（官方为 string）。
+    operate_time: []const u8 = "",
+    /// USER_CREATE_COMPLAINT / MERCHANT_RESPONSE / ... 等枚举字符串。
+    operate_type: []const u8 = "",
+    /// 当前投诉协商记录的具体内容。
+    operate_details: []const u8 = "",
+    complaint_media_list: []const ComplaintMedia = &.{},
 };
 
 pub const GetNegotiationHistoryResponse = struct {
     errcode: i64 = 0,
     errmsg: []const u8 = "",
+    total: i64 = 0,
+    history: []const NegotiationHistory = &.{},
 };
 
 pub const ResponseComplaintRequest = struct {
     env: Env = .production,
     complaint_id: []const u8 = "",
     response_content: []const u8 = "",
+    /// 图片文件 ID 列表，元素取自 `upload_vp_file` 返回的 `file_id`。
+    ///
+    /// 官方把本字段标为**必填**（array of string），故即使为空也写出 `[]`
+    /// （否则 `268490002`）。
+    response_images: []const []const u8 = &.{},
 };
 
 pub const ResponseComplaintResponse = struct {
@@ -517,6 +670,12 @@ pub const CompleteComplaintResponse = struct {
 
 pub const UploadVPFileRequest = struct {
     env: Env = .production,
+    /// 经 base64 编码后的图片内容，最大 1MB（与 `img_url` 至少提供一个）。
+    base64_img: []const u8 = "",
+    /// 图片 url，最高允许 2MB，优先使用本字段；为空则省略该字段。
+    img_url: []const u8 = "",
+    /// 图片名称。
+    file_name: []const u8 = "",
 };
 
 pub const UploadVPFileResponse = struct {
@@ -527,13 +686,22 @@ pub const UploadVPFileResponse = struct {
 
 pub const GetUploadFileSignRequest = struct {
     env: Env = .production,
-    file_id: []const u8 = "",
+    /// 微信支付的图片地址，形如
+    /// `https://api.mch.weixin.qq.com/v3/merchant-service/images/{xxxxxx}`。
+    wxpay_url: []const u8 = "",
+    /// 是否转存到 COS（转存后 `cos_url` 有效 30 分钟）。官方必填，故始终写出。
+    convert_cos: bool = false,
+    /// 对应的反馈投诉 id。
+    complaint_id: []const u8 = "",
 };
 
 pub const GetUploadFileSignResponse = struct {
     errcode: i64 = 0,
     errmsg: []const u8 = "",
+    /// 微信支付图片请求的 `Authorization` 头部值。
     sign: []const u8 = "",
+    /// `convert_cos=true` 时返回的转存地址，30 分钟有效。
+    cos_url: []const u8 = "",
 };
 
 /// 小程序虚拟支付模块。
@@ -847,8 +1015,10 @@ fn jsonStringify(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     try s.beginObject();
     inline for (info.@"struct".field_names, info.@"struct".field_types) |name, ftype| {
         const fv = @field(value, name);
-        // 跳过空字符串 / 零值可选字段（与 Go omitempty 语义对齐的简化）。
-        const should_write = if (comptime isSkippable(ftype)) !isEmpty(ftype, fv) else true;
+        // 跳过空字符串 / 零值可选字段（与 Go omitempty 语义对齐的简化）；
+        // 官方标注「必填」的数值字段不参与该省略（见 isAlwaysWritten）。
+        const skip_if_empty = comptime (isSkippable(ftype) and !isAlwaysWritten(name));
+        const should_write = if (skip_if_empty) !isEmpty(ftype, fv) else true;
         if (should_write) {
             try s.objectField(name);
             // 微信 xpay 契约要求 env 为数字（0 正式 / 1 沙箱，见 Go 参考 domain.go），
@@ -864,14 +1034,30 @@ fn jsonStringify(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     return out.toOwnedSlice();
 }
 
+/// 官方文档标注为「必填」的字段：即使取「零值」（`0` / 空数组）也必须出现在请求体里。
+///
+/// 本模块用「零值省略」近似 Go 的 `omitempty`，但有几类字段的零值是**合法取值**，
+/// 省略它们会让接口直接返回 268490002（请求参数字段错误）：
+/// - `offset` / `limit`：`get_complaint_list` / `get_negotiation_history` 的官方必填分页字段
+///   （`offset=0` 就是合法的首屏偏移）；
+/// - `response_images`：`response_complaint` 的官方必填图片列表，为空时要写 `[]` 而非省略。
+fn isAlwaysWritten(name: []const u8) bool {
+    return std.mem.eql(u8, name, "offset") or
+        std.mem.eql(u8, name, "limit") or
+        std.mem.eql(u8, name, "response_images");
+}
+
 fn isSkippable(comptime T: type) bool {
-    return T == []const u8 or T == i64 or T == Env;
+    return T == []const u8 or T == i64 or T == Env or T == []const []const u8;
 }
 
 fn isEmpty(comptime T: type, v: anytype) bool {
     if (T == []const u8) return v.len == 0;
     if (T == i64) return v == 0;
     if (T == Env) return v == .production;
+    // 字符串数组：空数组视为「零值」。注意 `response_images` 虽是数组，但官方标注必填，
+    // 已由 `isAlwaysWritten` 强制写出，本分支对它不生效。
+    if (T == []const []const u8) return v.len == 0;
     return false;
 }
 
@@ -923,6 +1109,8 @@ const TestCapture = struct {
     responses: []const []const u8 = &.{},
     /// 收到过的请求次数。
     calls: usize = 0,
+    /// 每次请求的 HTTP method（越界不记录），用 `methodAt` 读取。
+    methods: [4]std.http.Method = @splat(std.http.Method.POST),
     /// 最近一次请求的副本（借用 arena / 测试 allocator，测试结束前一直有效）。
     uri: []u8 = &.{},
     payload: []u8 = &.{},
@@ -940,9 +1128,9 @@ const TestCapture = struct {
         payload: []const u8,
         content_type: ?[]const u8,
     ) anyerror![]u8 {
-        _ = method;
         _ = content_type;
         const self: *TestCapture = @ptrCast(@alignCast(ctx));
+        if (self.calls < self.methods.len) self.methods[self.calls] = method;
         if (self.calls < self.uri_history.len and uri.len <= self.uri_history[0].len) {
             @memcpy(self.uri_history[self.calls][0..uri.len], uri);
             self.uri_lens[self.calls] = uri.len;
@@ -967,6 +1155,10 @@ const TestCapture = struct {
 
     fn payloadAt(self: *const TestCapture, idx: usize) []const u8 {
         return self.payload_history[idx][0..self.payload_lens[idx]];
+    }
+
+    fn methodAt(self: *const TestCapture, idx: usize) std.http.Method {
+        return self.methods[idx];
     }
 };
 
@@ -1229,4 +1421,1199 @@ fn tokenOf(uri: []const u8) []const u8 {
     const rest = uri[start..];
     const end = std.mem.findScalar(u8, rest, '&') orelse rest.len;
     return rest[0..end];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 公开 API 真实调用覆盖：下列每个接口各走一次真实调用（mock transport），
+// 逐字核对「method + 完整 URI（access_token / pay_sig / signature 的位置与值）
+// + 请求体」，并从响应里解析出业务字段。请求体断言同时锁住了 JSON 字段顺序，
+// 因为 pay_sig / signature 的输入正是这份序列化结果。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 建一套最小可用的 VirtualPayment 环境：注入 capture transport + 桩 token。
+/// `arena` / `cap` / `ctx_out` / `vp_out` 由调用方持有，保证 ctx 指针稳定。
+fn vpSetup(
+    arena: *std.heap.ArenaAllocator,
+    cap: *TestCapture,
+    ctx_out: *Context,
+    vp_out: *VirtualPayment,
+    response: []const u8,
+) void {
+    arena.* = std.heap.ArenaAllocator.init(std.testing.allocator);
+    const alloc = arena.allocator();
+    cap.* = .{ .allocator = alloc, .response = response };
+    setupTestClient(alloc, cap);
+    ctx_out.* = .{
+        .config = .{ .app_id = "wx-vp", .app_key = "appkey-123" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &test_token_vtable },
+    };
+    vp_out.* = VirtualPayment.init(ctx_out, alloc);
+}
+
+/// 断言第 `idx` 次请求：POST + 请求体逐字 + 完整 URI（含 pay_sig 与可选
+/// signature 的出现位置和值）。`session_key` 非 null 表示 callUser 双签名接口。
+fn expectSignedCall(
+    alloc: std.mem.Allocator,
+    cap: *const TestCapture,
+    idx: usize,
+    path: []const u8,
+    expected_body: []const u8,
+    session_key: ?[]const u8,
+) !void {
+    try std.testing.expectEqual(std.http.Method.POST, cap.methodAt(idx));
+    try std.testing.expectEqualStrings(expected_body, cap.payloadAt(idx));
+
+    var sig_input = std.ArrayList(u8).empty;
+    defer sig_input.deinit(alloc);
+    try sig_input.appendSlice(alloc, path);
+    try sig_input.appendSlice(alloc, "&");
+    try sig_input.appendSlice(alloc, expected_body);
+    const pay_sig = try hmacSha256Hex(alloc, "appkey-123", sig_input.items);
+
+    if (session_key) |sk| {
+        const user_sig = try hmacSha256Hex(alloc, sk, expected_body);
+        const expected = try alloc.print(
+            "https://api.weixin.qq.com{s}?access_token=stub-ak&pay_sig={s}&signature={s}",
+            .{ path, pay_sig, user_sig },
+        );
+        try std.testing.expectEqualStrings(expected, cap.uriAt(idx));
+        return;
+    }
+    const expected = try alloc.print(
+        "https://api.weixin.qq.com{s}?access_token=stub-ak&pay_sig={s}",
+        .{ path, pay_sig },
+    );
+    try std.testing.expectEqualStrings(expected, cap.uriAt(idx));
+}
+
+test "currencyPay 双签名：URI 与请求体逐字一致，响应解析 balance/used_present_amount" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"order_id\":\"o-1\",\"balance\":7,\"used_present_amount\":2}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+    v.setSessionKey("sk-1");
+
+    var parsed = try v.currencyPay(.{
+        .openid = "ou-1",
+        .env = .sandbox,
+        .user_ip = "1.2.3.4",
+        .amount = 5,
+        .order_id = "o-1",
+        .payitem = "item-1",
+        .remark = "remark",
+        .device_type = "1",
+    });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/currency_pay",
+        "{\"openid\":\"ou-1\",\"env\":1,\"user_ip\":\"1.2.3.4\",\"amount\":5,\"order_id\":\"o-1\",\"payitem\":\"item-1\",\"remark\":\"remark\",\"device_type\":\"1\"}",
+        "sk-1",
+    );
+    try std.testing.expectEqual(@as(i64, 7), parsed.value.balance);
+    try std.testing.expectEqual(@as(i64, 2), parsed.value.used_present_amount);
+}
+
+test "cancelCurrencyPay 双签名：env 缺省被省略、device_type 为数字" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(&arena, &cap, &ctx, &v, "{\"errcode\":0,\"errmsg\":\"ok\",\"order_id\":\"o-2\"}");
+    defer arena.deinit();
+    defer releaseTestClient();
+    v.setSessionKey("sk-1");
+
+    var parsed = try v.cancelCurrencyPay(.{
+        .openid = "ou-1",
+        .user_ip = "1.2.3.4",
+        .pay_order_id = "p-1",
+        .order_id = "o-2",
+        .amount = 5,
+        .device_type = 1,
+    });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/cancel_currency_pay",
+        "{\"openid\":\"ou-1\",\"user_ip\":\"1.2.3.4\",\"pay_order_id\":\"p-1\",\"order_id\":\"o-2\",\"amount\":5,\"device_type\":1}",
+        "sk-1",
+    );
+    try std.testing.expectEqualStrings("o-2", parsed.value.order_id);
+}
+
+test "notifyProvideGoods 单签名：env 数字，尾部无 signature" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(&arena, &cap, &ctx, &v, "{\"errcode\":0,\"errmsg\":\"ok\"}");
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.notifyProvideGoods(.{ .order_id = "o-1", .env = .sandbox });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/notify_provide_goods",
+        "{\"order_id\":\"o-1\",\"env\":1}",
+        null,
+    );
+    try std.testing.expectEqualStrings("ok", parsed.value.errmsg);
+}
+
+test "presentCurrency 双签名：请求体含 order_id/amount/device_type，响应解析 present_balance" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"balance\":9,\"order_id\":\"o-1\",\"present_balance\":4}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+    v.setSessionKey("sk-1");
+
+    var parsed = try v.presentCurrency(.{
+        .openid = "ou-1",
+        .env = .sandbox,
+        .order_id = "o-1",
+        .amount = 3,
+        .device_type = "2",
+    });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/present_currency",
+        "{\"openid\":\"ou-1\",\"env\":1,\"order_id\":\"o-1\",\"amount\":3,\"device_type\":\"2\"}",
+        "sk-1",
+    );
+    try std.testing.expectEqual(@as(i64, 4), parsed.value.present_balance);
+}
+
+test "downloadBill 单签名：begin_ds/end_ds 逐字，响应解析 url" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"url\":\"https://bill.example/b.csv\"}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.downloadBill(.{ .begin_ds = "20230801", .end_ds = "20230802" });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/download_bill",
+        "{\"begin_ds\":\"20230801\",\"end_ds\":\"20230802\"}",
+        null,
+    );
+    try std.testing.expectEqualStrings("https://bill.example/b.csv", parsed.value.url);
+}
+
+test "refundOrder 单签名：空字段省略，响应解析 refund_wx_order_id" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"refund_order_id\":\"r-1\",\"refund_wx_order_id\":\"wxr-1\",\"pay_order_id\":\"o-1\",\"pay_wx_order_id\":\"wxo-1\"}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.refundOrder(.{
+        .openid = "ou-1",
+        .order_id = "o-1",
+        .refund_order_id = "r-1",
+        .left_fee = 100,
+        .refund_fee = 50,
+        .refund_reason = "1",
+        .req_from = "2",
+    });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/refund_order",
+        "{\"openid\":\"ou-1\",\"order_id\":\"o-1\",\"refund_order_id\":\"r-1\",\"left_fee\":100,\"refund_fee\":50,\"refund_reason\":\"1\",\"req_from\":\"2\"}",
+        null,
+    );
+    try std.testing.expectEqualStrings("wxr-1", parsed.value.refund_wx_order_id);
+}
+
+test "createWithdrawOrder 单签名：withdraw_amount 是字符串，响应解析 wx_withdraw_no" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"withdraw_no\":\"w-1\",\"wx_withdraw_no\":\"wxw-1\"}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.createWithdrawOrder(.{
+        .withdraw_no = "w-1",
+        .withdraw_amount = "0.01",
+        .env = .sandbox,
+    });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/create_withdraw_order",
+        "{\"withdraw_no\":\"w-1\",\"withdraw_amount\":\"0.01\",\"env\":1}",
+        null,
+    );
+    try std.testing.expectEqualStrings("wxw-1", parsed.value.wx_withdraw_no);
+}
+
+test "queryWithdrawOrder 单签名：响应解析 status/withdraw_amount/fail_reason" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"withdraw_no\":\"w-1\",\"status\":2,\"withdraw_amount\":\"0.01\",\"wx_withdraw_no\":\"wxw-1\",\"withdraw_success_timestamp\":1700000000,\"create_time\":\"2024-01-01 00:00:00\",\"fail_reason\":\"\"}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.queryWithdrawOrder(.{ .withdraw_no = "w-1", .env = .sandbox });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/query_withdraw_order",
+        "{\"withdraw_no\":\"w-1\",\"env\":1}",
+        null,
+    );
+    try std.testing.expectEqual(@as(i64, 2), parsed.value.status);
+    try std.testing.expectEqualStrings("0.01", parsed.value.withdraw_amount);
+    try std.testing.expectEqual(@as(i64, 1700000000), parsed.value.withdraw_success_timestamp);
+    try std.testing.expectEqualStrings("", parsed.value.fail_reason);
+}
+
+test "queryWithdrawOrder 兼容官方 string 时间戳与 camelCase 的 failReason" {
+    // 官方文档把 withdraw_success_timestamp 标为 string；Go 参考（部分网关同样）
+    // 用 camelCase 的 failReason。两种上游写法都必须能解出业务值，否则提现失败
+    // 原因会静默丢失、成功时间戳会变成 0。
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"withdraw_no\":\"w-2\",\"status\":3,\"withdraw_success_timestamp\":\"1700000123\",\"failReason\":\"结算账户异常\"}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.queryWithdrawOrder(.{ .withdraw_no = "w-2" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(i64, 3), parsed.value.status);
+    try std.testing.expectEqual(@as(i64, 1700000123), parsed.value.withdraw_success_timestamp);
+    try std.testing.expectEqualStrings("结算账户异常", parsed.value.fail_reason);
+}
+
+test "queryWithdrawOrder errcode 非 0 仍报 ApiError（自定义 jsonParse 不吞错误码）" {
+    // 该响应用自定义 jsonParse 解析（见 QueryWithdrawOrderResponse），
+    // errcode 必须照旧喂给 parseResponse 的失败判定。
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(&arena, &cap, &ctx, &v, "{\"errcode\":268490002,\"errmsg\":\"请求参数字段错误\"}");
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    try std.testing.expectError(
+        util_error.WechatError.ApiError,
+        v.queryWithdrawOrder(.{ .withdraw_no = "w-1" }),
+    );
+}
+
+test "startUploadGoods 单签名：upload_item 数组元素字段序与 URL" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(&arena, &cap, &ctx, &v, "{\"errcode\":0,\"errmsg\":\"ok\"}");
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    const items = [_]UploadItem{.{
+        .id = "it-1",
+        .name = "itemA",
+        .price = 100,
+        .item_url = "https://img.example/1.png",
+    }};
+    var parsed = try v.startUploadGoods(.{ .upload_item = &items, .env = .sandbox });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/start_upload_goods",
+        "{\"upload_item\":[{\"id\":\"it-1\",\"name\":\"itemA\",\"price\":100,\"remark\":\"\",\"item_url\":\"https://img.example/1.png\",\"upload_status\":0,\"errmsg\":\"\"}],\"env\":1}",
+        null,
+    );
+    try std.testing.expectEqualStrings("ok", parsed.value.errmsg);
+}
+
+test "queryUploadGoods 单签名：请求体只有 env，响应解析 status 与 upload_item" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"upload_item\":[{\"id\":\"it-1\",\"name\":\"itemA\",\"price\":100,\"upload_status\":2}],\"status\":3}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.queryUploadGoods(.{ .env = .sandbox });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/query_upload_goods",
+        "{\"env\":1}",
+        null,
+    );
+    try std.testing.expectEqual(@as(i64, 3), parsed.value.status);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.upload_item.len);
+    try std.testing.expectEqualStrings("it-1", parsed.value.upload_item[0].id);
+}
+
+test "startPublishGoods 单签名：publish_item 数组字段序与 URL" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(&arena, &cap, &ctx, &v, "{\"errcode\":0,\"errmsg\":\"ok\"}");
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    const items = [_]PublishItem{.{ .id = "it-1" }};
+    var parsed = try v.startPublishGoods(.{ .env = .sandbox, .publish_item = &items });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/start_publish_goods",
+        "{\"env\":1,\"publish_item\":[{\"id\":\"it-1\",\"publish_status\":0,\"errmsg\":\"\"}]}",
+        null,
+    );
+    try std.testing.expectEqualStrings("ok", parsed.value.errmsg);
+}
+
+test "queryPublishGoods 单签名：响应解析 status 与 publish_item" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"publish_item\":[{\"id\":\"it-1\",\"publish_status\":2,\"errmsg\":\"\"}],\"status\":3}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.queryPublishGoods(.{ .env = .sandbox });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/query_publish_goods",
+        "{\"env\":1}",
+        null,
+    );
+    try std.testing.expectEqual(@as(i64, 3), parsed.value.status);
+    try std.testing.expectEqualStrings("it-1", parsed.value.publish_item[0].id);
+}
+
+test "startDownloadOrder 单签名：env/begin_ds/end_ds 字段序与 URL" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(&arena, &cap, &ctx, &v, "{\"errcode\":0,\"errmsg\":\"ok\"}");
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.startDownloadOrder(.{
+        .env = .sandbox,
+        .begin_ds = "20230801",
+        .end_ds = "20230802",
+    });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/start_download_order",
+        "{\"env\":1,\"begin_ds\":\"20230801\",\"end_ds\":\"20230802\"}",
+        null,
+    );
+    try std.testing.expectEqualStrings("ok", parsed.value.errmsg);
+}
+
+test "queryDownloadOrder 单签名：响应解析 url" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"url\":\"https://order.example/o.csv\"}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.queryDownloadOrder(.{
+        .env = .sandbox,
+        .begin_ds = "20230801",
+        .end_ds = "20230802",
+    });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/query_download_order",
+        "{\"env\":1,\"begin_ds\":\"20230801\",\"end_ds\":\"20230802\"}",
+        null,
+    );
+    try std.testing.expectEqualStrings("https://order.example/o.csv", parsed.value.url);
+}
+
+test "queryBizBalance 单签名：响应解析 balance_available" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"balance_available\":{\"amount\":\"12.34\",\"currency_code\":\"CNY\"}}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.queryBizBalance(.{ .env = .sandbox });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/query_biz_balance",
+        "{\"env\":1}",
+        null,
+    );
+    const available = parsed.value.balance_available orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("12.34", available.amount);
+    try std.testing.expectEqualStrings("CNY", available.currency_code);
+}
+
+test "queryTransferAccount 单签名：响应解析 acct_list 元素" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"acct_list\":[{\"transfer_account_name\":\"acct\",\"transfer_account_uid\":42,\"transfer_account_agency_id\":7,\"transfer_account_agency_name\":\"agency\",\"state\":1,\"bind_result\":1,\"error_msg\":\"\"}]}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.queryTransferAccount(.{ .env = .sandbox });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/query_transfer_account",
+        "{\"env\":1}",
+        null,
+    );
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.acct_list.len);
+    try std.testing.expectEqualStrings("acct", parsed.value.acct_list[0].transfer_account_name);
+    try std.testing.expectEqual(@as(i64, 42), parsed.value.acct_list[0].transfer_account_uid);
+}
+
+test "queryAdverFunds 单签名：filter 有值写对象、为 null 写 null，响应解析 total_page" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"adver_funds_list\":[{\"settle_begin\":100,\"settle_end\":200,\"total_amount\":1000,\"remain_amount\":500,\"expire_time\":300,\"fund_type\":1,\"fund_id\":\"f-1\"}],\"total_page\":3}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var with_filter = try v.queryAdverFunds(.{
+        .env = .sandbox,
+        .page = 1,
+        .page_size = 10,
+        .filter = .{ .settle_begin = 100, .fund_type = 1 },
+    });
+    defer with_filter.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/query_adver_funds",
+        "{\"env\":1,\"page\":1,\"page_size\":10,\"filter\":{\"settle_begin\":100,\"settle_end\":0,\"fund_type\":1}}",
+        null,
+    );
+    try std.testing.expectEqual(@as(i64, 3), with_filter.value.total_page);
+    try std.testing.expectEqualStrings("f-1", with_filter.value.adver_funds_list[0].fund_id);
+
+    var no_filter = try v.queryAdverFunds(.{ .env = .sandbox, .page = 2, .page_size = 10 });
+    defer no_filter.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        1,
+        "/xpay/query_adver_funds",
+        "{\"env\":1,\"page\":2,\"page_size\":10,\"filter\":null}",
+        null,
+    );
+}
+
+test "createFundsBill 单签名：全部 10 个字段按声明序写出，响应解析 bill_id" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(&arena, &cap, &ctx, &v, "{\"errcode\":0,\"errmsg\":\"ok\",\"bill_id\":\"bill-1\"}");
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.createFundsBill(.{
+        .env = .sandbox,
+        .transfer_amount = 100,
+        .transfer_account_uid = 42,
+        .transfer_account_name = "acct",
+        .transfer_account_agency_id = 7,
+        .request_id = "req-1",
+        .settle_begin = 100,
+        .settle_end = 200,
+        .authorize_advertise = 1,
+        .fund_type = 1,
+    });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/create_funds_bill",
+        "{\"env\":1,\"transfer_amount\":100,\"transfer_account_uid\":42,\"transfer_account_name\":\"acct\",\"transfer_account_agency_id\":7,\"request_id\":\"req-1\",\"settle_begin\":100,\"settle_end\":200,\"authorize_advertise\":1,\"fund_type\":1}",
+        null,
+    );
+    try std.testing.expectEqualStrings("bill-1", parsed.value.bill_id);
+}
+
+test "bindTransferAccount 单签名：URL 为参考实现的 bind_transfer_accout（官方笔误）" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(&arena, &cap, &ctx, &v, "{\"errcode\":0,\"errmsg\":\"ok\"}");
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.bindTransferAccount(.{
+        .env = .sandbox,
+        .transfer_account_uid = 42,
+        .transfer_account_org_name = "org",
+    });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/bind_transfer_accout",
+        "{\"env\":1,\"transfer_account_uid\":42,\"transfer_account_org_name\":\"org\"}",
+        null,
+    );
+    try std.testing.expectEqualStrings("ok", parsed.value.errmsg);
+}
+
+test "queryFundsBill 单签名：filter 非可选始终写出，响应解析 bill_list" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"bill_list\":[{\"bill_id\":\"b-1\",\"oper_time\":1,\"settle_begin\":100,\"settle_end\":200,\"fund_id\":\"f-1\",\"transfer_account_name\":\"acct\",\"transfer_account_uid\":42,\"transfer_amount\":1000,\"status\":1,\"request_id\":\"req-1\"}],\"total_page\":2}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.queryFundsBill(.{
+        .env = .sandbox,
+        .page = 1,
+        .page_size = 20,
+        .filter = .{ .oper_time_begin = 100, .bill_id = "b-1" },
+    });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/query_funds_bill",
+        "{\"env\":1,\"page\":1,\"page_size\":20,\"filter\":{\"oper_time_begin\":100,\"oper_time_end\":0,\"bill_id\":\"b-1\",\"request_id\":\"\"}}",
+        null,
+    );
+    try std.testing.expectEqual(@as(i64, 2), parsed.value.total_page);
+    try std.testing.expectEqualStrings("b-1", parsed.value.bill_list[0].bill_id);
+}
+
+test "queryRecoverBill 单签名：响应解析 recover_amount 与 refund_order_list" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"bill_list\":[{\"bill_id\":\"b-1\",\"recover_time\":1,\"settle_begin\":100,\"settle_end\":200,\"fund_id\":\"f-1\",\"recover_account_name\":\"acct\",\"recover_amount\":500,\"refund_order_list\":[\"r-1\",\"r-2\"]}],\"total_page\":2}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.queryRecoverBill(.{
+        .env = .sandbox,
+        .page = 1,
+        .page_size = 20,
+        .filter = .{ .recover_time_begin = 100, .bill_id = "b-1" },
+    });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/query_recover_bill",
+        "{\"env\":1,\"page\":1,\"page_size\":20,\"filter\":{\"recover_time_begin\":100,\"recover_time_end\":0,\"bill_id\":\"b-1\"}}",
+        null,
+    );
+    try std.testing.expectEqual(@as(i64, 500), parsed.value.bill_list[0].recover_amount);
+    try std.testing.expectEqual(@as(usize, 2), parsed.value.bill_list[0].refund_order_list.len);
+    try std.testing.expectEqualStrings("r-2", parsed.value.bill_list[0].refund_order_list[1]);
+}
+
+test "downloadAdverFundsOrder 单签名：响应解析 url" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"url\":\"https://adver.example/a.csv\"}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.downloadAdverFundsOrder(.{ .env = .sandbox, .fund_id = "f-1" });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/download_adverfunds_order",
+        "{\"env\":1,\"fund_id\":\"f-1\"}",
+        null,
+    );
+    try std.testing.expectEqualStrings("https://adver.example/a.csv", parsed.value.url);
+}
+
+test "getComplaintList 单签名：官方必填 offset/limit 与 complaints 全字段解析" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        // 官方返回体：列表在 `complaints`，元素字段为 complaint_time(string) /
+        // complaint_state(string) 等（见 api_get_complaint_list）。
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"total\":1,\"complaints\":[{" ++
+            "\"complaint_id\":\"c-1\"," ++
+            "\"complaint_time\":\"2023-11-28T11:11:49+08:00\"," ++
+            "\"complaint_detail\":\"音质太差\"," ++
+            "\"complaint_state\":\"PENDING\"," ++
+            "\"payer_phone\":\"13800000000\"," ++
+            "\"payer_openid\":\"ou-1\"," ++
+            "\"complaint_order_info\":[{\"transaction_id\":\"4200\",\"out_trade_no\":\"ch-1\",\"amount\":100,\"wxa_out_trade_no\":\"wxa-1\",\"wx_order_id\":\"wx-1\"}]," ++
+            "\"complaint_full_refunded\":false," ++
+            "\"incoming_user_response\":true," ++
+            "\"user_complaint_times\":2," ++
+            "\"complaint_media_list\":[{\"media_type\":\"USER_COMPLAINT_IMAGE\",\"media_url\":[\"https://img/1.png\",\"https://img/2.png\"]}]," ++
+            "\"problem_description\":\"申请退款\"," ++
+            "\"problem_type\":\"REFUND\"," ++
+            "\"apply_refund_amount\":100," ++
+            "\"user_tag_list\":[\"TRUSTED\"]," ++
+            "\"service_order_info\":[{\"order_id\":\"so-1\",\"out_order_no\":\"so-out-1\",\"state\":\"DONE\"}]}]}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.getComplaintList(.{
+        .env = .sandbox,
+        .offset = 0,
+        .limit = 10,
+        .begin_date = "2024-01-01",
+        .end_date = "2024-01-31",
+    });
+    defer parsed.deinit();
+
+    // 官方必填的 `offset=0` 也必须落进请求体（零值省略不得吃掉首屏偏移），
+    // 否则服务端直接返回 268490002（请求参数字段错误）。
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/get_complaint_list",
+        "{\"env\":1,\"offset\":0,\"limit\":10,\"begin_date\":\"2024-01-01\",\"end_date\":\"2024-01-31\"}",
+        null,
+    );
+    // 整体比较：一次锁住 `complaints` 元素的全部官方字段。
+    try std.testing.expectEqualDeep(GetComplaintListResponse{
+        .errmsg = "ok",
+        .total = 1,
+        .complaints = &.{.{
+            .complaint_id = "c-1",
+            .complaint_time = "2023-11-28T11:11:49+08:00",
+            .complaint_detail = "音质太差",
+            .complaint_state = "PENDING",
+            .payer_phone = "13800000000",
+            .payer_openid = "ou-1",
+            .complaint_order_info = &.{.{
+                .transaction_id = "4200",
+                .out_trade_no = "ch-1",
+                .amount = 100,
+                .wxa_out_trade_no = "wxa-1",
+                .wx_order_id = "wx-1",
+            }},
+            .incoming_user_response = true,
+            .user_complaint_times = 2,
+            .complaint_media_list = &.{.{
+                .media_type = "USER_COMPLAINT_IMAGE",
+                .media_url = &.{ "https://img/1.png", "https://img/2.png" },
+            }},
+            .problem_description = "申请退款",
+            .problem_type = "REFUND",
+            .apply_refund_amount = 100,
+            .user_tag_list = &.{"TRUSTED"},
+            .service_order_info = &.{.{
+                .order_id = "so-1",
+                .out_order_no = "so-out-1",
+                .state = "DONE",
+            }},
+        }},
+    }, parsed.value);
+}
+
+test "getComplaintList 旧字段名 complaint_list / page / page_size 已不再存在" {
+    // 这三个名字是上一轮普查发现的契约缺陷：`page`/`page_size` 官方不认，
+    // `complaint_list` 不是官方 key（ignore_unknown_fields 下会静默空列表）。
+    try std.testing.expect(!@hasField(GetComplaintListRequest, "page"));
+    try std.testing.expect(!@hasField(GetComplaintListRequest, "page_size"));
+    try std.testing.expect(@hasField(GetComplaintListRequest, "offset"));
+    try std.testing.expect(@hasField(GetComplaintListRequest, "limit"));
+    try std.testing.expect(!@hasField(GetComplaintListResponse, "complaint_list"));
+    try std.testing.expect(@hasField(GetComplaintListResponse, "complaints"));
+}
+
+test "getComplaintDetail 单签名：详情在 complaint 对象里（不再读顶层 state）" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"complaint\":{\"complaint_id\":\"c-1\",\"complaint_detail\":\"已处理\",\"complaint_state\":\"PROCESSED\",\"problem_type\":\"OTHERS\",\"user_complaint_times\":1}}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.getComplaintDetail(.{ .env = .sandbox, .complaint_id = "c-1" });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/get_complaint_detail",
+        "{\"env\":1,\"complaint_id\":\"c-1\"}",
+        null,
+    );
+    try std.testing.expectEqualDeep(GetComplaintDetailResponse{
+        .errmsg = "ok",
+        .complaint = .{
+            .complaint_id = "c-1",
+            .complaint_detail = "已处理",
+            .complaint_state = "PROCESSED",
+            .problem_type = "OTHERS",
+            .user_complaint_times = 1,
+        },
+    }, parsed.value);
+}
+
+test "getComplaintDetail 顶层 complaint_id/state 不再被当作详情" {
+    // 官方把详情放在 `complaint` 对象里；只有顶层同名字段时必须解析为 null，
+    // 否则调用方会拿到一个除 id/state 外全空、看起来"成功"的假详情。
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"complaint_id\":\"c-1\",\"state\":2}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.getComplaintDetail(.{ .complaint_id = "c-1" });
+    defer parsed.deinit();
+
+    try std.testing.expect(!@hasField(GetComplaintDetailResponse, "complaint_id"));
+    try std.testing.expect(!@hasField(GetComplaintDetailResponse, "state"));
+    try std.testing.expectEqual(@as(?ComplaintItem, null), parsed.value.complaint);
+}
+
+test "getNegotiationHistory 单签名：官方必填 offset/limit 与 history 全字段解析" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"total\":1,\"history\":[{\"log_id\":\"l-1\",\"operator\":\"商户\",\"operate_time\":\"2023-11-28T11:11:49+08:00\",\"operate_type\":\"MERCHANT_RESPONSE\",\"operate_details\":\"已回复\",\"complaint_media_list\":[{\"media_type\":\"OPERATION_IMAGE\",\"media_url\":[\"https://img/3.png\"]}]}]}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.getNegotiationHistory(.{
+        .env = .sandbox,
+        .complaint_id = "c-1",
+        .offset = 0,
+        .limit = 20,
+    });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/get_negotiation_history",
+        "{\"env\":1,\"complaint_id\":\"c-1\",\"offset\":0,\"limit\":20}",
+        null,
+    );
+    try std.testing.expectEqualDeep(GetNegotiationHistoryResponse{
+        .errmsg = "ok",
+        .total = 1,
+        .history = &.{.{
+            .log_id = "l-1",
+            .operator = "商户",
+            .operate_time = "2023-11-28T11:11:49+08:00",
+            .operate_type = "MERCHANT_RESPONSE",
+            .operate_details = "已回复",
+            .complaint_media_list = &.{.{
+                .media_type = "OPERATION_IMAGE",
+                .media_url = &.{"https://img/3.png"},
+            }},
+        }},
+    }, parsed.value);
+}
+
+test "responseComplaint 单签名：response_images 官方必填（为空写 []，非空写列表）" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(&arena, &cap, &ctx, &v, "{\"errcode\":0,\"errmsg\":\"ok\"}");
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    // 带图片（file_id 来自 upload_vp_file）。
+    var with_images = try v.responseComplaint(.{
+        .env = .sandbox,
+        .complaint_id = "c-1",
+        .response_content = "resolved by merchant",
+        .response_images = &.{ "fid-1", "fid-2" },
+    });
+    defer with_images.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/response_complaint",
+        "{\"env\":1,\"complaint_id\":\"c-1\",\"response_content\":\"resolved by merchant\",\"response_images\":[\"fid-1\",\"fid-2\"]}",
+        null,
+    );
+    try std.testing.expectEqualStrings("ok", with_images.value.errmsg);
+
+    // 只有文字：官方把 response_images 标为必填，故空数组也要写 `[]`（不能省略）。
+    var text_only = try v.responseComplaint(.{
+        .env = .sandbox,
+        .complaint_id = "c-1",
+        .response_content = "hi",
+    });
+    defer text_only.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        1,
+        "/xpay/response_complaint",
+        "{\"env\":1,\"complaint_id\":\"c-1\",\"response_content\":\"hi\",\"response_images\":[]}",
+        null,
+    );
+}
+
+test "completeComplaint 单签名：请求体与 URL" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(&arena, &cap, &ctx, &v, "{\"errcode\":0,\"errmsg\":\"ok\"}");
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.completeComplaint(.{ .env = .sandbox, .complaint_id = "c-1" });
+    defer parsed.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/complete_complaint",
+        "{\"env\":1,\"complaint_id\":\"c-1\"}",
+        null,
+    );
+    try std.testing.expectEqualStrings("ok", parsed.value.errmsg);
+}
+
+test "uploadVPFile 单签名：base64_img / img_url / file_name 进请求体与响应解析 file_id" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(&arena, &cap, &ctx, &v, "{\"errcode\":0,\"errmsg\":\"ok\",\"file_id\":\"fid-1\"}");
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    // 官方把 base64_img / img_url 都标为必填，但说明里二者按大小二选一
+    // （优先 img_url）；未提供的那个按既有 omitempty 风格省略。
+    var with_base64 = try v.uploadVPFile(.{
+        .env = .sandbox,
+        .base64_img = "aGVsbG8=",
+        .file_name = "a.png",
+    });
+    defer with_base64.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/upload_vp_file",
+        "{\"env\":1,\"base64_img\":\"aGVsbG8=\",\"file_name\":\"a.png\"}",
+        null,
+    );
+    try std.testing.expectEqualStrings("fid-1", with_base64.value.file_id);
+
+    var with_url = try v.uploadVPFile(.{
+        .env = .sandbox,
+        .img_url = "https://img.example/1.png",
+        .file_name = "b.png",
+    });
+    defer with_url.deinit();
+
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        1,
+        "/xpay/upload_vp_file",
+        "{\"env\":1,\"img_url\":\"https://img.example/1.png\",\"file_name\":\"b.png\"}",
+        null,
+    );
+}
+
+test "getUploadFileSign 单签名：wxpay_url/convert_cos/complaint_id 与响应解析 sign+cos_url" {
+    var arena: std.heap.ArenaAllocator = undefined;
+    var cap: TestCapture = undefined;
+    var ctx: Context = undefined;
+    var v: VirtualPayment = undefined;
+    vpSetup(
+        &arena,
+        &cap,
+        &ctx,
+        &v,
+        "{\"errcode\":0,\"errmsg\":\"ok\",\"sign\":\"SIGN-X\",\"cos_url\":\"https://cos.example/s.png?k=1\"}",
+    );
+    defer arena.deinit();
+    defer releaseTestClient();
+
+    var parsed = try v.getUploadFileSign(.{
+        .env = .sandbox,
+        .wxpay_url = "https://api.mch.weixin.qq.com/v3/merchant-service/images/1234",
+        .convert_cos = true,
+        .complaint_id = "c-1",
+    });
+    defer parsed.deinit();
+
+    // `convert_cos` 是官方必填的布尔值，取 false 也照样写出（不做零值省略）。
+    try expectSignedCall(
+        arena.allocator(),
+        &cap,
+        0,
+        "/xpay/get_upload_file_sign",
+        "{\"env\":1,\"wxpay_url\":\"https://api.mch.weixin.qq.com/v3/merchant-service/images/1234\",\"convert_cos\":true,\"complaint_id\":\"c-1\"}",
+        null,
+    );
+    try std.testing.expectEqualStrings("SIGN-X", parsed.value.sign);
+    try std.testing.expectEqualStrings("https://cos.example/s.png?k=1", parsed.value.cos_url);
+
+    // 旧的 `file_id` 字段官方不存在，已删除。
+    try std.testing.expect(!@hasField(GetUploadFileSignRequest, "file_id"));
+    try std.testing.expect(@hasField(GetUploadFileSignRequest, "wxpay_url"));
+    try std.testing.expect(@hasField(GetUploadFileSignRequest, "convert_cos"));
+    try std.testing.expect(@hasField(GetUploadFileSignRequest, "complaint_id"));
+    try std.testing.expect(@hasField(GetUploadFileSignResponse, "cos_url"));
+}
+
+test "jsonStringify 必填分页字段 offset/limit 取 0 也写出" {
+    const allocator = std.testing.allocator;
+    // 全零请求：只有官方标注「必填」的 offset/limit 会出现在请求体里。
+    const body = try jsonStringify(allocator, GetComplaintListRequest{});
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("{\"offset\":0,\"limit\":0}", body);
+
+    // 同一份序列化结果既发给服务端也参与 pay_sig 计算，因此这是签名不变量的一部分。
+    const with_dates = try jsonStringify(allocator, GetNegotiationHistoryRequest{
+        .env = .sandbox,
+        .complaint_id = "c-1",
+    });
+    defer allocator.free(with_dates);
+    try std.testing.expectEqualStrings("{\"env\":1,\"complaint_id\":\"c-1\",\"offset\":0,\"limit\":0}", with_dates);
 }

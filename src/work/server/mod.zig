@@ -179,3 +179,74 @@ test "WorkServer.decryptMsg CorpId 不匹配返回 CorpIdMismatch" {
     const result = server.decryptMsg(allocator, encrypted_b64);
     try std.testing.expectError(error.CorpIdMismatch, result);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// msg_signature 校验（此前无调用测试）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "WorkServer.verifyMsgSignature 已知向量 true / 篡改任一要素 false" {
+    const allocator = std.testing.allocator;
+    const token = "zh_token";
+    const timestamp = "1700000000";
+    const nonce = "nonce-xyz";
+    const encrypt_msg = "ENCRYPTED_MSG_B64==";
+
+    var ctx = Context{
+        .config = .{ .corp_id = "ww-sig", .token = token },
+        .access_token_handle = .{ .ptr = undefined, .vtable = undefined },
+    };
+    const server = WorkServer.init(&ctx);
+
+    const params = [_][]const u8{ token, timestamp, nonce, encrypt_msg };
+    const good = try signature.signature(allocator, &params);
+    defer allocator.free(good);
+
+    // 独立计算的固定向量（Python hashlib.sha1("1700000000ENCRYPTED_MSG_B64==nonce-xyzzh_token")），
+    // 钉住「四要素字典序拼接后 SHA1 小写 hex」这一契约。
+    try std.testing.expectEqualStrings("320b9bf2bfb04309498cba0f72a725786e5868b8", good);
+
+    const query = WorkCallbackQuery{
+        .msg_signature = good,
+        .timestamp = timestamp,
+        .nonce = nonce,
+    };
+    try std.testing.expect(server.verifyMsgSignature(allocator, encrypt_msg, query));
+
+    // 参与签名的四要素任一被篡改（query 里仍带着合法签名）都必须为 false。
+    try std.testing.expect(!server.verifyMsgSignature(allocator, "TAMPERED_B64==", query));
+    try std.testing.expect(!server.verifyMsgSignature(allocator, encrypt_msg, .{
+        .msg_signature = good,
+        .timestamp = "1700000001",
+        .nonce = nonce,
+    }));
+    try std.testing.expect(!server.verifyMsgSignature(allocator, encrypt_msg, .{
+        .msg_signature = good,
+        .timestamp = timestamp,
+        .nonce = "other-nonce",
+    }));
+    try std.testing.expect(!server.verifyMsgSignature(allocator, encrypt_msg, .{
+        .msg_signature = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        .timestamp = timestamp,
+        .nonce = nonce,
+    }));
+
+    // token 不一致（别人的 corp 配置）同样必须为 false。
+    var other_ctx = Context{
+        .config = .{ .corp_id = "ww-sig", .token = "other_token" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = undefined },
+    };
+    try std.testing.expect(!(WorkServer.init(&other_ctx)).verifyMsgSignature(allocator, encrypt_msg, query));
+}
+
+test "WorkServer.verifyMsgSignature token 为空时直接 false（不计算签名）" {
+    var ctx = Context{
+        .config = .{ .corp_id = "ww-sig-empty" }, // token 为空
+        .access_token_handle = .{ .ptr = undefined, .vtable = undefined },
+    };
+    const server = WorkServer.init(&ctx);
+    try std.testing.expect(!server.verifyMsgSignature(std.testing.allocator, "ANY", .{
+        .msg_signature = "whatever",
+        .timestamp = "1700000000",
+        .nonce = "n",
+    }));
+}

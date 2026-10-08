@@ -53,11 +53,67 @@ pub const BatchDownloadFileRes = struct {
     file_list: []const DownloadedFile = &.{},
 };
 
+/// `batchDownloadFile` 返回的文件项。
+///
+/// ⚠ **微信返回的 key 是 `fileid`，不是 `file_id`**（官方文档
+/// batchDownloadFile「file_list 的结构」三处表格一致，返回数据示例亦为
+/// `{"fileid":"cloud://...","download_url":"...","status":0,"errmsg":"ok"}`）。
+/// Go 参考实现把 tag 写成 `file_id`（`_ref/wechat/miniprogram/tcb/file.go`），
+/// 而 `encoding/json` 只做大小写不敏感匹配、**不做下划线归一**，所以 Go 侧该字段
+/// 同样是空——照抄过来在 Zig 下还会更糟：本站点此前未开 `ignore_unknown_fields`，
+/// `fileid` 是"未知字段"，真实响应会直接 `error.UnknownField` → `DecodeError`，
+/// 整个 `batchDownloadFile` 调用必然失败。
+///
+/// 公开字段名保持 `file_id` 不变（下游契约不破），解析改由 `jsonParse` 钩子完成，
+/// `fileid`（真实 key）与 `file_id`（历史/自建夹具写法）两种都收。
 pub const DownloadedFile = struct {
     file_id: []const u8 = "",
     download_url: []const u8 = "",
     status: i64 = 0,
     errmsg: []const u8 = "",
+
+    /// 自定义 JSON 解析（`std.json` 在解析数组元素时自动调用，调用方无需直接调用）。
+    ///
+    /// 先把元素物化成 `std.json.Value` 树再逐键取值，因此 key 的写法由本函数决定
+    /// 而非由字段名决定。树与其中的字符串都落在调用方传入的 allocator 上——本模块
+    /// 的调用路径是 `parseParsed` 的 `Parsed` arena，随 `parsed.deinit()` 一起释放。
+    pub fn jsonParse(
+        allocator: std.mem.Allocator,
+        source: anytype,
+        options: std.json.ParseOptions,
+    ) !DownloadedFile {
+        const value = try std.json.Value.jsonParse(allocator, source, options);
+        if (value != .object) return error.UnexpectedToken;
+        var file: DownloadedFile = .{};
+        var it = value.object.iterator();
+        while (it.next()) |kv| {
+            const key = kv.key_ptr.*;
+            const raw = kv.value_ptr.*;
+            if (std.mem.eql(u8, key, "fileid") or std.mem.eql(u8, key, "file_id")) {
+                file.file_id = switch (raw) {
+                    .string => |s| s,
+                    else => "",
+                };
+            } else if (std.mem.eql(u8, key, "download_url")) {
+                file.download_url = switch (raw) {
+                    .string => |s| s,
+                    else => "",
+                };
+            } else if (std.mem.eql(u8, key, "status")) {
+                file.status = switch (raw) {
+                    .integer => |n| n,
+                    .float => |f| std.math.lossyCast(i64, f),
+                    else => 0,
+                };
+            } else if (std.mem.eql(u8, key, "errmsg")) {
+                file.errmsg = switch (raw) {
+                    .string => |s| s,
+                    else => "",
+                };
+            }
+        }
+        return file;
+    }
 };
 
 pub const BatchDeleteFileRes = struct {
@@ -139,10 +195,52 @@ pub const DatabaseCollectionGetRes = struct {
     collections: []const CollectionInfo = &.{},
 };
 
+/// 分页信息（`databaseQuery` 与 `databaseCollectionGet` 共用）。
+///
+/// ⚠ **微信返回的 key 是 PascalCase：`Offset` / `Limit` / `Total`**——官方文档
+/// databaseQuery 与 databaseCollectionGet 两处「pager 的结构」都是大写开头，
+/// databaseCollectionGet 的返回数据示例亦为
+/// `"pager": {"Offset": 0, "Limit": 10, "Total": 2}`。
+/// Go 参考实现写小写 tag 却能工作，是因为 `encoding/json` 匹配字段名时**大小写不敏感**；
+/// `std.json` 是逐字匹配，照抄 Go 会让三个字段永远是 0，而本站点此前未开
+/// `ignore_unknown_fields` 时更会直接 `error.UnknownField` → `DecodeError`。
+///
+/// 公开字段名保持 snake_case 不变（下游契约不破），解析改由 `jsonParse` 钩子做
+/// 大小写不敏感取值，`Offset` 与 `offset` 两种写法都收。
 pub const Pager = struct {
     limit: i64 = 0,
     offset: i64 = 0,
     total: i64 = 0,
+
+    /// 自定义 JSON 解析（`std.json` 自动调用，调用方无需直接调用）。
+    pub fn jsonParse(
+        allocator: std.mem.Allocator,
+        source: anytype,
+        options: std.json.ParseOptions,
+    ) !Pager {
+        const value = try std.json.Value.jsonParse(allocator, source, options);
+        if (value != .object) return error.UnexpectedToken;
+        var pager: Pager = .{};
+        var it = value.object.iterator();
+        while (it.next()) |kv| {
+            const dst: ?*i64 = if (std.ascii.eqlIgnoreCase(kv.key_ptr.*, "limit"))
+                &pager.limit
+            else if (std.ascii.eqlIgnoreCase(kv.key_ptr.*, "offset"))
+                &pager.offset
+            else if (std.ascii.eqlIgnoreCase(kv.key_ptr.*, "total"))
+                &pager.total
+            else
+                null;
+            const target = dst orelse continue;
+            target.* = switch (kv.value_ptr.*) {
+                .integer => |n| n,
+                .float => |f| std.math.lossyCast(i64, f),
+                .number_string => |s| std.fmt.parseInt(i64, s, 10) catch 0,
+                else => 0,
+            };
+        }
+        return pager;
+    }
 };
 
 pub const CollectionInfo = struct {
@@ -384,7 +482,15 @@ pub const Tcb = struct {
 };
 
 fn parseParsed(comptime T: type, allocator: std.mem.Allocator, resp: []const u8) !std.json.Parsed(T) {
-    var parsed = std.json.parseFromSlice(T, allocator, resp, .{ .allocate = .alloc_always }) catch {
+    // 与全仓纪律一致（见 AGENTS.md「微信 JSON 契约对齐」）：解析微信 HTTP 响应的
+    // 站点一律开 `ignore_unknown_fields` —— 否则上游一旦新增字段，整个调用会
+    // `error.UnknownField` → `DecodeError`（本模块曾因此让 `batchDownloadFile`
+    // 100% 失败，见 `DownloadedFile` 的说明）。字段名仍由各类型的 `jsonParse` 钩子
+    // 或字段名逐字决定，开这个开关只影响「多出来的键」。
+    var parsed = std.json.parseFromSlice(T, allocator, resp, .{
+        .allocate = .alloc_always,
+        .ignore_unknown_fields = true,
+    }) catch {
         return util_error.WechatError.DecodeError;
     };
     errdefer parsed.deinit();
@@ -618,6 +724,10 @@ const TestCapture = struct {
     response: []const u8,
     uri: []u8 = &.{},
     payload: []u8 = &.{},
+    /// 最近一次请求的 HTTP 方法与 Content-Type（供断言用；既有用例不读这两项，
+    /// 行为不变）。
+    method: ?std.http.Method = null,
+    content_type: ?[]const u8 = null,
 
     fn dispatch(
         ctx: *anyopaque,
@@ -627,9 +737,9 @@ const TestCapture = struct {
         payload: []const u8,
         content_type: ?[]const u8,
     ) anyerror![]u8 {
-        _ = method;
-        _ = content_type;
         const self: *TestCapture = @ptrCast(@alignCast(ctx));
+        self.method = method;
+        self.content_type = content_type;
         self.uri = try allocator.dupe(u8, uri);
         self.payload = try allocator.dupe(u8, payload);
         return allocator.dupe(u8, self.response);
@@ -821,4 +931,471 @@ test "databaseQuery token 失效自愈：作废缓存后用新 token 重试成�
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
     try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
     try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 公开 API 零调用测试补齐：文件批量接口 + 数据库迁移/索引/集合/增删改查统计。
+//
+// 这批用例的价值在于**真实调用**每个公开方法（懒分析下未被调用过的函数体不参与
+// 编译，任何 URL / 字段名 / 泛型参数位错误都要等到首次调用才炸），并且断言的是
+// **method + 完整 URL + 请求体关键字段 + 响应解析出的字段值**——只断言"没报错"
+// 的伪测试既发现不了编译错误，也发现不了 key 漂移（见本文件 `Pager` /
+// `DownloadedFile` 的 jsonParse 注释）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 测试用 Context + Tcb（固定注入 `stub-ak` token 的假 handle）。
+fn testTcb(alloc: std.mem.Allocator, ctx: *Context) Tcb {
+    ctx.* = .{
+        .config = .{ .app_id = "wx-tcb" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &test_token_vtable },
+    };
+    return Tcb.init(ctx, alloc);
+}
+
+/// 把 capture 到的请求体解析成 JSON 值树（`alloc` 须是测试 arena）。
+fn capturedBody(alloc: std.mem.Allocator, payload: []const u8) !std.json.Value {
+    return std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{});
+}
+
+fn fieldStr(body: std.json.Value, key: []const u8) []const u8 {
+    return body.object.get(key).?.string;
+}
+
+fn fieldInt(body: std.json.Value, key: []const u8) i64 {
+    return body.object.get(key).?.integer;
+}
+
+test "batchDownloadFile：POST tcb/batchdownloadfile，file_list 逐字段序列化，响应 fileid 落到 file_id" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // 真实响应形状（官方文档 batchdownloadfile「file_list 的结构」+ 返回数据示例）：
+    // 元素里的文件 ID key 是 **`fileid`**，与请求侧同名，而不是 `file_id`。
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"file_list\":[{\"fileid\":\"cloud://env/A.png\",\"download_url\":\"https://cdn.example/A.png\",\"status\":0,\"errmsg\":\"ok\"},{\"fileid\":\"cloud://env/B.png\",\"download_url\":\"\",\"status\":-1,\"errmsg\":\"not found\"}]}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = undefined;
+    var t = testTcb(alloc, &ctx);
+
+    var parsed = try t.batchDownloadFile("env-1", &.{
+        .{ .fileid = "cloud://env/A.png", .max_age = 7200 },
+        .{ .fileid = "cloud://env/B.png", .max_age = 0 },
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method.?);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/tcb/batchdownloadfile?access_token=stub-ak",
+        cap.uri,
+    );
+
+    const body = try capturedBody(alloc, cap.payload);
+    try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
+    const file_list = body.object.get("file_list").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), file_list.len);
+    try std.testing.expectEqualStrings("cloud://env/A.png", fieldStr(file_list[0], "fileid"));
+    try std.testing.expectEqual(@as(i64, 7200), fieldInt(file_list[0], "max_age"));
+    try std.testing.expectEqual(@as(i64, 0), fieldInt(file_list[1], "max_age"));
+
+    // 缺陷回归：旧结构体把 key 写成 `file_id`，真实响应下 `fileid` 是未知字段 →
+    // 整个调用 error.DecodeError；即便开了宽容模式也会静默取到空串。
+    try std.testing.expectEqualStrings("cloud://env/A.png", parsed.value.file_list[0].file_id);
+    try std.testing.expectEqualStrings("https://cdn.example/A.png", parsed.value.file_list[0].download_url);
+    try std.testing.expectEqual(@as(i64, 0), parsed.value.file_list[0].status);
+    try std.testing.expectEqualStrings("not found", parsed.value.file_list[1].errmsg);
+    try std.testing.expectEqual(@as(i64, -1), parsed.value.file_list[1].status);
+}
+
+test "batchDownloadFile：历史写法 file_id 仍可解析（不破坏既有自建夹具）" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"file_list\":[{\"file_id\":\"cloud://env/legacy.png\",\"download_url\":\"u\",\"status\":1,\"errmsg\":\"\"}]}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = undefined;
+    var t = testTcb(alloc, &ctx);
+
+    var parsed = try t.batchDownloadFile("env-1", &.{.{ .fileid = "x", .max_age = 1 }});
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("cloud://env/legacy.png", parsed.value.file_list[0].file_id);
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.file_list[0].status);
+}
+
+test "batchDeleteFile：POST tcb/batchdeletefile，fileid_list 为字符串数组" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"delete_list\":[{\"fileid\":\"cloud://env/A.png\",\"status\":0,\"errmsg\":\"ok\"}]}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = undefined;
+    var t = testTcb(alloc, &ctx);
+
+    var parsed = try t.batchDeleteFile("env-1", &.{ "cloud://env/A.png", "cloud://env/B.png" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method.?);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/tcb/batchdeletefile?access_token=stub-ak",
+        cap.uri,
+    );
+
+    const body = try capturedBody(alloc, cap.payload);
+    try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
+    const ids = body.object.get("fileid_list").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), ids.len);
+    try std.testing.expectEqualStrings("cloud://env/A.png", ids[0].string);
+    try std.testing.expectEqualStrings("cloud://env/B.png", ids[1].string);
+
+    try std.testing.expectEqualStrings("cloud://env/A.png", parsed.value.delete_list[0].fileid);
+    try std.testing.expectEqual(@as(i64, 0), parsed.value.delete_list[0].status);
+}
+
+test "databaseMigrateImport：POST tcb/databasemigrateimport，枚举序列化为数字" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"job_id\":88}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = undefined;
+    var t = testTcb(alloc, &ctx);
+
+    var parsed = try t.databaseMigrateImport(.{
+        .env = "env-1",
+        .collection_name = "col-1",
+        .file_path = "cloud://env/dump.json",
+        .file_type = .csv,
+        .stop_on_error = true,
+        .conflict_mode = .upsert,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method.?);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/tcb/databasemigrateimport?access_token=stub-ak",
+        cap.uri,
+    );
+
+    const body = try capturedBody(alloc, cap.payload);
+    try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
+    try std.testing.expectEqualStrings("col-1", fieldStr(body, "collection_name"));
+    try std.testing.expectEqualStrings("cloud://env/dump.json", fieldStr(body, "file_path"));
+    // file_type / conflict_mode 是 **number**（1:json 2:csv / 1:insert 2:upsert），
+    // 不是字符串——官方文档「file_type 的合法值」写的是数字。
+    try std.testing.expectEqual(@as(i64, 2), fieldInt(body, "file_type"));
+    try std.testing.expectEqual(@as(i64, 2), fieldInt(body, "conflict_mode"));
+    try std.testing.expect(body.object.get("stop_on_error").?.bool);
+
+    try std.testing.expectEqual(@as(i64, 88), parsed.value.job_id);
+}
+
+test "databaseMigrateExport：POST tcb/databasemigrateexport，query 作为字符串字段转义" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"job_id\":7}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = undefined;
+    var t = testTcb(alloc, &ctx);
+
+    const query = "db.collection(\"c\").where({\"n\":{\"$gt\":1}})";
+    var parsed = try t.databaseMigrateExport(.{
+        .env = "env-1",
+        .file_path = "cloud://env/dump",
+        .file_type = .json,
+        .query = query,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method.?);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/tcb/databasemigrateexport?access_token=stub-ak",
+        cap.uri,
+    );
+
+    const body = try capturedBody(alloc, cap.payload);
+    try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
+    try std.testing.expectEqualStrings("cloud://env/dump", fieldStr(body, "file_path"));
+    try std.testing.expectEqual(@as(i64, 1), fieldInt(body, "file_type"));
+    // query 是一段 JSON 文本，必须整体作为字符串字段（含双引号也能完整还原）。
+    try std.testing.expectEqualStrings(query, fieldStr(body, "query"));
+
+    try std.testing.expectEqual(@as(i64, 7), parsed.value.job_id);
+}
+
+test "updateIndex：POST tcb/updateindex，create/drop 索引嵌套结构完整" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = undefined;
+    var t = testTcb(alloc, &ctx);
+
+    try t.updateIndex(.{
+        .env = "env-1",
+        .collection_name = "col-1",
+        .create_indexes = &.{.{
+            .name = "idx_age",
+            .unique = true,
+            .keys = &.{.{ .name = "age", .direction = "-1" }},
+        }},
+        .drop_indexes = &.{.{ .name = "idx_old" }},
+    });
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method.?);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/tcb/updateindex?access_token=stub-ak",
+        cap.uri,
+    );
+
+    const body = try capturedBody(alloc, cap.payload);
+    try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
+    try std.testing.expectEqualStrings("col-1", fieldStr(body, "collection_name"));
+
+    const create = body.object.get("create_indexes").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), create.len);
+    try std.testing.expectEqualStrings("idx_age", fieldStr(create[0], "name"));
+    try std.testing.expect(create[0].object.get("unique").?.bool);
+    const keys = create[0].object.get("keys").?.array.items;
+    try std.testing.expectEqualStrings("age", fieldStr(keys[0], "name"));
+    // direction 的合法值是**字符串** "1" / "-1" / "2dsphere"。
+    try std.testing.expectEqualStrings("-1", fieldStr(keys[0], "direction"));
+
+    const drop = body.object.get("drop_indexes").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), drop.len);
+    try std.testing.expectEqualStrings("idx_old", fieldStr(drop[0], "name"));
+}
+
+test "databaseCollectionDelete：POST tcb/databasecollectiondelete" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = undefined;
+    var t = testTcb(alloc, &ctx);
+
+    try t.databaseCollectionDelete("env-1", "col-1");
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method.?);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/tcb/databasecollectiondelete?access_token=stub-ak",
+        cap.uri,
+    );
+
+    const body = try capturedBody(alloc, cap.payload);
+    try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
+    try std.testing.expectEqualStrings("col-1", fieldStr(body, "collection_name"));
+}
+
+test "databaseCollectionGet：POST tcb/databasecollectionget，pager 的 PascalCase key 能取到值" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // 真实响应形状：`pager` 的 key 是 **PascalCase**（官方文档 databaseCollectionGet
+    // 「pager 的结构」+ 返回数据示例 `{"Offset":0,"Limit":10,"Total":2}`）。
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"collections\":[{\"name\":\"geo\",\"count\":13,\"size\":2469,\"index_count\":1,\"index_size\":36864}],\"pager\":{\"Offset\":0,\"Limit\":10,\"Total\":2}}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = undefined;
+    var t = testTcb(alloc, &ctx);
+
+    var parsed = try t.databaseCollectionGet("env-1", 10, 0);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method.?);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/tcb/databasecollectionget?access_token=stub-ak",
+        cap.uri,
+    );
+
+    const body = try capturedBody(alloc, cap.payload);
+    try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
+    try std.testing.expectEqual(@as(i64, 10), fieldInt(body, "limit"));
+    try std.testing.expectEqual(@as(i64, 0), fieldInt(body, "offset"));
+
+    // 缺陷回归：旧结构体字段名是小写，真实响应下 `Offset`/`Limit`/`Total` 三个 key
+    // 都是"未知字段" → error.UnknownField → DecodeError；宽容模式下则静默全 0。
+    try std.testing.expectEqual(@as(i64, 10), parsed.value.pager.limit);
+    try std.testing.expectEqual(@as(i64, 0), parsed.value.pager.offset);
+    try std.testing.expectEqual(@as(i64, 2), parsed.value.pager.total);
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.collections.len);
+    try std.testing.expectEqualStrings("geo", parsed.value.collections[0].name);
+    try std.testing.expectEqual(@as(i64, 13), parsed.value.collections[0].count);
+    try std.testing.expectEqual(@as(i64, 2469), parsed.value.collections[0].size);
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.collections[0].index_count);
+    try std.testing.expectEqual(@as(i64, 36864), parsed.value.collections[0].index_size);
+}
+
+test "databaseAdd：POST tcb/databaseadd，query 作为字符串字段且 id_list 可解析" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"id_list\":[\"id-1\",\"id-2\"]}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = undefined;
+    var t = testTcb(alloc, &ctx);
+
+    const query = "db.collection(\"c\").add({data:[{\"a\":1}]})";
+    var parsed = try t.databaseAdd("env-1", query);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method.?);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/tcb/databaseadd?access_token=stub-ak",
+        cap.uri,
+    );
+
+    const body = try capturedBody(alloc, cap.payload);
+    try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
+    try std.testing.expectEqualStrings(query, fieldStr(body, "query"));
+
+    try std.testing.expectEqual(@as(usize, 2), parsed.value.id_list.len);
+    try std.testing.expectEqualStrings("id-1", parsed.value.id_list[0]);
+    try std.testing.expectEqualStrings("id-2", parsed.value.id_list[1]);
+}
+
+test "databaseDelete：POST tcb/databasedelete，deleted 可解析" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"deleted\":3}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = undefined;
+    var t = testTcb(alloc, &ctx);
+
+    var parsed = try t.databaseDelete("env-1", "db.collection(\"c\").where({\"a\":1}).remove()");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method.?);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/tcb/databasedelete?access_token=stub-ak",
+        cap.uri,
+    );
+
+    const body = try capturedBody(alloc, cap.payload);
+    try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
+    try std.testing.expectEqual(@as(i64, 3), parsed.value.deleted);
+}
+
+test "databaseUpdate：POST tcb/databaseupdate，matched/modified/id 可解析" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"matched\":1,\"modified\":1,\"id\":\"doc-1\"}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = undefined;
+    var t = testTcb(alloc, &ctx);
+
+    var parsed = try t.databaseUpdate("env-1", "db.collection(\"c\").doc(\"doc-1\").update({data:{a:2}})");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method.?);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/tcb/databaseupdate?access_token=stub-ak",
+        cap.uri,
+    );
+
+    const body = try capturedBody(alloc, cap.payload);
+    try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
+
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.matched);
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.modified);
+    try std.testing.expectEqualStrings("doc-1", parsed.value.id);
+}
+
+test "databaseCount：POST tcb/databasecount，count 可解析" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"count\":42}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = undefined;
+    var t = testTcb(alloc, &ctx);
+
+    var parsed = try t.databaseCount("env-1", "db.collection(\"c\").where({\"a\":1}).count()");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method.?);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/tcb/databasecount?access_token=stub-ak",
+        cap.uri,
+    );
+
+    const body = try capturedBody(alloc, cap.payload);
+    try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
+
+    try std.testing.expectEqual(@as(i64, 42), parsed.value.count);
 }

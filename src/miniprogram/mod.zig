@@ -216,3 +216,77 @@ test "MiniProgram 暴露 qrcode / urlscheme 工厂" {
     try std.testing.expect(@hasDecl(MiniProgram, "getQRCode"));
     try std.testing.expect(@hasDecl(MiniProgram, "getURLScheme"));
 }
+
+// 真实调用每个子模块工厂（懒分析：未被调用的函数体不会编译）。
+// 断言各工厂返回的实例持有同一个 `*Context`，且（有 allocator 字段的）透传同一 allocator。
+test "MiniProgram 全部子模块工厂真实调用并共享同一 ctx 与 allocator" {
+    const allocator = std.testing.allocator;
+    var mp = MiniProgram.init(allocator, .{ .app_id = "wx-factory" }, .{ .ptr = undefined, .vtable = undefined });
+    const ctx: *Context = &mp.ctx;
+
+    try std.testing.expectEqual(ctx, mp.getAuth().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getAuth().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getQRCode().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getQRCode().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getURLScheme().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getURLScheme().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getMessage().ctx);
+
+    try std.testing.expectEqual(ctx, mp.getSecurity().ctx);
+
+    try std.testing.expectEqual(ctx, mp.getShortLink().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getShortLink().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getEncryptor().ctx);
+
+    try std.testing.expectEqual(ctx, mp.getWeRun().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getWeRun().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getURLLink().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getURLLink().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getRiskControl().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getRiskControl().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getRedPacketCover().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getRedPacketCover().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getPrivacy().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getPrivacy().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getContent().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getContent().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getBusiness().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getBusiness().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getOrder().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getOrder().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getOCR().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getOCR().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getSubscribe().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getSubscribe().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getAnalysis().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getAnalysis().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getOperation().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getOperation().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getTcb().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getTcb().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getExpress().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getExpress().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getMiniDrama().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getMiniDrama().allocator.vtable);
+
+    try std.testing.expectEqual(ctx, mp.getVirtualPayment().ctx);
+    try std.testing.expectEqual(allocator.vtable, mp.getVirtualPayment().allocator.vtable);
+}

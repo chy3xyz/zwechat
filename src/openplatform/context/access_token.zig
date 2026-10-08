@@ -14,6 +14,7 @@ const cache_mod = @import("../../cache/mod.zig");
 const credential = @import("../../credential/mod.zig");
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
+const util_json = @import("../../util/json.zig");
 
 pub const Error = error{
     VerifyTicketRequired,
@@ -127,10 +128,11 @@ fn getComponentAccessTokenLocked(
         return allocator.dupe(u8, cached);
     }
 
-    const client_body = try allocator.print(
-        "{{\"component_appid\":\"{s}\",\"component_appsecret\":\"{s}\",\"component_verify_ticket\":\"{s}\"}}",
-        .{ ctx.config.app_id, ctx.config.app_secret, verify_ticket },
-    );
+    const client_body = try util_json.stringFieldsObject(allocator, &.{
+        .{ .name = "component_appid", .value = ctx.config.app_id },
+        .{ .name = "component_appsecret", .value = ctx.config.app_secret },
+        .{ .name = "component_verify_ticket", .value = verify_ticket },
+    });
     defer allocator.free(client_body);
 
     const resp = try postJSON(ctx, allocator, componentAccessTokenURL, client_body);
@@ -154,6 +156,79 @@ test "component token helper 需要 verify_ticket" {
     var ctx: Context = .{ .config = .{ .app_id = "wx-op" } };
     const result = getComponentAccessToken(&ctx, std.testing.allocator, "");
     try std.testing.expectError(error.VerifyTicketRequired, result);
+}
+
+/// 记录请求体的测试 transport：`util_http.MockTransport` 只记录 URI、不记录
+/// payload，无法断言**实际发出**的请求体，故用这个最简记录器（模式同
+/// `openplatform/miniprogram/component.zig` 的 `RecordingTransport`）。
+const RecordingTransport = struct {
+    allocator: std.mem.Allocator,
+    response: []const u8,
+    payloads: std.ArrayList([]u8) = .empty,
+
+    fn deinit(self: *RecordingTransport) void {
+        for (self.payloads.items) |p| self.allocator.free(p);
+        self.payloads.deinit(self.allocator);
+    }
+
+    fn dispatch(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        method: std.http.Method,
+        payload: []const u8,
+        content_type: ?[]const u8,
+    ) anyerror![]u8 {
+        _ = uri;
+        _ = method;
+        _ = content_type;
+        const self: *RecordingTransport = @ptrCast(@alignCast(ctx));
+        try self.payloads.append(self.allocator, try self.allocator.dupe(u8, payload));
+        return allocator.dupe(u8, self.response);
+    }
+};
+
+test "getComponentAccessToken：verify_ticket 含引号/换行时请求体仍是合法 JSON 且值原样回传" {
+    const allocator = std.testing.allocator;
+
+    const memory = try @import("../../cache/memory.zig").Memory.create(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+
+    var rec = RecordingTransport{
+        .allocator = allocator,
+        .response = "{\"component_access_token\":\"comp-tok\",\"expires_in\":7200}",
+    };
+    defer rec.deinit();
+
+    // app_secret 与 verify_ticket 都来自调用方，故意含 `"` / 换行 / 控制字符：
+    // 裸 allocPrint 插值会拼出非法 JSON，stringFieldsObject 必须把它们转义。
+    const ticket = "ticket\"with\nnewline\x01";
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-op", .app_secret = "sec\"ret", .cache = memory.asCache() },
+        .transport = RecordingTransport.dispatch,
+        .transport_ctx = @ptrCast(&rec),
+    };
+
+    const token = try getComponentAccessToken(&ctx, allocator, ticket);
+    defer allocator.free(token);
+    try std.testing.expectEqualStrings("comp-tok", token);
+
+    try std.testing.expectEqual(@as(usize, 1), rec.payloads.items.len);
+    const body = rec.payloads.items[0];
+
+    // 核心断言：**实际发出**的请求体是合法 JSON，且三个值都能原样解回。
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const obj = switch (parsed.value) {
+        .object => |o| o,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("wx-op", obj.get("component_appid").?.string);
+    try std.testing.expectEqualStrings("sec\"ret", obj.get("component_appsecret").?.string);
+    try std.testing.expectEqualStrings(ticket, obj.get("component_verify_ticket").?.string);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -302,10 +377,11 @@ fn refreshAuthrAccessTokenLocked(
     const uri = try allocator.print(refreshAuthrTokenURL, .{component_token});
     defer allocator.free(uri);
 
-    const body_json = try allocator.print(
-        "{{\"component_appid\":\"{s}\",\"authorizer_appid\":\"{s}\",\"authorizer_refresh_token\":\"{s}\"}}",
-        .{ ctx.config.app_id, authorizer_appid, authorizer_refresh_token },
-    );
+    const body_json = try util_json.stringFieldsObject(allocator, &.{
+        .{ .name = "component_appid", .value = ctx.config.app_id },
+        .{ .name = "authorizer_appid", .value = authorizer_appid },
+        .{ .name = "authorizer_refresh_token", .value = authorizer_refresh_token },
+    });
     defer allocator.free(body_json);
 
     const resp = try postJSON(ctx, allocator, uri, body_json);
@@ -500,4 +576,63 @@ test "getAuthrAccessToken 未命中经 refresh 正常获取（refresh 借用切�
     // 轮换后的 refresh_token 已回存。
     const cached_rt = (try memory.asCache().get(rkey)).?;
     try std.testing.expectEqualStrings("rotated_rt", cached_rt);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// getCachedComponentAccessToken（仅读缓存，绝不发起网络请求）
+// ──────────────────────────────────────────────────────────────────────────────
+
+test "getCachedComponentAccessToken 无 cache 返回 CacheUnavailable" {
+    var ctx: Context = .{ .config = .{ .app_id = "wx-op" } };
+    try std.testing.expectError(
+        error.CacheUnavailable,
+        getCachedComponentAccessToken(&ctx, std.testing.allocator),
+    );
+}
+
+test "getCachedComponentAccessToken 命中 / 未命中 / 空值三条路径，且不触网" {
+    const allocator = std.testing.allocator;
+
+    const memory = try @import("../../cache/memory.zig").Memory.create(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+
+    // 注入一个**没有任何路由**的 mock：一旦本函数发起 HTTP 就会失败，
+    // 因此「调用成功」即证明它只读缓存。
+    var mock = util_http.MockTransport.init(allocator);
+    defer mock.deinit();
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-op-cached", .cache = memory.asCache() },
+        .transport = util_http.MockTransport.dispatch,
+        .transport_ctx = @ptrCast(&mock),
+    };
+
+    const key = try allocator.print("openplatform_component_access_token_{s}", .{"wx-op-cached"});
+    defer allocator.free(key);
+
+    // 1) 缓存未命中 → VerifyTicketRequired（Go 端语义：调用方应先回源换取）
+    try std.testing.expectError(
+        error.VerifyTicketRequired,
+        getCachedComponentAccessToken(&ctx, allocator),
+    );
+
+    // 2) 命中但值为空 → 等同未命中
+    try memory.asCache().set(key, "", 7000);
+    try std.testing.expectError(
+        error.VerifyTicketRequired,
+        getCachedComponentAccessToken(&ctx, allocator),
+    );
+
+    // 3) 命中非空 → 返回独立副本（free 之后缓存条目仍可读）
+    try memory.asCache().set(key, "comp-tok", 7000);
+    const got = try getCachedComponentAccessToken(&ctx, allocator);
+    try std.testing.expectEqualStrings("comp-tok", got);
+    allocator.free(got);
+    try std.testing.expectEqualStrings("comp-tok", (try memory.asCache().get(key)).?);
+
+    // 全程零 HTTP。
+    try std.testing.expectEqual(@as(usize, 0), mock.history.items.len);
 }

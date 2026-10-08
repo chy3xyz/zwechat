@@ -379,37 +379,77 @@ SDK 不把它折叠成 `error.ApiError`，而是原样放进返回结构体。
 
 ---
 
-## 8. `miniprogram/virtualpayment.requestAddress` 未接入 token 自愈重试
+## 8. ~~`miniprogram/virtualpayment.requestAddress` 未接入 token 自愈重试~~（**已解决**）
 
-**决策（现状，而非有意设计）**
-`virtualpayment` 的所有请求都经过 `requestAddress`
-（`src/miniprogram/virtualpayment/mod.zig:745`）取 access_token 并拼 URL，
-**没有**走 `util_retry.callApi`（`src/util/retry.zig:66`，
-全仓统一的"token 失效 → 作废缓存 → 重取 → 只重试一次"链路）。
-该文件中不存在 `util_retry` 的引用。
+**决策（现状）**
+**已改造完成**：`virtualpayment` 的所有业务接口现统一经 `callSigned`
+（`src/miniprogram/virtualpayment/mod.zig`；`callUser` / `callPay` 是它的两个薄封装）调用
+`util_retry.callApi`（`src/util/retry.zig`），即全仓统一的
+"token 失效 → 作废缓存 → 重取 → 只重试一次"链路。`requestAddress` 退化为
+**URI 组装 + transport 注入**的辅助函数，由 `callApi` 的 `sender`（`SignedReq.send`）调用，
+不再自己取 token。
 
-**影响**
-- access_token 中途失效（微信侧提前作废，如被其他实例刷新）时，
-  该模块的调用会直接失败（`errcode` 非 0），**不会自动重取重试**；
-  而同一仓库里走 `util_retry` 的模块会自动恢复。
-- 表现为"偶发失败、重试一次就好"的抖动，容易被误判为网络问题。
+**关键设计点（重试安全性）**
+- 请求体只序列化**一次**，`pay_sig` / `signature` 都基于同一份字节；
+- `pay_sig` 是对 `path + "&" + content` 的 HMAC-SHA256，**与 access_token 无关**，
+  所以重试只把 `?access_token=` 换成新值，签名逐字不变（安全）；
+- 因此接入重试不会产生"签名与新 token 不匹配"的问题。
 
-**缓解**
-1. 上层对 `virtualpayment` 调用做一次业务级重试（失败即重试一次），
-   等价于手工补上缺失的自愈。
-2. 调用前用 `MiniProgram`/`Context` 的入口主动确认 token 新鲜度；
-   跨实例共享缓存时优先用 Redis/Memcache 后端，减少"别的实例刷新了但我不知道"。
-3. 请求失败时用 `util_error.lastErrorDetail()`（`src/util/error.zig:189`）
-   确认是不是 token 类错误码（判定函数 `isTokenInvalidErrCode`，`:233`）。
+**影响（改造前）**
+access_token 中途失效（微信侧提前作废，如被其他实例刷新）时，该模块的调用会直接失败
+（`errcode` 非 0），**不会自动重取重试**；表现为"偶发失败、重试一次就好"的抖动。
+改造后与其它模块行为一致。
 
-**触发再评估的条件**
-`virtualpayment` 出现 token 失效导致的线上失败；
-或该模块被改造为经 `util_retry.callApi`（届时需注意 `pay_sig` 是对
-`path + "&" + content` 的 HMAC-SHA256，**与 token 无关**，重试安全）。
+**回归覆盖**
+`getComplaintList` / `getNegotiationHistory` / `responseComplaint` / `currencyPay`（双签名）等
+用例均断言「完整 URI（含 `pay_sig` / `signature` 的位置与值）+ 请求体逐字」；自愈链路另有
+`queryOrder token 失效自愈：40001 → 作废缓存 → 换新 token 只重试一次` 与
+`queryUserBalance 非 token 错误（45009）不重试也不作废` 两条对照用例。
 
 ---
 
-## 9. 手写 JSON / URL 编码点的收敛进度
+## 9. 手写 JSON / URL 编码点的收敛进度（**请求体内已收敛，本条可视为关闭**）
+
+> **最新复核（2026-10，以当前 checkout 实测）** —— 下文"现状"小节里带 ⚠️ 的计数与清单
+> **均已过时**，保留作历史记录；**权威判据是下面这三条命令**：
+>
+> ```bash
+> # 1) 还有没有内联的旧转义实现（漏控制字符那版）——期望：无输出
+> grep -rn "^fn appendJsonString\|^    fn appendJsonString" src/
+> # 2) 还有没有「调用方值被裸插进 JSON 字符串」的请求体——期望：无输出（说明见下）
+> grep -rn '{s}\\"' src/ --include=*.zig | grep -v test
+> # 3) 多字段对象是否已用新 helper
+> grep -rn "stringFieldsObject" src/
+> ```
+>
+> **复核结论**：
+> - (a) URL query 转义：唯一实现 `util_uri.queryEscape` ✅（无副本）；
+> - (b) JSON 字符串转义：唯一实现 `util_json.appendEscapedString` ✅，**11 份内联副本已全部迁移**
+>   （`util/template.zig` 也走了 `json.appendEscapedString`，只剩一个加引号的薄包装）；
+> - (c) 请求体里的裸插值：**已清零**。本轮新增多字段 helper
+>   `util_json.stringFieldsObject`（+ `pub const StringField`），并迁掉最后 7 处
+>   「调用方值被裸插进 `"..."`」的站点——`openplatform/context/access_token.zig`
+>   （component / authorizer token 两处三字段体）、`openplatform/account/mod.zig`
+>   （`createOpenAccount` / `getOpenAccount` 单字段 + `bind` / `unbind` 双字段，共 4 处）、
+>   `officialaccount/datacube/mod.zig` 与 `miniprogram/analysis/mod.zig` 的 `begin_date` / `end_date` 体。
+>   `util_json.stringFieldObject` 现有 **18 个业务调用方**（不再是"只有断言引用"），另有 6 处使用本轮新增的多字段 helper `stringFieldsObject`；
+> - (d) `miniprogram/ocr` 的 `formatQuery` 用法：✅ 已改为 `util_uri.queryEscape`，
+>   并留了回归测试 `img_url 含 & 与 ? 时按 Go url.QueryEscape 转义（回归：曾被 formatQuery 截断）`。
+>
+> **仍未转义、且"刻意如此"的点（不是漏洞，勿"顺手"转义）**：`urlscheme.generate` 的
+> `jump_wxa`、`draft.add` 的 `articles_json`、`subscribe` / `message` 的 `data` ——
+> 这些字段的契约就是**调用方自带的完整 JSON 对象字符串**，包一层转义会把对象变成字符串、
+> 直接破坏契约。判据：手写形态是 `"key":{s}`（无引号包裹），而非 `"key":"{s}"`。
+>
+> **仍可改进但不属本条的两点**（单独立项）：① `util/http.zig` 的 `MockTransport` 只记录
+> URI、不记 payload（`dispatch` 里 `_ = payload;`），导致断言"实际发出的 body"要在每个测试文件里
+> 自造 recording transport；② `pay v3` 的**路径段**（`out_trade_no` / `out_refund_no` / `out_bill_no`）
+> 未做 path 转义——但微信对这几个字段的字符集约束本身排除了 `/` `?` `#` 与空格，故 Go `url.PathEscape`
+> 在合法输入上是恒等变换，**当前无需处理**（详见 `docs/UPGRADING.md` 与 v3 调用点注释）。
+
+---
+
+**（以下为历史记录，计数已被上面的复核取代）**
 
 **决策**
 为对齐微信的真实契约（字段名逐字、编码逐字），部分请求体**手写**序列化，
@@ -533,7 +573,13 @@ SDK 不把它折叠成 `error.ApiError`，而是原样放进返回结构体。
 
 **影响**
 - ~~`README.md:10` 与 `README.md:49` 写"**357** 个内联测试"~~ →
-  **已在 v0.4.5 修正为 1004**；此后以实际 `zig build test` 输出与 CHANGELOG 为准。
+  **已在 v0.4.5 修正为 1004**；此后以实际 `zig build test` 输出与 CHANGELOG 为准（当前 **1326**，见 CHANGELOG `[Unreleased]`）。
+- **2026-10 一轮文档对齐（已修）**：`README.md` 的「业务域覆盖」表原先把 `miniprogram` 写成
+  "5 个子模块"（实际 25）、`work` 写成 13（实际 15）、并把只到骨架的 `minigame`/`aispeech`
+  与完成域同列 `✅`；`AGENTS.md` 表头写"87 文件 / 15711 行"（实际 134 / 76051）、
+  目录树里 `officialaccount` 15 个子模块全挂着 `TODO`、还列着并不存在的 `domain/openapi.zig`、
+  并引用不存在的 `getChatInfo`（msgaudit 只有 `getRoomInfo`/`getAgreeInfo`）。以上均已按源码更正，
+  业务域表的计数口径改为「实现文件数」并注明。`README.md:5` 的当前版本也从 v0.4.5 更新到 v0.6.0。
 - `docs/api-reference.md` 部分章节早于 v0.4.4：
   例如 §5.6 的 `officialaccount/material` 只列了 4 个方法
   （`addNews`/`deleteMaterial`/`getMaterialCount`/`batchGetMaterial`），

@@ -58,3 +58,24 @@ test "Data 默认值" {
     const d = Data{};
     try std.testing.expectEqual(@as(usize, 0), d.stepInfoList.len);
 }
+
+// 由 openssl 生成的 AES-128-CBC + PKCS#7 向量（key = iv = "1234567890123456"）。
+const test_session_key = "MTIzNDU2Nzg5MDEyMzQ1Ng==";
+const test_iv = "MTIzNDU2Nzg5MDEyMzQ1Ng==";
+const test_cipher = "YxlHvIiCifMxyRetQF2+QMYoLG487yT0IRmDJwLZIPqXUYr/aTvovR60LYroy9yhTsad/hUnzNVdvdcs47vRpw==";
+
+test "getWeRunData 解密已知向量并解析步数" {
+    const allocator = std.testing.allocator;
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-run" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = undefined },
+    };
+    var wr = WeRun.init(&ctx, allocator);
+
+    var parsed = try wr.getWeRunData(test_session_key, test_cipher, test_iv);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.stepInfoList.len);
+    try std.testing.expectEqual(@as(i64, 1234), parsed.value.stepInfoList[0].step);
+    try std.testing.expectEqual(@as(i64, 1610969446), parsed.value.stepInfoList[0].timestamp);
+}

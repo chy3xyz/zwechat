@@ -926,6 +926,30 @@ test "verifySignatureWithIo 纯函数入口（不触网）验签通过 / 篡改�
     );
 }
 
+test "verifySignature 默认 Io 入口：真实时钟窗口内通过 / 篡改拒绝 / 超窗拒绝" {
+    const allocator = std.testing.allocator;
+    const pub_pem = try platform_cert.publicKeyPemFromCertificate(allocator, platform_cert.test_platform_cert_pem);
+    defer allocator.free(pub_pem);
+
+    const body = "{\"id\":\"EV-1\"}";
+    // `verifySignature` 内部用默认 Io 取当前时间，故这里必须用真实时钟（不能用 FixedIo）。
+    const now = time.getCurrTSWithIo(default_io.io());
+    var ts_buf: [24]u8 = undefined;
+    const ts = try std.mem.print(&ts_buf, "{d}", .{now});
+    const headers = try signHeaders(allocator, test_serial, ts, "nonce-1", body);
+    defer allocator.free(@constCast(headers.signature));
+
+    try verifySignature(allocator, headers, body, pub_pem);
+    try std.testing.expectError(error.SignatureInvalid, verifySignature(allocator, headers, "{\"id\":\"EV-2\"}", pub_pem));
+
+    // 同一签名的头，仅把时间戳换到窗口外 → TimestampOutOfWindow（防重放）。
+    var old_buf: [24]u8 = undefined;
+    const stale_ts = try std.mem.print(&old_buf, "{d}", .{now - 4000});
+    const stale = try signHeaders(allocator, test_serial, stale_ts, "nonce-1", body);
+    defer allocator.free(@constCast(stale.signature));
+    try std.testing.expectError(error.TimestampOutOfWindow, verifySignature(allocator, stale, body, pub_pem));
+}
+
 test "decryptNotifyResource AES-256-GCM 加解密往返" {
     const allocator = std.testing.allocator;
     const api_v3_key = "12345678901234567890123456789012"; // 32 bytes
@@ -979,4 +1003,56 @@ test "NotifyError 错误集可穷举且默认窗口为 300 秒" {
     };
     try std.testing.expectEqualStrings("SignatureInvalid", label);
     try std.testing.expectEqual(@as(i64, 300), default_max_timestamp_skew_seconds);
+}
+
+test "NotifyVerifier.setTransport 注入普通 transport：拉取平台证书 + 验签解密全链路" {
+    const allocator = std.testing.allocator;
+
+    const cert_resp = try platform_cert.buildCertificatesResponse(allocator, test_api_v3_key, test_serial);
+    defer allocator.free(cert_resp);
+
+    // 普通 transport（不带请求头）路径：`setTransport` 走 `MockTransport`。
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.mch.weixin.qq.com/v3/certificates", .{ .body = cert_resp });
+
+    var fixed = FixedIo{};
+    var verifier = NotifyVerifier.init(allocator, TestCfg);
+    defer verifier.deinit();
+    verifier.io = fixed.io();
+    verifier.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+
+    const biz = "{\"mchid\":\"1900000109\",\"out_trade_no\":\"20260722002\",\"trade_state\":\"SUCCESS\"}";
+    const body = try buildNotifyBody(allocator, biz);
+    defer allocator.free(body);
+    const headers = try signHeaders(allocator, test_serial, "1700000000", "nonce-abc", body);
+    defer allocator.free(@constCast(headers.signature));
+
+    var verified = try verifier.verifyAndDecrypt(allocator, headers, body);
+    defer verified.deinit(allocator);
+
+    try std.testing.expectEqualStrings(biz, verified.plaintext);
+    try std.testing.expectEqualStrings("TRANSACTION.SUCCESS", verified.body.value.event_type);
+
+    // 证书只拉一次并进入缓存；未命中已缓存的序列号不会再回源。
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://api.mch.weixin.qq.com/v3/certificates",
+        mt.history.items[0],
+    );
+    try std.testing.expectEqual(@as(usize, 1), verifier.cachedCertCount());
+
+    // 再验一次仍命中缓存（history 长度不变）。
+    const headers2 = try signHeaders(allocator, test_serial, "1700000000", "nonce-def", body);
+    defer allocator.free(@constCast(headers2.signature));
+    var verified2 = try verifier.verifyAndDecrypt(allocator, headers2, body);
+    defer verified2.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+
+    // setTransport / setHeaderTransport 互斥且可清空（`null` = 恢复真实 HTTPS）；
+    // 反向互斥（注入 header transport 清掉普通 transport）由 platform_cert 侧的用例覆盖。
+    verifier.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    verifier.setHeaderTransport(null, null);
+    try std.testing.expect(verifier.store.transport == null);
+    try std.testing.expect(verifier.store.header_transport == null);
 }

@@ -182,3 +182,56 @@ test "OfficialAccount.getAccessToken 透传到 handle" {
     const tok = try oa.getAccessToken(std.testing.allocator);
     try std.testing.expectEqualStrings("fake-access-token-xyz", tok);
 }
+
+// 真实调用每个子模块工厂（懒分析：未被调用的函数体不会编译）。
+// 断言各工厂返回的实例持有同一个 `*Context`，且透传同一 allocator。
+test "OfficialAccount 全部子模块工厂真实调用并共享同一 ctx 与 allocator" {
+    const allocator = std.testing.allocator;
+    var state = TestHandleState{ .token = "stub-ak" };
+    var oa = OfficialAccount.newOfficialAccount(.{ .app_id = "wx-factory" }, makeFakeHandle(&state));
+    const ctx: *Context = &oa.ctx;
+
+    try std.testing.expectEqual(ctx, oa.getBasic(allocator).ctx);
+    try std.testing.expectEqual(allocator.vtable, oa.getBasic(allocator).allocator.vtable);
+
+    try std.testing.expectEqual(ctx, oa.getBroadcast(allocator).ctx);
+    try std.testing.expectEqual(allocator.vtable, oa.getBroadcast(allocator).allocator.vtable);
+
+    try std.testing.expectEqual(ctx, oa.getCustomerService(allocator).ctx);
+    try std.testing.expectEqual(allocator.vtable, oa.getCustomerService(allocator).allocator.vtable);
+
+    try std.testing.expectEqual(ctx, oa.getDataCube(allocator).ctx);
+    try std.testing.expectEqual(allocator.vtable, oa.getDataCube(allocator).allocator.vtable);
+
+    try std.testing.expectEqual(ctx, oa.getDevice(allocator).ctx);
+    try std.testing.expectEqual(allocator.vtable, oa.getDevice(allocator).allocator.vtable);
+
+    try std.testing.expectEqual(ctx, oa.getDraft(allocator).ctx);
+    try std.testing.expectEqual(allocator.vtable, oa.getDraft(allocator).allocator.vtable);
+
+    try std.testing.expectEqual(ctx, oa.getFreePublish(allocator).ctx);
+    try std.testing.expectEqual(allocator.vtable, oa.getFreePublish(allocator).allocator.vtable);
+
+    try std.testing.expectEqual(ctx, oa.getJs().ctx);
+
+    try std.testing.expectEqual(ctx, oa.getMaterial(allocator).ctx);
+    try std.testing.expectEqual(allocator.vtable, oa.getMaterial(allocator).allocator.vtable);
+
+    try std.testing.expectEqual(ctx, oa.getMenu(allocator).ctx);
+    try std.testing.expectEqual(allocator.vtable, oa.getMenu(allocator).allocator.vtable);
+
+    try std.testing.expectEqual(ctx, oa.getMessage(allocator).ctx);
+    try std.testing.expectEqual(allocator.vtable, oa.getMessage(allocator).allocator.vtable);
+
+    try std.testing.expectEqual(ctx, oa.getOauth(allocator).ctx);
+    try std.testing.expectEqual(allocator.vtable, oa.getOauth(allocator).allocator.vtable);
+
+    try std.testing.expectEqual(ctx, oa.getOcr(allocator).ctx);
+    try std.testing.expectEqual(allocator.vtable, oa.getOcr(allocator).allocator.vtable);
+
+    try std.testing.expectEqual(ctx, oa.getServer(allocator).ctx);
+    try std.testing.expectEqual(allocator.vtable, oa.getServer(allocator).allocator.vtable);
+
+    try std.testing.expectEqual(ctx, oa.getUser(allocator).ctx);
+    try std.testing.expectEqual(allocator.vtable, oa.getUser(allocator).allocator.vtable);
+}

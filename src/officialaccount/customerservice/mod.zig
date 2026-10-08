@@ -406,6 +406,34 @@ test "deleteAccount 请求 kfaccount/del 仅含 kf_account" {
     try std.testing.expectError(util_error.WechatError.ApiError, cs.deleteAccount("kf1@test"));
 }
 
+test "addAccount 请求 kfaccount/add 且 JSON 转义" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = CaptureResp{ .allocator = alloc, .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-cs" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var cs = CustomerService.init(&ctx, alloc);
+    cs.setTransport(CaptureResp.dispatch, &cap);
+
+    try cs.addAccount("kf1@test", "客服\"一");
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/customservice/kfaccount/add?access_token=token-abc",
+        cap.uri,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"kf_account\":\"kf1@test\",\"nickname\":\"客服\\\"一\"}",
+        cap.payload,
+    );
+
+    // errcode 非 0 → ApiError（与其它客服账号管理接口一致）。
+    cap.response = "{\"errcode\":48001,\"errmsg\":\"api unauthorized\"}";
+    try std.testing.expectError(util_error.WechatError.ApiError, cs.addAccount("kf1@test", "客服一"));
+}
+
 test "inviteBind 请求 kfaccount/inviteworker 含 invite_wx" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

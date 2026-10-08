@@ -257,6 +257,68 @@ test "SetPrivacySetting V1 带 setting_list 返回 InvalidArgument" {
     try std.testing.expectError(error.InvalidArgument, result);
 }
 
+// ── 可注入 transport 测试 ────────────────────────────────────────────────
+
+const credential = @import("../../credential/mod.zig");
+
+const PrivacyToken = struct {
+    fn getToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        return allocator.dupe(u8, "token-abc");
+    }
+};
+const privacy_token_vtable = credential.AccessTokenHandle.VTable{ .getAccessToken = PrivacyToken.getToken };
+
+/// 记录 method / uri / payload 的 transport（uploadPrivacyExtFile 走线程默认 client）。
+const CapturingTransport = struct {
+    method: std.http.Method = .GET,
+    uri: []u8 = &.{},
+    payload: []u8 = &.{},
+    response: []const u8 = "",
+
+    fn dispatch(ctx: *anyopaque, allocator: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = content_type;
+        const self: *CapturingTransport = @ptrCast(@alignCast(ctx));
+        self.method = method;
+        if (self.uri.len > 0) allocator.free(self.uri);
+        if (self.payload.len > 0) allocator.free(self.payload);
+        self.uri = try allocator.dupe(u8, uri);
+        self.payload = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, self.response);
+    }
+
+    fn deinit(self: *CapturingTransport, allocator: std.mem.Allocator) void {
+        if (self.uri.len > 0) allocator.free(self.uri);
+        if (self.payload.len > 0) allocator.free(self.payload);
+    }
+};
+
+test "uploadPrivacyExtFile POST 上传权限模板并解析 media_id" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"ext_file_media_id\":\"MEDIA_1\"}" };
+    defer tt.deinit(allocator);
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(CapturingTransport.dispatch, @ptrCast(&tt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-pv" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &privacy_token_vtable },
+    };
+    var p = Privacy.init(&ctx, allocator);
+
+    var parsed = try p.uploadPrivacyExtFile("{\"privacy_key\":\"UserInfo\"}");
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/component/uploadprivacyextfile?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"file\":\"{") != null);
+    try std.testing.expectEqualStrings("MEDIA_1", parsed.value.ext_file_media_id);
+}
+
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
 
 const retry_testing = @import("../retry_testing.zig");

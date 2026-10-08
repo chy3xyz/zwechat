@@ -633,6 +633,7 @@ const TestCapture = struct {
     allocator: std.mem.Allocator,
     response: []const u8,
     status: u16 = 200,
+    method: std.http.Method = .POST,
     uri: []u8 = &.{},
     payload: []u8 = &.{},
     ctype: []const u8 = "",
@@ -645,8 +646,8 @@ const TestCapture = struct {
         payload: []const u8,
         content_type: ?[]const u8,
     ) anyerror![]u8 {
-        _ = method;
         const self: *TestCapture = @ptrCast(@alignCast(ctx));
+        self.method = method;
         self.uri = try allocator.dupe(u8, uri);
         self.payload = try allocator.dupe(u8, payload);
         self.ctype = try allocator.dupe(u8, content_type orelse "");
@@ -796,6 +797,123 @@ test "Material.getNews 解析 news_item" {
         cap.uri,
     );
     try std.testing.expectEqualStrings("{\"media_id\":\"MEDIA9\"}", cap.payload);
+}
+
+test "Material.getMaterialCount 走 GET 且解析四类计数" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"voice_count\":2,\"video_count\":3,\"image_count\":4,\"news_count\":5}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var m = Material.init(&ctx, alloc);
+
+    var parsed = try m.getMaterialCount();
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 2), parsed.value.voice_count);
+    try std.testing.expectEqual(@as(i64, 3), parsed.value.video_count);
+    try std.testing.expectEqual(@as(i64, 4), parsed.value.image_count);
+    try std.testing.expectEqual(@as(i64, 5), parsed.value.news_count);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/material/get_materialcount?access_token=stub-ak",
+        cap.uri,
+    );
+    // 计数端点是对素材总数的"读"，必须走 GET（回归：误用 POST 会被微信拒绝）。
+    try std.testing.expectEqual(std.http.Method.GET, cap.method);
+}
+
+test "Material.getMaterialCount errcode 非 0 返回 ApiError" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{ .allocator = alloc, .response = "{\"errcode\":48001,\"errmsg\":\"api unauthorized\"}" };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var m = Material.init(&ctx, alloc);
+
+    try std.testing.expectError(util_error.WechatError.ApiError, m.getMaterialCount());
+}
+
+test "Material.batchGetMaterial 请求 type/offset/count 并解析 item" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response =
+        \\{"total_count":1,"item_count":1,"item":[{"media_id":"MEDIA_A","name":"封面","url":"http://a/1.png","update_time":1700000000,"content":{"news_item":[{"title":"标题","show_cover_pic":1}],"update_time":1700000001,"create_time":1700000002}}]}
+        ,
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var m = Material.init(&ctx, alloc);
+
+    var parsed = try m.batchGetMaterial(.news, 0, 20);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/material/batchget_material?access_token=stub-ak",
+        cap.uri,
+    );
+    try std.testing.expectEqual(std.http.Method.POST, cap.method);
+    try std.testing.expectEqualStrings("{\"type\":\"news\",\"offset\":0,\"count\":20}", cap.payload);
+
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.total_count);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.item.len);
+    try std.testing.expectEqualStrings("MEDIA_A", parsed.value.item[0].media_id);
+    try std.testing.expectEqualStrings("封面", parsed.value.item[0].name);
+    try std.testing.expectEqual(@as(i64, 1700000000), parsed.value.item[0].update_time);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.item[0].content.news_item.len);
+    try std.testing.expectEqualStrings("标题", parsed.value.item[0].content.news_item[0].title);
+}
+
+test "Material.batchGetMaterial 图片类型 tag 名与分页参数透传" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{ .allocator = alloc, .response = "{\"total_count\":0,\"item_count\":0,\"item\":[]}" };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var m = Material.init(&ctx, alloc);
+
+    var parsed = try m.batchGetMaterial(.image, 20, 5);
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("{\"type\":\"image\",\"offset\":20,\"count\":5}", cap.payload);
+    try std.testing.expectEqual(@as(usize, 0), parsed.value.item.len);
+}
+
+test "Material.batchGetMaterial errcode 非 0 返回 ApiError" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{ .allocator = alloc, .response = "{\"errcode\":40007,\"errmsg\":\"invalid media_id\"}" };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var m = Material.init(&ctx, alloc);
+
+    try std.testing.expectError(util_error.WechatError.ApiError, m.batchGetMaterial(.news, 0, 20));
 }
 
 test "Material.updateNews errcode 非 0 返回 ApiError" {

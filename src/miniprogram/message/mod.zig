@@ -1793,6 +1793,39 @@ test "PushReceiver JSON change / sent 事件" {
     try std.testing.expectEqualStrings("ok", sent_events[0].error_status);
 }
 
+test "getSubscribeMsgChangeEvents 返回解析后的用户管理订阅事件列表" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const change =
+        \\{"ToUserName":"gh_x","FromUserName":"oX","CreateTime":1610969500,"MsgType":"event",
+        \\ "Event":"subscribe_msg_change_event","List":[{"TemplateId":"tpl_c","SubscribeStatusString":"accept"}]}
+    ;
+    const got_change = try PushReceiver.init().getMsgData(alloc, change, .json);
+    const change_events = got_change.data.subscribe_msg_change.getSubscribeMsgChangeEvents();
+    try std.testing.expectEqual(@as(usize, 1), change_events.len);
+    try std.testing.expectEqualStrings("tpl_c", change_events[0].template_id);
+    try std.testing.expectEqualStrings("accept", change_events[0].subscribe_status_string);
+}
+
+test "getSubscribeMsgSentEvents 返回解析后的订阅发送结果事件列表" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const sent =
+        \\{"ToUserName":"gh_x","FromUserName":"oX","CreateTime":1610969600,"MsgType":"event",
+        \\ "Event":"subscribe_msg_sent_event","List":[{"TemplateId":"tpl_s","MsgID":"12345","ErrorCode":"0","ErrorStatus":"ok"}]}
+    ;
+    const got_sent = try PushReceiver.init().getMsgData(alloc, sent, .json);
+    const sent_events = got_sent.data.subscribe_msg_sent.getSubscribeMsgSentEvents();
+    try std.testing.expectEqual(@as(usize, 1), sent_events.len);
+    try std.testing.expectEqualStrings("tpl_s", sent_events[0].template_id);
+    try std.testing.expectEqualStrings("12345", sent_events[0].msg_id);
+    try std.testing.expectEqualStrings("0", sent_events[0].error_code);
+}
+
 test "PushReceiver JSON 非事件消息与未知事件返回 raw 明文" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

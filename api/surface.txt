@@ -2033,6 +2033,8 @@ src/miniprogram/tcb/mod.zig: pub const Tcb
 src/miniprogram/tcb/mod.zig: pub const UpdateIndexReq
 src/miniprogram/tcb/mod.zig: pub const UploadFileReq
 src/miniprogram/tcb/mod.zig: pub const UploadFileRes
+src/miniprogram/tcb/mod.zig: pub fn DownloadedFile.jsonParse
+src/miniprogram/tcb/mod.zig: pub fn Pager.jsonParse
 src/miniprogram/tcb/mod.zig: pub fn Tcb.batchDeleteFile
 src/miniprogram/tcb/mod.zig: pub fn Tcb.batchDownloadFile
 src/miniprogram/tcb/mod.zig: pub fn Tcb.databaseAdd
@@ -2050,6 +2052,8 @@ src/miniprogram/tcb/mod.zig: pub fn Tcb.init
 src/miniprogram/tcb/mod.zig: pub fn Tcb.invokeCloudFunction
 src/miniprogram/tcb/mod.zig: pub fn Tcb.updateIndex
 src/miniprogram/tcb/mod.zig: pub fn Tcb.uploadFile
+src/miniprogram/tcb/mod.zig: sig DownloadedFile.jsonParse(std.mem.Allocator, anytype, std.json.ParseOptions) DownloadedFile
+src/miniprogram/tcb/mod.zig: sig Pager.jsonParse(std.mem.Allocator, anytype, std.json.ParseOptions) Pager
 src/miniprogram/tcb/mod.zig: sig Tcb.batchDeleteFile(*Self, []const u8, []const []const u8) std.json.Parsed(BatchDeleteFileRes)
 src/miniprogram/tcb/mod.zig: sig Tcb.batchDownloadFile(*Self, []const u8, []const DownloadFile) std.json.Parsed(BatchDownloadFileRes)
 src/miniprogram/tcb/mod.zig: sig Tcb.databaseAdd(*Self, []const u8, []const u8) std.json.Parsed(DatabaseAddRes)
@@ -2178,9 +2182,32 @@ src/miniprogram/virtualpayment/mod.zig: field CancelCurrencyPayResponse.errmsg: 
 src/miniprogram/virtualpayment/mod.zig: field CancelCurrencyPayResponse.order_id: []const u8
 src/miniprogram/virtualpayment/mod.zig: field CommonRequest.env: Env
 src/miniprogram/virtualpayment/mod.zig: field CommonRequest.openid: []const u8
-src/miniprogram/virtualpayment/mod.zig: field ComplaintInfo.complaint_id: []const u8
-src/miniprogram/virtualpayment/mod.zig: field ComplaintInfo.create_time: i64
-src/miniprogram/virtualpayment/mod.zig: field ComplaintInfo.state: i64
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.apply_refund_amount: i64
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.complaint_detail: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.complaint_full_refunded: bool
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.complaint_id: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.complaint_media_list: []const ComplaintMedia
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.complaint_order_info: []const ComplaintOrderInfo
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.complaint_state: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.complaint_time: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.incoming_user_response: bool
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.payer_openid: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.payer_phone: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.problem_description: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.problem_type: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.service_order_info: []const ComplaintServiceOrderInfo
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.user_complaint_times: i64
+src/miniprogram/virtualpayment/mod.zig: field ComplaintItem.user_tag_list: []const []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintMedia.media_type: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintMedia.media_url: []const []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintOrderInfo.amount: i64
+src/miniprogram/virtualpayment/mod.zig: field ComplaintOrderInfo.out_trade_no: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintOrderInfo.transaction_id: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintOrderInfo.wx_order_id: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintOrderInfo.wxa_out_trade_no: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintServiceOrderInfo.order_id: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintServiceOrderInfo.out_order_no: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ComplaintServiceOrderInfo.state: []const u8
 src/miniprogram/virtualpayment/mod.zig: field CompleteComplaintRequest.complaint_id: []const u8
 src/miniprogram/virtualpayment/mod.zig: field CompleteComplaintRequest.env: Env
 src/miniprogram/virtualpayment/mod.zig: field CompleteComplaintResponse.errcode: i64
@@ -2246,28 +2273,40 @@ src/miniprogram/virtualpayment/mod.zig: field FundsBillRecord.transfer_account_u
 src/miniprogram/virtualpayment/mod.zig: field FundsBillRecord.transfer_amount: i64
 src/miniprogram/virtualpayment/mod.zig: field GetComplaintDetailRequest.complaint_id: []const u8
 src/miniprogram/virtualpayment/mod.zig: field GetComplaintDetailRequest.env: Env
-src/miniprogram/virtualpayment/mod.zig: field GetComplaintDetailResponse.complaint_id: []const u8
+src/miniprogram/virtualpayment/mod.zig: field GetComplaintDetailResponse.complaint: ?ComplaintItem
 src/miniprogram/virtualpayment/mod.zig: field GetComplaintDetailResponse.errcode: i64
 src/miniprogram/virtualpayment/mod.zig: field GetComplaintDetailResponse.errmsg: []const u8
-src/miniprogram/virtualpayment/mod.zig: field GetComplaintDetailResponse.state: i64
 src/miniprogram/virtualpayment/mod.zig: field GetComplaintListRequest.begin_date: []const u8
 src/miniprogram/virtualpayment/mod.zig: field GetComplaintListRequest.end_date: []const u8
 src/miniprogram/virtualpayment/mod.zig: field GetComplaintListRequest.env: Env
-src/miniprogram/virtualpayment/mod.zig: field GetComplaintListRequest.page: i64
-src/miniprogram/virtualpayment/mod.zig: field GetComplaintListRequest.page_size: i64
-src/miniprogram/virtualpayment/mod.zig: field GetComplaintListResponse.complaint_list: []const ComplaintInfo
+src/miniprogram/virtualpayment/mod.zig: field GetComplaintListRequest.limit: i64
+src/miniprogram/virtualpayment/mod.zig: field GetComplaintListRequest.offset: i64
+src/miniprogram/virtualpayment/mod.zig: field GetComplaintListResponse.complaints: []const ComplaintItem
 src/miniprogram/virtualpayment/mod.zig: field GetComplaintListResponse.errcode: i64
 src/miniprogram/virtualpayment/mod.zig: field GetComplaintListResponse.errmsg: []const u8
 src/miniprogram/virtualpayment/mod.zig: field GetComplaintListResponse.total: i64
 src/miniprogram/virtualpayment/mod.zig: field GetNegotiationHistoryRequest.complaint_id: []const u8
 src/miniprogram/virtualpayment/mod.zig: field GetNegotiationHistoryRequest.env: Env
+src/miniprogram/virtualpayment/mod.zig: field GetNegotiationHistoryRequest.limit: i64
+src/miniprogram/virtualpayment/mod.zig: field GetNegotiationHistoryRequest.offset: i64
 src/miniprogram/virtualpayment/mod.zig: field GetNegotiationHistoryResponse.errcode: i64
 src/miniprogram/virtualpayment/mod.zig: field GetNegotiationHistoryResponse.errmsg: []const u8
+src/miniprogram/virtualpayment/mod.zig: field GetNegotiationHistoryResponse.history: []const NegotiationHistory
+src/miniprogram/virtualpayment/mod.zig: field GetNegotiationHistoryResponse.total: i64
+src/miniprogram/virtualpayment/mod.zig: field GetUploadFileSignRequest.complaint_id: []const u8
+src/miniprogram/virtualpayment/mod.zig: field GetUploadFileSignRequest.convert_cos: bool
 src/miniprogram/virtualpayment/mod.zig: field GetUploadFileSignRequest.env: Env
-src/miniprogram/virtualpayment/mod.zig: field GetUploadFileSignRequest.file_id: []const u8
+src/miniprogram/virtualpayment/mod.zig: field GetUploadFileSignRequest.wxpay_url: []const u8
+src/miniprogram/virtualpayment/mod.zig: field GetUploadFileSignResponse.cos_url: []const u8
 src/miniprogram/virtualpayment/mod.zig: field GetUploadFileSignResponse.errcode: i64
 src/miniprogram/virtualpayment/mod.zig: field GetUploadFileSignResponse.errmsg: []const u8
 src/miniprogram/virtualpayment/mod.zig: field GetUploadFileSignResponse.sign: []const u8
+src/miniprogram/virtualpayment/mod.zig: field NegotiationHistory.complaint_media_list: []const ComplaintMedia
+src/miniprogram/virtualpayment/mod.zig: field NegotiationHistory.log_id: []const u8
+src/miniprogram/virtualpayment/mod.zig: field NegotiationHistory.operate_details: []const u8
+src/miniprogram/virtualpayment/mod.zig: field NegotiationHistory.operate_time: []const u8
+src/miniprogram/virtualpayment/mod.zig: field NegotiationHistory.operate_type: []const u8
+src/miniprogram/virtualpayment/mod.zig: field NegotiationHistory.operator: []const u8
 src/miniprogram/virtualpayment/mod.zig: field NotifyProvideGoodsRequest.env: Env
 src/miniprogram/virtualpayment/mod.zig: field NotifyProvideGoodsRequest.order_id: []const u8
 src/miniprogram/virtualpayment/mod.zig: field NotifyProvideGoodsRequest.wx_order_id: []const u8
@@ -2374,6 +2413,7 @@ src/miniprogram/virtualpayment/mod.zig: field QueryWithdrawOrderRequest.withdraw
 src/miniprogram/virtualpayment/mod.zig: field QueryWithdrawOrderResponse.create_time: []const u8
 src/miniprogram/virtualpayment/mod.zig: field QueryWithdrawOrderResponse.errcode: i64
 src/miniprogram/virtualpayment/mod.zig: field QueryWithdrawOrderResponse.errmsg: []const u8
+src/miniprogram/virtualpayment/mod.zig: field QueryWithdrawOrderResponse.fail_reason: []const u8
 src/miniprogram/virtualpayment/mod.zig: field QueryWithdrawOrderResponse.status: i64
 src/miniprogram/virtualpayment/mod.zig: field QueryWithdrawOrderResponse.withdraw_amount: []const u8
 src/miniprogram/virtualpayment/mod.zig: field QueryWithdrawOrderResponse.withdraw_no: []const u8
@@ -2409,6 +2449,7 @@ src/miniprogram/virtualpayment/mod.zig: field RefundOrderResponse.refund_wx_orde
 src/miniprogram/virtualpayment/mod.zig: field ResponseComplaintRequest.complaint_id: []const u8
 src/miniprogram/virtualpayment/mod.zig: field ResponseComplaintRequest.env: Env
 src/miniprogram/virtualpayment/mod.zig: field ResponseComplaintRequest.response_content: []const u8
+src/miniprogram/virtualpayment/mod.zig: field ResponseComplaintRequest.response_images: []const []const u8
 src/miniprogram/virtualpayment/mod.zig: field ResponseComplaintResponse.errcode: i64
 src/miniprogram/virtualpayment/mod.zig: field ResponseComplaintResponse.errmsg: []const u8
 src/miniprogram/virtualpayment/mod.zig: field StartDownloadOrderRequest.begin_ds: []const u8
@@ -2438,7 +2479,10 @@ src/miniprogram/virtualpayment/mod.zig: field UploadItem.name: []const u8
 src/miniprogram/virtualpayment/mod.zig: field UploadItem.price: i64
 src/miniprogram/virtualpayment/mod.zig: field UploadItem.remark: []const u8
 src/miniprogram/virtualpayment/mod.zig: field UploadItem.upload_status: i64
+src/miniprogram/virtualpayment/mod.zig: field UploadVPFileRequest.base64_img: []const u8
 src/miniprogram/virtualpayment/mod.zig: field UploadVPFileRequest.env: Env
+src/miniprogram/virtualpayment/mod.zig: field UploadVPFileRequest.file_name: []const u8
+src/miniprogram/virtualpayment/mod.zig: field UploadVPFileRequest.img_url: []const u8
 src/miniprogram/virtualpayment/mod.zig: field UploadVPFileResponse.errcode: i64
 src/miniprogram/virtualpayment/mod.zig: field UploadVPFileResponse.errmsg: []const u8
 src/miniprogram/virtualpayment/mod.zig: field UploadVPFileResponse.file_id: []const u8
@@ -2453,7 +2497,10 @@ src/miniprogram/virtualpayment/mod.zig: pub const BizBalanceAvailable
 src/miniprogram/virtualpayment/mod.zig: pub const CancelCurrencyPayRequest
 src/miniprogram/virtualpayment/mod.zig: pub const CancelCurrencyPayResponse
 src/miniprogram/virtualpayment/mod.zig: pub const CommonRequest
-src/miniprogram/virtualpayment/mod.zig: pub const ComplaintInfo
+src/miniprogram/virtualpayment/mod.zig: pub const ComplaintItem
+src/miniprogram/virtualpayment/mod.zig: pub const ComplaintMedia
+src/miniprogram/virtualpayment/mod.zig: pub const ComplaintOrderInfo
+src/miniprogram/virtualpayment/mod.zig: pub const ComplaintServiceOrderInfo
 src/miniprogram/virtualpayment/mod.zig: pub const CompleteComplaintRequest
 src/miniprogram/virtualpayment/mod.zig: pub const CompleteComplaintResponse
 src/miniprogram/virtualpayment/mod.zig: pub const CreateFundsBillRequest
@@ -2477,6 +2524,7 @@ src/miniprogram/virtualpayment/mod.zig: pub const GetNegotiationHistoryRequest
 src/miniprogram/virtualpayment/mod.zig: pub const GetNegotiationHistoryResponse
 src/miniprogram/virtualpayment/mod.zig: pub const GetUploadFileSignRequest
 src/miniprogram/virtualpayment/mod.zig: pub const GetUploadFileSignResponse
+src/miniprogram/virtualpayment/mod.zig: pub const NegotiationHistory
 src/miniprogram/virtualpayment/mod.zig: pub const NotifyProvideGoodsRequest
 src/miniprogram/virtualpayment/mod.zig: pub const NotifyProvideGoodsResponse
 src/miniprogram/virtualpayment/mod.zig: pub const OrderItem
@@ -2522,6 +2570,7 @@ src/miniprogram/virtualpayment/mod.zig: pub const UploadItem
 src/miniprogram/virtualpayment/mod.zig: pub const UploadVPFileRequest
 src/miniprogram/virtualpayment/mod.zig: pub const UploadVPFileResponse
 src/miniprogram/virtualpayment/mod.zig: pub const VirtualPayment
+src/miniprogram/virtualpayment/mod.zig: pub fn QueryWithdrawOrderResponse.jsonParse
 src/miniprogram/virtualpayment/mod.zig: pub fn VirtualPayment.bindTransferAccount
 src/miniprogram/virtualpayment/mod.zig: pub fn VirtualPayment.cancelCurrencyPay
 src/miniprogram/virtualpayment/mod.zig: pub fn VirtualPayment.completeComplaint
@@ -2555,6 +2604,7 @@ src/miniprogram/virtualpayment/mod.zig: pub fn VirtualPayment.startDownloadOrder
 src/miniprogram/virtualpayment/mod.zig: pub fn VirtualPayment.startPublishGoods
 src/miniprogram/virtualpayment/mod.zig: pub fn VirtualPayment.startUploadGoods
 src/miniprogram/virtualpayment/mod.zig: pub fn VirtualPayment.uploadVPFile
+src/miniprogram/virtualpayment/mod.zig: sig QueryWithdrawOrderResponse.jsonParse(std.mem.Allocator, anytype, std.json.ParseOptions) @This()
 src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.bindTransferAccount(*Self, BindTransferAccountRequest) std.json.Parsed(BindTransferAccountResponse)
 src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.cancelCurrencyPay(*Self, CancelCurrencyPayRequest) std.json.Parsed(CancelCurrencyPayResponse)
 src/miniprogram/virtualpayment/mod.zig: sig VirtualPayment.completeComplaint(*Self, CompleteComplaintRequest) std.json.Parsed(CompleteComplaintResponse)
@@ -4667,11 +4717,16 @@ src/util/http.zig: sig deinitDefaultClient() void
 src/util/http.zig: sig getDefaultClient(std.mem.Allocator) *HttpClient
 src/util/http.zig: sig initDefaultClient(std.mem.Allocator) void
 src/util/http.zig: sig setUriModifier(?UriModifier) void
+src/util/json.zig: field StringField.name: []const u8
+src/util/json.zig: field StringField.value: []const u8
+src/util/json.zig: pub const StringField
 src/util/json.zig: pub fn appendEscapedString
 src/util/json.zig: pub fn stringFieldObject
+src/util/json.zig: pub fn stringFieldsObject
 src/util/json.zig: pub fn stringLiteral
 src/util/json.zig: sig appendEscapedString(std.mem.Allocator, anytype, []const u8) std.mem.Allocator.Error!void
 src/util/json.zig: sig stringFieldObject(std.mem.Allocator, []const u8, []const u8) std.mem.Allocator.Error![]u8
+src/util/json.zig: sig stringFieldsObject(std.mem.Allocator, []const StringField) std.mem.Allocator.Error![]u8
 src/util/json.zig: sig stringLiteral(std.mem.Allocator, []const u8) std.mem.Allocator.Error![]u8
 src/util/mod.zig: pub const asn1
 src/util/mod.zig: pub const crypto

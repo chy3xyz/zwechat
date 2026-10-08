@@ -570,3 +570,200 @@ test "bigIntToBytes / bigIntFromBytes round-trip" {
     defer allocator.free(bytes);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0, 0, 0xab, 0xcd, 0xef }, bytes);
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// PEM 解析 / 签名 / 验签 / 解密（测试素材与 `rsa.zig` 的用例同源：
+// 1024-bit 密钥，PKCS#1 / PKCS#8 私钥 + X.509 公钥；
+// 签名与密文均由 OpenSSL 生成，属已知答案向量）
+// ──────────────────────────────────────────────────────────────────────────────
+
+const test_private_key_pkcs1 =
+    "-----BEGIN RSA PRIVATE KEY-----\n" ++
+    "MIICXAIBAAKBgQDeEfNBUM8LdVgybCmePyzqq4K4JeITO0tSI3cjLVIU0WNjn+/Z\n" ++
+    "XQkp2wnxRwy7rejptcZ52VSisBkZ24O2nmQ1mggRQ62qHiMqOJdfBCr5eYIcC+nB\n" ++
+    "hZTMCXeokzGXNQgWHSYSequj3b0IQLW/UJuoy4LshG69+3XtcOWFTitj6wIDAQAB\n" ++
+    "AoGADhiVmE/I1LFeJ9U1zxWzhDHe2lGNSCs7XLtjlJgL3cZsyKYeU23UZxPATdB0\n" ++
+    "vnULk8o2DwX8mVcUQM/uTGlBcwdJSYHDgxm/ALQLFk/HWndQZPhRG4beOPuleA/u\n" ++
+    "nLyyI+WCs/kcTfkSVLxyWhd8mffdlPc8zJ3BeTscKuye9AECQQD3tfFTkRe3RXEY\n" ++
+    "JYrYJTfcjqY/VQnNmoOCDcRkZ9hcf65+00ddGy2HVAYgbQIK0kSeW5h99duxfB1Q\n" ++
+    "//n3enzzAkEA5YBaVbXfXtwYcm1Ay6yCrgF5M5dvWdbYqPxe7WSI+xA+x0Vo6VzT\n" ++
+    "i4+LEBgXQHOj5sgD+ZBHDggm+yI4FxFbKQJBANzxXNITzVp7xtcpzUDjWYMRfXlp\n" ++
+    "yTepRPlAfFauRU6j2ClpG/MQ5bgaGujbMgIi8G9q9YYMQCt7r85qszOo/j8CQBt7\n" ++
+    "i1XIOb96S9MoEiJRvjRoKMNs1wDDIZ7a2eNDrsOh5mKmhTGs1AhaYCTFPcOSFYaF\n" ++
+    "XTR9eoTLpR9dsanRgkECQBZ5QXRRn5m3ri33vEuQMVB4+zN4/WTsoTajjIsAquYS\n" ++
+    "zNYkCg0jFcrx72bue1vi6XjuFCEB2dkA3BccoQjF+PQ=\n" ++
+    "-----END RSA PRIVATE KEY-----";
+
+const test_private_key_pkcs8 =
+    "-----BEGIN PRIVATE KEY-----\n" ++
+    "MIICdgIBADANBgkqhkiG9w0BAQEFAASCAmAwggJcAgEAAoGBAN4R80FQzwt1WDJs\n" ++
+    "KZ4/LOqrgrgl4hM7S1IjdyMtUhTRY2Of79ldCSnbCfFHDLut6Om1xnnZVKKwGRnb\n" ++
+    "g7aeZDWaCBFDraoeIyo4l18EKvl5ghwL6cGFlMwJd6iTMZc1CBYdJhJ6q6PdvQhA\n" ++
+    "tb9Qm6jLguyEbr37de1w5YVOK2PrAgMBAAECgYAOGJWYT8jUsV4n1TXPFbOEMd7a\n" ++
+    "UY1IKztcu2OUmAvdxmzIph5TbdRnE8BN0HS+dQuTyjYPBfyZVxRAz+5MaUFzB0lJ\n" ++
+    "gcODGb8AtAsWT8dad1Bk+FEbht44+6V4D+6cvLIj5YKz+RxN+RJUvHJaF3yZ992U\n" ++
+    "9zzMncF5Oxwq7J70AQJBAPe18VORF7dFcRglitglN9yOpj9VCc2ag4INxGRn2Fx/\n" ++
+    "rn7TR10bLYdUBiBtAgrSRJ5bmH3127F8HVD/+fd6fPMCQQDlgFpVtd9e3BhybUDL\n" ++
+    "rIKuAXkzl29Z1tio/F7tZIj7ED7HRWjpXNOLj4sQGBdAc6PmyAP5kEcOCCb7IjgX\n" ++
+    "EVspAkEA3PFc0hPNWnvG1ynNQONZgxF9eWnJN6lE+UB8Vq5FTqPYKWkb8xDluBoa\n" ++
+    "6NsyAiLwb2r1hgxAK3uvzmqzM6j+PwJAG3uLVcg5v3pL0ygSIlG+NGgow2zXAMMh\n" ++
+    "ntrZ40Ouw6HmYqaFMazUCFpgJMU9w5IVhoVdNH16hMulH12xqdGCQQJAFnlBdFGf\n" ++
+    "mbeuLfe8S5AxUHj7M3j9ZOyhNqOMiwCq5hLM1iQKDSMVyvHvZu57W+LpeO4UIQHZ\n" ++
+    "2QDcFxyhCMX49A==\n" ++
+    "-----END PRIVATE KEY-----";
+
+const test_public_key_x509 =
+    "-----BEGIN PUBLIC KEY-----\n" ++
+    "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDeEfNBUM8LdVgybCmePyzqq4K4\n" ++
+    "JeITO0tSI3cjLVIU0WNjn+/ZXQkp2wnxRwy7rejptcZ52VSisBkZ24O2nmQ1mggR\n" ++
+    "Q62qHiMqOJdfBCr5eYIcC+nBhZTMCXeokzGXNQgWHSYSequj3b0IQLW/UJuoy4Ls\n" ++
+    "hG69+3XtcOWFTitj6wIDAQAB\n" ++
+    "-----END PUBLIC KEY-----";
+
+/// OpenSSL 对 `"hello, zwechat rsa"` 用上述私钥生成的签名（SHA-256 / PKCS#1 v1.5）。
+const test_signature_b64 = "I39FVzcM4KIyson4J73YCiyS5+h7/lhCOl/fCRRae4kGCDIqw1u+iBhgY7sU9MSts5pwOW2HFkakv3yix4QEeZYkMTIPdcISZ0l6cpsN3ouVhGb1JXHscSqKbj06yWUbxIiEO56GKRUhZ/CMkfXspuQAZiUsdT6S2yhcpvm8q1M=";
+
+/// 同一密钥的 RSAES-PKCS1-v1_5 密文，明文 = `"hello, zwechat decrypt"`。
+const test_ciphertext_b64 = "jt3dup80IEd7jeUrH9glmjeoVxRcjww3MgFdmmwvxUmgVPubOhKrww0bs7Xobhkm3F99zAXlrjXvdPQZOgqt5DjMI+Agy3I0D8Z7VXdKExXWJCnsxlVWLGxjMLsvmTQ2pXCma8S6ckuNxmXygR8Mq0uqxzGW6r2dVlf1SFAnN3A=";
+
+fn decodeB64(allocator: std.mem.Allocator, b64: []const u8) ![]u8 {
+    const decoder = std.base64.standard.Decoder;
+    const len = try decoder.calcSizeForSlice(b64);
+    const out = try allocator.alloc(u8, len);
+    errdefer allocator.free(out);
+    try decoder.decode(out, b64);
+    return out;
+}
+
+test "parsePrivateKeyPem 解析 PKCS#1（含 CRT 参数）与 PKCS#8，模数一致" {
+    const allocator = std.testing.allocator;
+
+    var pkcs1 = try parsePrivateKeyPem(allocator, test_private_key_pkcs1);
+    defer pkcs1.deinit();
+    // 1024-bit 模数 => 128 字节。
+    try std.testing.expectEqual(@as(usize, 128), byteLenOfModulus(pkcs1.n.toConst()));
+    // e = 65537。
+    const e_bytes = try bigIntToBytes(allocator, pkcs1.e.toConst(), 4);
+    defer allocator.free(e_bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x01, 0x00, 0x01 }, e_bytes);
+    // PKCS#1 私钥带全部 CRT 参数（signSha256 因此走 CRT 分支）。
+    try std.testing.expect(pkcs1.p != null and pkcs1.q != null and pkcs1.dp != null);
+    try std.testing.expect(pkcs1.dq != null and pkcs1.qinv != null);
+
+    var pkcs8 = try parsePrivateKeyPem(allocator, test_private_key_pkcs8);
+    defer pkcs8.deinit();
+    const n1 = try bigIntToBytes(allocator, pkcs1.n.toConst(), 128);
+    defer allocator.free(n1);
+    const n8 = try bigIntToBytes(allocator, pkcs8.n.toConst(), 128);
+    defer allocator.free(n8);
+    try std.testing.expectEqualSlices(u8, n1, n8);
+    const d1 = try bigIntToBytes(allocator, pkcs1.d.toConst(), 128);
+    defer allocator.free(d1);
+    const d8 = try bigIntToBytes(allocator, pkcs8.d.toConst(), 128);
+    defer allocator.free(d8);
+    try std.testing.expectEqualSlices(u8, d1, d8);
+}
+
+test "parsePrivateKeyPem 拒绝非法 PEM、公钥 PEM 与损坏的 base64" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(
+        error.InvalidPemKey,
+        parsePrivateKeyPem(allocator, "not a pem at all"),
+    );
+    // 公钥 PEM 走 detectPemKind 落到 .public_key，私钥入口必须拒绝。
+    try std.testing.expectError(
+        error.UnsupportedKeyFormat,
+        parsePrivateKeyPem(allocator, test_public_key_x509),
+    );
+    // base64 载荷非法。
+    try std.testing.expectError(
+        error.InvalidPemKey,
+        parsePrivateKeyPem(
+            allocator,
+            "-----BEGIN RSA PRIVATE KEY-----\n!!!!not base64!!!!\n-----END RSA PRIVATE KEY-----",
+        ),
+    );
+}
+
+test "parsePublicKeyPem 解析 X.509 SubjectPublicKeyInfo（OID + NULL + BIT STRING 全路径）" {
+    const allocator = std.testing.allocator;
+    var pk = try parsePublicKeyPem(allocator, test_public_key_x509);
+    defer pk.deinit();
+    try std.testing.expectEqual(@as(usize, 128), byteLenOfModulus(pk.n.toConst()));
+    const e_bytes = try bigIntToBytes(allocator, pk.e.toConst(), 4);
+    defer allocator.free(e_bytes);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x01, 0x00, 0x01 }, e_bytes);
+}
+
+test "parsePublicKeyPem 拒绝非法 PEM 与私钥 PEM" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(
+        error.InvalidPemKey,
+        parsePublicKeyPem(allocator, "nope"),
+    );
+    try std.testing.expectError(
+        error.UnsupportedKeyFormat,
+        parsePublicKeyPem(allocator, test_private_key_pkcs1),
+    );
+}
+
+test "signSha256 / verifySha256 往返：正签为 true，篡改与坏长度签名被拒" {
+    const allocator = std.testing.allocator;
+    const msg = "hello, zwechat rsa";
+
+    var priv = try parsePrivateKeyPem(allocator, test_private_key_pkcs1);
+    defer priv.deinit();
+    var pub_key = try parsePublicKeyPem(allocator, test_public_key_x509);
+    defer pub_key.deinit();
+
+    const sig = try signSha256(allocator, priv, msg);
+    defer allocator.free(sig);
+    try std.testing.expectEqual(@as(usize, 128), sig.len);
+
+    try std.testing.expect(try verifySha256(allocator, pub_key, msg, sig));
+    // 篡改消息 / 篡改签名 → false（不报错，验签语义）。
+    try std.testing.expect(!try verifySha256(allocator, pub_key, "hello, zwechat rsa!", sig));
+    const tampered = try allocator.dupe(u8, sig);
+    defer allocator.free(tampered);
+    tampered[0] ^= 0x01;
+    try std.testing.expect(!try verifySha256(allocator, pub_key, msg, tampered));
+    // 签名长度必须等于模长。
+    try std.testing.expectError(
+        error.InvalidSignature,
+        verifySha256(allocator, pub_key, msg, sig[0..127]),
+    );
+}
+
+test "verifySha256 接受 OpenSSL 生成的已知签名（跨实现对照）" {
+    const allocator = std.testing.allocator;
+    const signature = try decodeB64(allocator, test_signature_b64);
+    defer allocator.free(signature);
+    try std.testing.expectEqual(@as(usize, 128), signature.len);
+
+    var pub_key = try parsePublicKeyPem(allocator, test_public_key_x509);
+    defer pub_key.deinit();
+    try std.testing.expect(try verifySha256(allocator, pub_key, "hello, zwechat rsa", signature));
+}
+
+test "decrypt 解出 RSAES-PKCS1-v1_5 已知密文，并拒绝错误长度" {
+    const allocator = std.testing.allocator;
+    const ciphertext = try decodeB64(allocator, test_ciphertext_b64);
+    defer allocator.free(ciphertext);
+    try std.testing.expectEqual(@as(usize, 128), ciphertext.len);
+
+    var priv = try parsePrivateKeyPem(allocator, test_private_key_pkcs1);
+    defer priv.deinit();
+
+    const plain = try decrypt(allocator, priv, ciphertext);
+    defer allocator.free(plain);
+    try std.testing.expectEqualStrings("hello, zwechat decrypt", plain);
+
+    // 密文长度必须等于模长。
+    try std.testing.expectError(
+        error.InvalidCiphertext,
+        decrypt(allocator, priv, ciphertext[0..127]),
+    );
+    // 全零密文解出的 EM 不是 0x00 0x02 开头。
+    var zeros: [128]u8 = @splat(0);
+    try std.testing.expectError(error.InvalidCiphertext, decrypt(allocator, priv, &zeros));
+}

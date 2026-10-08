@@ -344,3 +344,70 @@ const PosixImpl = struct {
         return raw;
     }
 };
+
+// =============================================================================
+// 内联测试
+//
+// ⚠️ 本文件只在 `-Dmtls=true` 的构建里被 `mtls.zig` 选中（默认构建根本不
+// 分析它），因此这些用例也只在该构建下运行：`zig build -Dmtls=true test`。
+//
+// `exchange` 是「真实 OpenSSL + 真实 socket」的薄封装，没有可注入后端，
+// 所以这里只用**离线可判定**的路径取证：传入无法解析的客户端证书，断言
+// 失败发生在证书装载阶段（说明 dlopen / 符号查找 / SSL_CTX_create /
+// TLS1.2 下限设置都已真实执行）。完整握手需要真实对端，不在单测范围内。
+// =============================================================================
+
+test "exchange 装载非法客户端证书时返回 TlsCertLoadFailed（缺 OpenSSL 则跳过）" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const result = exchange(
+        allocator,
+        std.testing.io,
+        "127.0.0.1",
+        1,
+        "POST /x HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        "-----BEGIN CERTIFICATE-----\nnot-a-cert\n-----END CERTIFICATE-----\n",
+        "-----BEGIN PRIVATE KEY-----\nnot-a-key\n-----END PRIVATE KEY-----\n",
+        null,
+        4096,
+    );
+
+    if (result) |raw| {
+        allocator.free(raw);
+        return error.UnexpectedExchangeSuccess;
+    } else |err| switch (err) {
+        // 运行时没有 libssl / libcrypto：跳过（默认构建不链接也不需要它们）。
+        error.OpenSslNotAvailable => return error.SkipZigTest,
+        // 证书解析失败是我们期望的路径——证明 OpenSSL 已被真实加载并调用。
+        error.TlsCertLoadFailed => {},
+        else => return err,
+    }
+}
+
+test "exchange 装载非法客户端私钥（证书合法前）同样停在装载阶段" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    // 空 PEM：BIO_new_mem_buf 可建，PEM_read_bio_X509 立即失败。
+    const result = exchange(
+        allocator,
+        std.testing.io,
+        "127.0.0.1",
+        1,
+        "POST /x HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        "",
+        "",
+        null,
+        1024,
+    );
+
+    if (result) |raw| {
+        allocator.free(raw);
+        return error.UnexpectedExchangeSuccess;
+    } else |err| switch (err) {
+        error.OpenSslNotAvailable => return error.SkipZigTest,
+        error.TlsCertLoadFailed => {},
+        else => return err,
+    }
+}

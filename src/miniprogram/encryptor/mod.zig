@@ -144,3 +144,42 @@ test "pkcs7Unpad 去除合法补位" {
     const out = pkcs7Unpad(&data).?;
     try std.testing.expectEqualStrings("abcdefghijkl", out);
 }
+
+// 由 openssl 生成的 AES-128-CBC + PKCS#7 向量（key = iv = "1234567890123456"）。
+const test_session_key = "MTIzNDU2Nzg5MDEyMzQ1Ng==";
+const test_iv = "MTIzNDU2Nzg5MDEyMzQ1Ng==";
+const test_cipher = "QubYxcNyMPJhiVJigQZeqp/ySuQ4NZuyGzxPxp5o6mvtMOpTi29nfX9NGLVPkxlSBr5H5wrUvfjcv5uGyLmmuK86hi8vBw9O8S9zj5oHhm8=";
+const test_plain = "{\"openId\":\"oABC\",\"watermark\":{\"timestamp\":1610969446,\"appid\":\"wx-enc-test\"}}";
+
+test "getCipherText 解密已知向量" {
+    const allocator = std.testing.allocator;
+    const plain = try getCipherText(allocator, test_session_key, test_cipher, test_iv);
+    defer allocator.free(plain);
+    try std.testing.expectEqualStrings(test_plain, plain);
+}
+
+test "decrypt 解密并校验 watermark.appid" {
+    const allocator = std.testing.allocator;
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-enc-test" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = undefined },
+    };
+    var e = Encryptor.init(&ctx);
+
+    var parsed = try e.decrypt(allocator, test_session_key, test_cipher, test_iv);
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("oABC", parsed.value.openId);
+    try std.testing.expectEqualStrings("wx-enc-test", parsed.value.watermark.appid);
+    try std.testing.expectEqual(@as(i64, 1610969446), parsed.value.watermark.timestamp);
+}
+
+test "decrypt watermark.appid 不匹配返回 AppIdNotMatch" {
+    const allocator = std.testing.allocator;
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-other" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = undefined },
+    };
+    var e = Encryptor.init(&ctx);
+    try std.testing.expectError(error.AppIdNotMatch, e.decrypt(allocator, test_session_key, test_cipher, test_iv));
+}

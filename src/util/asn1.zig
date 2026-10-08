@@ -170,6 +170,97 @@ test "Reader 拒绝非零 unused_bits 的 BIT STRING" {
     try std.testing.expectError(error.InvalidDer, result);
 }
 
+test "readOctetString 解析内容并推进 pos" {
+    // OCTET STRING "abc"
+    const der = &[_]u8{ 0x04, 0x03, 'a', 'b', 'c' };
+    var r = Reader.init(der);
+    const s = try r.readOctetString();
+    try std.testing.expectEqualStrings("abc", s);
+    try std.testing.expectEqual(@as(usize, der.len), r.pos);
+    try std.testing.expectEqual(@as(usize, 0), r.remaining());
+}
+
+test "readOctetString 接受空内容（len = 0）" {
+    var r = Reader.init(&[_]u8{ 0x04, 0x00 });
+    const s = try r.readOctetString();
+    try std.testing.expectEqual(@as(usize, 0), s.len);
+    try std.testing.expectEqual(@as(usize, 2), r.pos);
+}
+
+test "readOctetString 错 tag / 长度越界 / 空输入报 InvalidDer" {
+    // tag 是 INTEGER 而不是 OCTET STRING。
+    var wrong_tag = Reader.init(&[_]u8{ 0x02, 0x01, 0x41 });
+    try std.testing.expectError(error.InvalidDer, wrong_tag.readOctetString());
+
+    // 长格式长度声明 0x0100 字节，实际只给了 1 字节。
+    var too_long = Reader.init(&[_]u8{ 0x04, 0x82, 0x01, 0x00, 'a' });
+    try std.testing.expectError(error.InvalidDer, too_long.readOctetString());
+
+    // 空输入：读 tag 就越界。
+    var empty = Reader.init(&[_]u8{});
+    try std.testing.expectError(error.InvalidDer, empty.readOctetString());
+}
+
+test "readObjectIdentifier 解析 rsaEncryption OID 的原始字节" {
+    // OBJECT IDENTIFIER 1.2.840.113549.1.1.1
+    const der = &[_]u8{ 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01 };
+    var r = Reader.init(der);
+    const oid = try r.readObjectIdentifier();
+    try std.testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01 },
+        oid,
+    );
+    try std.testing.expectEqual(@as(usize, der.len), r.pos);
+}
+
+test "readObjectIdentifier 错 tag 与截断报 InvalidDer" {
+    var wrong_tag = Reader.init(&[_]u8{ 0x04, 0x01, 0x2a });
+    try std.testing.expectError(error.InvalidDer, wrong_tag.readObjectIdentifier());
+
+    var truncated = Reader.init(&[_]u8{ 0x06, 0x09, 0x2a });
+    try std.testing.expectError(error.InvalidDer, truncated.readObjectIdentifier());
+}
+
+test "readNull 接受零长度 NULL，拒绝非空长度与错 tag" {
+    var ok = Reader.init(&[_]u8{ 0x05, 0x00 });
+    try ok.readNull();
+    try std.testing.expectEqual(@as(usize, 2), ok.pos);
+
+    // NULL 的 length 必须为 0。
+    var nonzero_len = Reader.init(&[_]u8{ 0x05, 0x01, 0x00 });
+    try std.testing.expectError(error.InvalidDer, nonzero_len.readNull());
+
+    var wrong_tag = Reader.init(&[_]u8{ 0x02, 0x00 });
+    try std.testing.expectError(error.InvalidDer, wrong_tag.readNull());
+
+    var empty = Reader.init(&[_]u8{});
+    try std.testing.expectError(error.InvalidDer, empty.readNull());
+}
+
+test "readRawValue 返回 tag 与原始内容（可跳过未知类型）" {
+    // INTEGER 0x0102
+    var r = Reader.init(&[_]u8{ 0x02, 0x02, 0x01, 0x02 });
+    const v = try r.readRawValue();
+    try std.testing.expectEqual(@as(u5, 0x02), v.tag.number);
+    try std.testing.expect(!v.tag.constructed);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x02 }, v.content);
+    try std.testing.expectEqual(@as(usize, 4), r.pos);
+
+    // 上下文相关 tag：0xa0 = class=context-specific, constructed, number=0。
+    var ctx_r = Reader.init(&[_]u8{ 0xa0, 0x01, 0xff });
+    const cv = try ctx_r.readRawValue();
+    try std.testing.expectEqual(@as(u2, 2), cv.tag.class);
+    try std.testing.expect(cv.tag.constructed);
+    try std.testing.expectEqual(@as(u5, 0x00), cv.tag.number);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0xff}, cv.content);
+}
+
+test "readRawValue 长度越界报 InvalidDer" {
+    var r = Reader.init(&[_]u8{ 0x30, 0x05, 0x01 });
+    try std.testing.expectError(error.InvalidDer, r.readRawValue());
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // fuzz（`zig build test --fuzz=<N>` 才真正变异；普通 `zig build test` 只跑空输入冒烟）
 // ──────────────────────────────────────────────────────────────────────────────

@@ -228,3 +228,122 @@ test "Wechat.getMiniProgram 无 cache 返回 CacheUnavailable" {
     );
     try std.testing.expectError(error.CacheUnavailable, result);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// getOfficialAccount（此前零调用）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 测试用 access_token 工厂：把 handle 指向一个进程级静态实例，
+/// 避免「工厂内 `allocator.create` 但无人 `destroy`」造成的测试内存泄漏。
+var g_test_oa_token: credential_mod.DefaultAccessToken = undefined;
+/// 工厂被调用时实际收到的 cache（用于断言「全局 cache 已回退注入」）。
+var g_test_oa_factory_cache: ?cache_mod.Cache = null;
+var g_test_oa_factory_calls: usize = 0;
+
+fn testOfficialAccountTokenFactory(
+    cfg: officialaccount_mod.Config,
+    c: cache_mod.Cache,
+) anyerror!credential_mod.AccessTokenHandle {
+    g_test_oa_token = credential_mod.DefaultAccessToken.init(
+        cfg.app_id,
+        cfg.app_secret,
+        credential_mod.CacheKeyOfficialAccountPrefix,
+        c,
+    );
+    g_test_oa_factory_cache = c;
+    g_test_oa_factory_calls += 1;
+    return g_test_oa_token.asHandle();
+}
+
+fn failingOfficialAccountTokenFactory(
+    _: officialaccount_mod.Config,
+    _: cache_mod.Cache,
+) anyerror!credential_mod.AccessTokenHandle {
+    return error.FactoryBoom;
+}
+
+test "Wechat.getOfficialAccount 无 cache（cfg 与全局都为空）返回 CacheUnavailable" {
+    var wc = Wechat.init();
+    const result = wc.getOfficialAccount(
+        std.testing.allocator,
+        .{ .app_id = "wx-oa", .app_secret = "s" },
+        testOfficialAccountTokenFactory,
+    );
+    try std.testing.expectError(error.CacheUnavailable, result);
+}
+
+test "Wechat.getOfficialAccount 回退到全局 cache 并据此构造 Context" {
+    const allocator = std.testing.allocator;
+    const mem = try cache_mod.Memory.create(allocator);
+    defer {
+        mem.deinit();
+        allocator.destroy(mem);
+    }
+
+    g_test_oa_factory_cache = null;
+    g_test_oa_factory_calls = 0;
+
+    var wc = Wechat.init();
+    wc.setCache(mem.asCache());
+
+    var oa = try wc.getOfficialAccount(
+        allocator,
+        .{ .app_id = "wx-oa", .app_secret = "s" },
+        testOfficialAccountTokenFactory,
+    );
+
+    // 工厂被调用一次，且收到的是「解析后」的 cache（cfg.cache 为空 → 回退全局）。
+    try std.testing.expectEqual(@as(usize, 1), g_test_oa_factory_calls);
+    try std.testing.expect(g_test_oa_factory_cache.?.ctx == mem.asCache().ctx);
+
+    const ctx = oa.getContext();
+    try std.testing.expectEqualStrings("wx-oa", ctx.config.app_id);
+    try std.testing.expectEqualStrings("s", ctx.config.app_secret);
+    try std.testing.expect(ctx.config.cache != null);
+    try std.testing.expect(ctx.config.cache.?.ctx == mem.asCache().ctx);
+}
+
+test "Wechat.getOfficialAccount 的 cfg.cache 优先于全局 cache" {
+    const allocator = std.testing.allocator;
+    const global_mem = try cache_mod.Memory.create(allocator);
+    defer {
+        global_mem.deinit();
+        allocator.destroy(global_mem);
+    }
+    const cfg_mem = try cache_mod.Memory.create(allocator);
+    defer {
+        cfg_mem.deinit();
+        allocator.destroy(cfg_mem);
+    }
+
+    g_test_oa_factory_cache = null;
+
+    var wc = Wechat.init();
+    wc.setCache(global_mem.asCache());
+
+    var oa = try wc.getOfficialAccount(
+        allocator,
+        .{ .app_id = "wx-oa-pref", .cache = cfg_mem.asCache() },
+        testOfficialAccountTokenFactory,
+    );
+    try std.testing.expect(g_test_oa_factory_cache.?.ctx == cfg_mem.asCache().ctx);
+    try std.testing.expect(oa.getContext().config.cache.?.ctx == cfg_mem.asCache().ctx);
+}
+
+test "Wechat.getOfficialAccount 传播工厂抛出的错误" {
+    const allocator = std.testing.allocator;
+    const mem = try cache_mod.Memory.create(allocator);
+    defer {
+        mem.deinit();
+        allocator.destroy(mem);
+    }
+
+    var wc = Wechat.init();
+    wc.setCache(mem.asCache());
+    const result = wc.getOfficialAccount(
+        allocator,
+        .{ .app_id = "wx-oa-err" },
+        failingOfficialAccountTokenFactory,
+    );
+    try std.testing.expectError(error.FactoryBoom, result);
+}

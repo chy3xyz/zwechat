@@ -51,3 +51,16 @@ test "Pay.getTransfer / getRedpacket 返回实例" {
     const r = p.getRedpacket();
     try std.testing.expectEqualStrings("wx-p", r.cfg.app_id);
 }
+
+test "Pay.getOrder / getRefund / getNotify 均继承 cfg" {
+    var p = Pay.init(.{ .app_id = "wx-p", .mch_id = "m", .key = "k" });
+    const o = p.getOrder();
+    try std.testing.expectEqualStrings("m", o.cfg.mch_id);
+    try std.testing.expectEqualStrings("k", o.cfg.key);
+    const rf = p.getRefund();
+    try std.testing.expectEqualStrings("wx-p", rf.cfg.app_id);
+    try std.testing.expectEqualStrings("m", rf.cfg.mch_id);
+    const n = p.getNotify();
+    try std.testing.expectEqualStrings("wx-p", n.cfg.app_id);
+    try std.testing.expectEqualStrings("k", n.cfg.key);
+}

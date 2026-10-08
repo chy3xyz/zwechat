@@ -5,6 +5,46 @@ All notable changes to `zwechat` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`virtualpayment` 投诉 / 上传 / 签名三组接口的字段名与官方契约不符（其中两个接口此前完全不可用）**：对照微信官方「小程序虚拟支付」文档逐个核对本模块全部请求 / 响应结构，修掉 8 处字段名或字段形态错误。这些错误在真实调用时表现为 `DecodeError`（响应字段对不上）或 `268490002`（请求参数字段错误）；而此前的 mock 夹具是照错误实现写的，所以当时的全量测试全绿也没暴露：
+  1. `get_complaint_list`：请求分页字段官方为 `offset` / `limit`（**非** `page` / `page_size`，且官方标注**必填**）；响应列表字段官方为 `complaints`（**非** `complaint_list`）。
+  2. 投诉单元素结构：官方远不止旧 `ComplaintInfo` 的 3 个字段 —— 改为 `ComplaintItem`（16 字段 + 3 个子结构 `ComplaintOrderInfo` / `ComplaintServiceOrderInfo` / `ComplaintMedia`）；其中 `create_time`（时间戳）官方实为字符串时间 `complaint_time`，`state` 官方实为枚举字符串 `complaint_state`。
+  3. `get_complaint_detail`：详情在 `complaint` 对象里，**不在顶层**（原实现读顶层 `complaint_id` / `state`，永远取不到）。
+  4. `get_negotiation_history`：补官方必填 `offset` / `limit`；响应补 `total` 与 `history[]`（新类型 `NegotiationHistory`）。
+  5. `response_complaint`：补 `response_images`（图片文件 ID 列表，取自 `upload_vp_file` 返回的 `file_id`；官方标为**必填**，故为空时也写 `[]` 而非省略）。
+  6. `upload_vp_file`：请求体原为 `{"env":1}`，缺官方必填的图片内容 —— 补 `base64_img` / `img_url` / `file_name`（**该接口此前不可能成功**）。
+  7. `get_upload_file_sign`：请求体原为 `{"env":1,"file_id":"…"}`，官方字段是 `wxpay_url` / `convert_cos` / `complaint_id`；响应补 `cos_url`（**该接口此前不可能成功**）。
+  8. 附带：`query_withdraw_order` 响应补 `fail_reason`，并给 `withdraw_success_timestamp` 加 string / number 双形态解析（官方标为 string、Go 参考与既有夹具为 number）；`ComplaintItem` / `ComplaintMedia` 的字段名严格照官方（无 Go 参考兜底）。
+- **`virtualpayment` 序列化器会吞掉 `offset=0`**：本模块用「零值省略」近似 Go 的 `omitempty`，但 `offset` / `limit`（`get_complaint_list` / `get_negotiation_history`）与 `response_images`（`response_complaint`）都是官方**必填**字段 —— 首屏 `offset=0` 被省略后会直接触发 `268490002`，空图片列表被省略同样如此。新增 `isAlwaysWritten`，让这三个字段即使取「零值」（`0` / `[]`）也写进请求体。
+- **`tcb` 解析器读不到微信真实响应（两个接口 100% 不可用）**：`DownloadedFile.file_id` 对应的真实 JSON key 是 `fileid`（不是 `file_id`），`Pager` 的 key 是 PascalCase 的 `Offset` / `Limit` / `Total`（不是全小写）—— 原实现在真实响应上必然 `DecodeError`。现给两者补 `jsonParse` 钩子（`DownloadedFile.jsonParse` / `Pager.jsonParse`）做大小写不敏感收取，**公开字段名保持不变**；并给本模块唯一的解析入口 `parseParsed` 补上 `.ignore_unknown_fields = true`（与全仓纪律一致，避免上游加字段即 `DecodeError`）。
+
+### Changed
+
+- **`virtualpayment` 公开 API 改名 / 删除（下游会编译失败）** —— 为对齐官方契约，以下旧符号已改名或删除：
+  - 字段 `GetComplaintListRequest.page` → `GetComplaintListRequest.offset`
+  - 字段 `GetComplaintListRequest.page_size` → `GetComplaintListRequest.limit`
+  - 字段 `GetComplaintListResponse.complaint_list` → `GetComplaintListResponse.complaints`（元素类型也由 `ComplaintInfo` 变为 `ComplaintItem`）
+  - 类型 `ComplaintInfo` → `ComplaintItem`（字段集合大幅扩充）
+  - 字段 `ComplaintInfo.complaint_id` → `ComplaintItem.complaint_id`
+  - 字段 `ComplaintInfo.create_time` → `ComplaintItem.complaint_time`（类型 `i64` → `[]const u8`）
+  - 字段 `ComplaintInfo.state` → `ComplaintItem.complaint_state`（类型 `i64` → `[]const u8`）
+  - 字段 `GetComplaintDetailResponse.complaint_id` 与 `GetComplaintDetailResponse.state` → 合并为 `GetComplaintDetailResponse.complaint: ?ComplaintItem`（详情整体进 `complaint` 对象）
+  - 字段 `GetUploadFileSignRequest.file_id` → **删除**，改用 `GetUploadFileSignRequest.wxpay_url`（并新增 `convert_cos` / `complaint_id`）
+
+### Added
+
+- **`virtualpayment` 新公开类型**：`ComplaintItem`、`ComplaintOrderInfo`、`ComplaintServiceOrderInfo`、`ComplaintMedia`、`NegotiationHistory`；`QueryWithdrawOrderResponse.jsonParse`（双形态字段兼容入口）、`UploadVPFileRequest.base64_img` / `img_url` / `file_name`、`ResponseComplaintRequest.response_images`、`GetUploadFileSignResponse.cos_url`、`GetNegotiationHistoryResponse.total` / `history`。
+- **公开 API 真实调用测试补齐（覆盖 `transport_ctx` / 解析钩子 / URL 常量等此前从不被调用的声明）**：按仓库自带的 AST 提取器（`tools/api_surface.zig`）口径复核，全仓 **983 个顶层 `pub fn`** 中一度有 **186 个**（粗口径：函数名从未出现在任何 `test` 块里）从未被调用 —— 而 Zig 是**懒分析**，未被调用的函数体根本不参与编译。已实际踩雷：`Subscribe.getCategory` 的返回类型内联了一份与函数体不同源的匿名 struct，**一被调用就编译失败**，而 `zig build` 全绿。本轮为每个零调用公开 API 各补一条真实调用测试（mock transport），并在收尾时改用更严的复核口径（全仓范围内按「`叶名(` 调用点计数」统计，排除字段声明与文档引用）：**当前非 `main` 的顶层 `pub fn` 零调用数 = 0**（三个 `main` 分别由 `zig build run` / `zig build live-probe` / `zig build bench` 覆盖）。收尾复核另外揪出并补测了 7 个此前的漏网者：`Pay.getOrder` / `Pay.getRefund` / `Pay.getNotify`、`DataCube.getArticleSummary` / `DataCube.getInterfaceSummary`、`URLLink.query`、`Ocr.plateNumber`，以及 v3 的默认 Io 入口 `pay.v3.notify.verifySignature`（此前的 `verifySignatureWithIo` 有测试，而默认入口没有）。
+
+- **手写 JSON 编码收敛：最后 7 处「调用方值被裸插进 JSON 请求体」的站点迁到 `util/json.zig`**：新增多字段 helper `stringFieldsObject`（含 `pub const StringField`，字段名与值都过 RFC 8259 转义，正常值下输出与手写 `allocPrint` **逐字节一致**）；迁移 `openplatform/context/access_token.zig`（component token / authorizer token 两处三字段体）、`openplatform/account/mod.zig`（`createOpenAccount` / `getOpenAccount` 单字段 + `bind` / `unbind` 双字段，共 4 处）、`officialaccount/datacube` 与 `miniprogram/analysis` 的 `begin_date` / `end_date` 体。此前这些位置的值一旦含 `"` 或 `\x00`–`\x1F` 控制字符就会拼出非法 JSON（历史上 `tcb` 的 query、`msg_sec_check` 的 content 就出过这类事故）。全仓扫描确认：`"key":"{s}"` 形态在 `src/` 内**已不再命中任何发往微信的请求体**，其余命中均为 mock 响应夹具、HTTP 头、`{d}` 数字插值，以及调用方自带 JSON 片段的契约点（`urlscheme` 的 `jump_wxa`、`draft.add` 的 `articles_json`、`subscribe`/`message` 的 `data` —— 这些**不能**转义，转了反而破坏契约）。
+
+### Tests
+
+- 测试总数 1157 → **1326**（其中 fuzz 测试 5 条；另 1 条为环境相关 skip）。
+
 ## [0.6.0] — 2026-10-08
 
 ### Fixed

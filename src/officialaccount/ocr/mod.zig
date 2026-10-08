@@ -234,6 +234,24 @@ test "driving / driverLicense 命中正确 URL" {
     try std.testing.expect(std.mem.find(u8, r2, "310101199001011234") != null);
 }
 
+test "plateNumber 命中正确 URL（公开 API 真实调用）" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cv/ocr/platenum?img_url=u&access_token=token-abc", .{
+        .body = "{\"plate_num\":\"沪A12345\"}",
+    });
+
+    var stub = StubToken{};
+    var ctx = makeCtx(&stub);
+    var o = Ocr.init(&ctx, allocator);
+    o.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    const resp = try o.plateNumber("u");
+    defer allocator.free(resp);
+    try std.testing.expect(std.mem.find(u8, resp, "沪A12345") != null);
+}
+
 test "errcode 40001 且 handle 不支持作废：最多两次请求后仍返回 ApiError" {
     const allocator = std.testing.allocator;
     var mt = util_http.MockTransport.init(allocator);

@@ -619,6 +619,136 @@ test "realTimeLogSearch 字符串检索条件进 query 前转义（正常输入�
     try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
 }
 
+test "getPerformance POST 性能数据并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"default_time_data\":\"[{\\\"0\\\":1}]\",\"compare_time_data\":\"[{\\\"0\\\":2}]\"}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var o = Operation.init(&ctx, allocator);
+    o.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try o.getPerformance(.{
+        .cost_time_type = 1,
+        .default_start_time = 1725000000,
+        .default_end_time = 1725600000,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxaapi/log/get_performance?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"cost_time_type\":1") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"default_start_time\":1725000000") != null);
+    try std.testing.expectEqualStrings("[{\"0\":1}]", parsed.value.default_time_data);
+}
+
+test "getVersionList GET 客户端版本并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"cvlist\":[{\"type\":1,\"client_version_list\":[\"8.0.0\"]}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var o = Operation.init(&ctx, allocator);
+    o.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try o.getVersionList();
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.GET, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxaapi/log/get_client_version?access_token=token-abc", tt.uri);
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.cvlist[0].type);
+    try std.testing.expectEqualStrings("8.0.0", parsed.value.cvlist[0].client_version_list[0]);
+}
+
+test "getFeedbackList GET 用户反馈列表并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"total_num\":1,\"list\":[{\"record_id\":5,\"content\":\"卡顿\",\"type\":2}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var o = Operation.init(&ctx, allocator);
+    o.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try o.getFeedbackList(.{ .page = 1, .num = 10, .type = 2 });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.GET, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxaapi/feedback/list?access_token=token-abc&page=1&num=10&type=2", tt.uri);
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.total_num);
+    try std.testing.expectEqualStrings("卡顿", parsed.value.list[0].content);
+    try std.testing.expectEqual(@as(i64, 5), parsed.value.list[0].record_id);
+}
+
+test "getJsErrDetail POST js 错误详情并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"totalCount\":1,\"openid\":\"oA\",\"data\":[{\"Count\":\"3\",\"errorMsg\":\"TypeError\",\"errorMsgMd5\":\"md5-1\",\"openId\":\"oA\"}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var o = Operation.init(&ctx, allocator);
+    o.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try o.getJsErrDetail(.{
+        .startTime = "20240901",
+        .endTime = "20240907",
+        .errorMsgMd5 = "md5-1",
+        .limit = 10,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxaapi/log/jserr_detail?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"startTime\":\"20240901\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"errorMsgMd5\":\"md5-1\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"limit\":10") != null);
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.totalCount);
+    try std.testing.expectEqualStrings("TypeError", parsed.value.data[0].errorMsg);
+}
+
+test "getJsErrList POST js 错误列表并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"totalCount\":1,\"data\":[{\"errorMsg\":\"TypeError\",\"errorMsgMd5\":\"md5-2\",\"uv\":7,\"pv\":9}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var o = Operation.init(&ctx, allocator);
+    o.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try o.getJsErrList(.{
+        .errType = "1",
+        .startTime = "20240901",
+        .endTime = "20240907",
+        .orderby = "uv",
+        .desc = "1",
+        .limit = 20,
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxaapi/log/jserr_list?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"errType\":\"1\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"orderby\":\"uv\"") != null);
+    try std.testing.expectEqual(@as(i64, 7), parsed.value.data[0].uv);
+    try std.testing.expectEqual(@as(i64, 9), parsed.value.data[0].pv);
+}
+
+test "getGrayReleasePlan GET 分阶段发布详情并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"gray_release_plan\":{\"status\":1,\"create_timestamp\":1725000000,\"gray_percentage\":30,\"support_experiencer_first\":true}}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var o = Operation.init(&ctx, allocator);
+    o.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try o.getGrayReleasePlan();
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.GET, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/getgrayreleaseplan?access_token=token-abc", tt.uri);
+    try std.testing.expectEqual(@as(i64, 30), parsed.value.gray_release_plan.gray_percentage);
+    try std.testing.expect(parsed.value.gray_release_plan.support_experiencer_first);
+    try std.testing.expectEqual(@as(i64, 1725000000), parsed.value.gray_release_plan.create_timestamp);
+}
+
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
 
 const retry_testing = @import("../retry_testing.zig");

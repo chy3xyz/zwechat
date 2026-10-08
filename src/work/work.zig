@@ -787,3 +787,98 @@ test "Work.newDefaultWork 的 access_token handle 支持 invalidate：40001 后�
     try std.testing.expectEqualStrings("work-token-v2", refreshed);
     try std.testing.expectEqual(@as(usize, 2), stub.calls);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 子模块懒加载工厂：逐个真实实例化
+//
+// Zig 只分析被实例化的函数体，下面这些 `getXxx` 在过去从未被真实调用过，
+// 其函数体（连同它实例化的子模块 `init`）一直处于「未分析」状态——签名或字段
+// 一旦漂移，要等到调用方首次使用才炸。这里把所有工厂一次性调一遍，并断言它们
+// 共享同一个 `ctx` 与调用方传入的 allocator。
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "Work 各 getXxx 工厂真实实例化并共享同一 ctx / allocator" {
+    var fbabuf: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&fbabuf);
+    const allocator = fba.allocator();
+
+    var state = TestHandleState{ .token = "work-factory-token" };
+    var w = Work.newWork(
+        .{ .corp_id = "ww-factory", .agent_id = "1000009" },
+        makeFakeHandle(&state),
+        null,
+    );
+    const ctx: *Context = &w.ctx;
+
+    const oa = w.getOauth(allocator);
+    try std.testing.expect(oa.ctx == ctx);
+    try std.testing.expect(oa.allocator.ptr == allocator.ptr);
+
+    const msg = w.getMessage(allocator);
+    try std.testing.expect(msg.ctx == ctx);
+    try std.testing.expect(msg.allocator.ptr == allocator.ptr);
+
+    const ec = w.getExternalContact(allocator);
+    try std.testing.expect(ec.ctx == ctx);
+    try std.testing.expect(ec.allocator.ptr == allocator.ptr);
+
+    const inv = w.getInvoice(allocator);
+    try std.testing.expect(inv.ctx == ctx);
+    try std.testing.expect(inv.allocator.ptr == allocator.ptr);
+
+    const addr = w.getAddressList(allocator);
+    try std.testing.expect(addr.ctx == ctx);
+    try std.testing.expect(addr.allocator.ptr == allocator.ptr);
+
+    const chat = w.getAppChat(allocator);
+    try std.testing.expect(chat.ctx == ctx);
+    try std.testing.expect(chat.allocator.ptr == allocator.ptr);
+
+    const ck = w.getCheckin(allocator);
+    try std.testing.expect(ck.ctx == ctx);
+    try std.testing.expect(ck.allocator.ptr == allocator.ptr);
+
+    const kf_mod = w.getKf(allocator);
+    try std.testing.expect(kf_mod.ctx == ctx);
+    try std.testing.expect(kf_mod.allocator.ptr == allocator.ptr);
+
+    const mat = w.getMaterial(allocator);
+    try std.testing.expect(mat.ctx == ctx);
+    try std.testing.expect(mat.allocator.ptr == allocator.ptr);
+
+    const audit = w.getMsgAudit(allocator);
+    try std.testing.expect(audit.ctx == ctx);
+    try std.testing.expect(audit.allocator.ptr == allocator.ptr);
+
+    // robot 是无 ctx 的子模块（webhook 推送不需要 access_token），只持 allocator。
+    const bot_robot = w.getRobot(allocator);
+    try std.testing.expect(bot_robot.allocator.ptr == allocator.ptr);
+    try std.testing.expect(bot_robot.allocator.vtable == allocator.vtable);
+
+    const srv = w.getServer();
+    try std.testing.expect(srv.ctx == ctx);
+
+    const bot = w.getSmartbot(allocator);
+    try std.testing.expect(bot.ctx == ctx);
+    try std.testing.expect(bot.allocator.ptr == allocator.ptr);
+}
+
+test "Work.setJsTicketHandle 注入后 getJsTicket 走注入的句柄" {
+    const allocator = std.testing.allocator;
+    var ticket_state = TicketHandleTestState{ .ticket = "injected-work-ticket" };
+
+    var w = Work.newWork(
+        .{ .corp_id = "ww-set-handle" }, // cache 为 null
+        .{ .ptr = undefined, .vtable = undefined },
+        null,
+    );
+
+    // 注入前：既没有 js_ticket_handle 也没有 cache，回退到缓存侧 → CacheUnavailable。
+    try std.testing.expectError(error.CacheUnavailable, w.getJsTicket(allocator, "ak"));
+
+    // 注入后：getJsTicket 直接转发给注入的句柄（不再尝试缓存侧）。
+    w.setJsTicketHandle(makeFakeJsTicketHandle(&ticket_state));
+    try std.testing.expect(w.ctx.js_ticket_handle != null);
+    const ticket = try w.getJsTicket(allocator, "ak");
+    try std.testing.expectEqualStrings("injected-work-ticket", ticket);
+}

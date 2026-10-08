@@ -89,6 +89,44 @@ pub fn stringFieldObject(
     return buf.toOwnedSlice(allocator);
 }
 
+/// 「多字段字符串对象」的一个字段：`name` 是 JSON 键，`value` 是值。
+pub const StringField = struct {
+    /// JSON 字段名（按 JSON 字符串规则转义）。
+    name: []const u8,
+    /// 字段值（按 JSON 字符串规则转义）。
+    value: []const u8,
+};
+
+/// 拼一个多字段字符串对象：`{"k1":"v1","k2":"v2"}`。
+///
+/// `stringFieldObject` 只覆盖单字段，多字段站点此前只能各自手写
+/// `std.fmt.allocPrint(alloc, "{{\"a\":\"{s}\",\"b\":\"{s}\"}}", .{...})`——
+/// 值含 `"` 或控制字符时就会拼出非法 JSON。本函数把这类站点统一到同一套转义上。
+///
+/// 字段名与值都经 `appendEscapedString`，**字段顺序即传入顺序**；输出与手写的
+/// 等价 `allocPrint` 在正常值下逐字节相同（无多余空白）。空 `fields` 产出 `{}`。
+///
+/// 返回的切片由 `allocator` 分配，调用方负责 `free`。
+/// 错误集：`error{OutOfMemory}`。
+pub fn stringFieldsObject(
+    allocator: std.mem.Allocator,
+    fields: []const StringField,
+) std.mem.Allocator.Error![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.append(allocator, '{');
+    for (fields, 0..) |field, i| {
+        if (i != 0) try buf.append(allocator, ',');
+        try buf.append(allocator, '"');
+        try appendEscapedString(allocator, &buf, field.name);
+        try buf.appendSlice(allocator, "\":\"");
+        try appendEscapedString(allocator, &buf, field.value);
+        try buf.append(allocator, '"');
+    }
+    try buf.append(allocator, '}');
+    return buf.toOwnedSlice(allocator);
+}
+
 /// `appendEscapedString` 的便捷包装：返回带首尾双引号的 JSON 字符串字面量。
 /// 返回的切片由 `allocator` 分配，调用方负责 `free`。
 pub fn stringLiteral(allocator: std.mem.Allocator, s: []const u8) std.mem.Allocator.Error![]u8 {
@@ -180,6 +218,62 @@ test "stringFieldObject 安全输入与旧 allocPrint 字节一致" {
     const body = try stringFieldObject(allocator, "media_id", "MEdiaID_123");
     defer allocator.free(body);
     try std.testing.expectEqualStrings("{\"media_id\":\"MEdiaID_123\"}", body);
+}
+
+test "stringFieldsObject 两字段与手写 allocPrint 字节一致" {
+    const allocator = std.testing.allocator;
+    const body = try stringFieldsObject(allocator, &.{
+        .{ .name = "begin_date", .value = "2024-01-01" },
+        .{ .name = "end_date", .value = "2024-01-31" },
+    });
+    defer allocator.free(body);
+    // 与 `{{"begin_date":"{s}","end_date":"{s}"}}` 逐字节相同：键顺序一致、无多余空白。
+    try std.testing.expectEqualStrings(
+        "{\"begin_date\":\"2024-01-01\",\"end_date\":\"2024-01-31\"}",
+        body,
+    );
+}
+
+test "stringFieldsObject 值中的引号转义为 \\\"" {
+    const allocator = std.testing.allocator;
+    const body = try stringFieldsObject(allocator, &.{
+        .{ .name = "component_verify_ticket", .value = "a\"b" },
+    });
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("{\"component_verify_ticket\":\"a\\\"b\"}", body);
+}
+
+test "stringFieldsObject 换行与控制字符分别转义为 \\n 与 \\u0001" {
+    const allocator = std.testing.allocator;
+    const body = try stringFieldsObject(allocator, &.{
+        .{ .name = "content", .value = "line1\nline2\x01" },
+    });
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("{\"content\":\"line1\\nline2\\u0001\"}", body);
+}
+
+test "stringFieldsObject 空数组产出空对象" {
+    const allocator = std.testing.allocator;
+    const body = try stringFieldsObject(allocator, &.{});
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("{}", body);
+}
+
+test "stringFieldsObject 输出可被 std.json 读回（引号 / 换行 / 控制字符）" {
+    const allocator = std.testing.allocator;
+    const body = try stringFieldsObject(allocator, &.{
+        .{ .name = "k1", .value = "he said \"hi\"\nbye\x01" },
+        .{ .name = "k2", .value = "tail" },
+    });
+    defer allocator.free(body);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(
+        "he said \"hi\"\nbye\x01",
+        parsed.value.object.get("k1").?.string,
+    );
+    try std.testing.expectEqualStrings("tail", parsed.value.object.get("k2").?.string);
 }
 
 test "stringLiteral 与 stringFieldObject 的转义一致" {

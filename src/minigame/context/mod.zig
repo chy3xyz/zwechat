@@ -52,3 +52,74 @@ test "Context 自定义配置" {
     try std.testing.expectEqualStrings("wx-mg-ctx", ctx.config.app_id);
     try std.testing.expectEqualStrings("mg-ctx-secret", ctx.config.app_secret);
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// getAccessToken 透传（此前零调用）
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// 固定响应的 fetcher 桩（不经网络）。
+fn stubMinigameFetcher(_: *anyopaque, allocator: std.mem.Allocator, _: []const u8) credential.CredentialError![]u8 {
+    return allocator.dupe(u8, "{\"access_token\":\"minigame_tok\",\"expires_in\":7200}");
+}
+
+/// 直接失败的 fetcher 桩，用于验证错误透传。
+fn failingMinigameFetcher(_: *anyopaque, _: std.mem.Allocator, _: []const u8) credential.CredentialError![]u8 {
+    return credential.CredentialError.HttpError;
+}
+
+test "Context.getAccessToken 透传到 access_token_handle 并返回 token（真实 DefaultAccessToken + 桩 fetcher）" {
+    const allocator = std.testing.allocator;
+    const memory = try @import("../../cache/memory.zig").Memory.create(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+
+    var dat = credential.DefaultAccessToken.initWithFetcher(
+        "wx-mg",
+        "secret",
+        credential.CacheKeyMiniProgramPrefix,
+        memory.asCache(),
+        stubMinigameFetcher,
+        undefined,
+    );
+
+    var ctx = Context{
+        .config = .{ .app_id = "wx-mg", .cache = memory.asCache() },
+        .access_token_handle = dat.asHandle(),
+    };
+
+    const tok = try ctx.getAccessToken(allocator);
+    defer allocator.free(tok);
+    try std.testing.expectEqualStrings("minigame_tok", tok);
+
+    // 二级调用命中 DefaultAccessToken 的缓存（同一 handle，不再回源）。
+    const tok2 = try ctx.getAccessToken(allocator);
+    defer allocator.free(tok2);
+    try std.testing.expectEqualStrings("minigame_tok", tok2);
+}
+
+test "Context.getAccessToken 透传 handle 的错误" {
+    const allocator = std.testing.allocator;
+    const memory = try @import("../../cache/memory.zig").Memory.create(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+
+    var dat = credential.DefaultAccessToken.initWithFetcher(
+        "wx-mg-fail",
+        "secret",
+        credential.CacheKeyMiniProgramPrefix,
+        memory.asCache(),
+        failingMinigameFetcher,
+        undefined,
+    );
+
+    var ctx = Context{
+        .config = .{ .app_id = "wx-mg-fail", .cache = memory.asCache() },
+        .access_token_handle = dat.asHandle(),
+    };
+
+    try std.testing.expectError(credential.CredentialError.HttpError, ctx.getAccessToken(allocator));
+}

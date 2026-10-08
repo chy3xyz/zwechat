@@ -791,6 +791,275 @@ test "pullUpload POST 拉取上传并解析（回归：postJson→postBody 泛�
     try std.testing.expectEqual(@as(i64, 789), parsed.value.task_id);
 }
 
+test "singleFileUpload multipart 单文件上传并解析（回归：泛型 T 参数错位）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"media_id\":321}" };
+    defer tt.deinit(allocator);
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(CapturingTransport.dispatch, @ptrCast(&tt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+
+    var parsed = try m.singleFileUpload(.{
+        .media_name = "ep1.mp4",
+        .media_type = "1",
+        .media_data = "fake-video-bytes",
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/singlefileupload?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "name=\"media_data\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "fake-video-bytes") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "name=\"media_name\"") != null);
+    try std.testing.expectEqual(@as(i64, 321), parsed.value.media_id);
+}
+
+test "applyUpload POST 申请分片上传并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"upload_id\":\"up-1\"}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+    m.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try m.applyUpload(.{ .media_name = "ep2.mp4", .media_type = "1" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/applyupload?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"media_name\":\"ep2.mp4\"") != null);
+    try std.testing.expectEqualStrings("up-1", parsed.value.upload_id);
+}
+
+test "uploadPart multipart 上传分片并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"etag\":\"etag-1\"}" };
+    defer tt.deinit(allocator);
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(CapturingTransport.dispatch, @ptrCast(&tt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+
+    var parsed = try m.uploadPart(.{
+        .upload_id = "up-1",
+        .part_number = 2,
+        .resource_type = 1,
+        .data = "part-bytes",
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/uploadpart?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "name=\"upload_id\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "up-1") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "name=\"part_number\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "part-bytes") != null);
+    try std.testing.expectEqualStrings("etag-1", parsed.value.etag);
+}
+
+test "commitUpload POST 确认分片上传并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"media_id\":654}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+    m.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try m.commitUpload(.{
+        .upload_id = "up-1",
+        .media_part_infos = &[_]PartInfo{.{ .part_number = 1, .etag = "etag-1" }},
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/commitupload?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"upload_id\":\"up-1\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"part_number\":1") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"etag\":\"etag-1\"") != null);
+    try std.testing.expectEqual(@as(i64, 654), parsed.value.media_id);
+}
+
+test "listMedia POST 媒体列表并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"media_info_list\":[{\"media_id\":7,\"name\":\"ep1\",\"audit_detail\":{\"status\":2}}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+    m.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try m.listMedia(.{ .drama_id = 9, .limit = 20, .offset = 0 });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/listmedia?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"drama_id\":9") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"limit\":20") != null);
+    try std.testing.expectEqual(@as(i64, 7), parsed.value.media_info_list[0].media_id);
+    try std.testing.expectEqual(@as(i64, 2), parsed.value.media_info_list[0].audit_detail.?.status);
+}
+
+test "getMedia POST 媒资详情并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"media_info\":{\"media_id\":7,\"name\":\"ep1\",\"mp4_url\":\"https://cdn/e1.mp4\"}}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+    m.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try m.getMedia(.{ .media_id = 7 });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/getmedia?access_token=token-abc", tt.uri);
+    try std.testing.expectEqualStrings("{\"media_id\":7}", tt.payload);
+    try std.testing.expectEqualStrings("ep1", parsed.value.media_info.name);
+    try std.testing.expectEqualStrings("https://cdn/e1.mp4", parsed.value.media_info.mp4_url);
+}
+
+test "getMediaLink POST 播放链接并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"media_info\":{\"media_id\":7,\"duration\":120,\"hls_url\":\"https://cdn/e1.m3u8\"}}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+    m.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try m.getMediaLink(.{ .media_id = 7, .t = 1725000000, .us = "u1", .expr = 3600, .rlimit = 1 });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/getmedialink?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"media_id\":7") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"us\":\"u1\"") != null);
+    try std.testing.expectEqual(@as(i64, 120), parsed.value.media_info.duration);
+    try std.testing.expectEqualStrings("https://cdn/e1.m3u8", parsed.value.media_info.hls_url);
+}
+
+test "deleteMedia POST 删除媒体并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+    m.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try m.deleteMedia(.{ .media_id = 7 });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/deletemedia?access_token=token-abc", tt.uri);
+    try std.testing.expectEqualStrings("{\"media_id\":7}", tt.payload);
+    try std.testing.expectEqual(@as(i64, 0), parsed.value.errcode);
+}
+
+test "auditDrama POST 剧目审核并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"drama_id\":88}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+    m.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try m.auditDrama(.{
+        .name = "剧名",
+        .media_count = 1,
+        .media_id_list = &[_]i64{7},
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/auditdrama?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"name\":\"剧名\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"media_id_list\":[7]") != null);
+    try std.testing.expectEqual(@as(i64, 88), parsed.value.drama_id);
+}
+
+test "listDramas POST 剧目列表并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"drama_info_list\":[{\"drama_id\":88,\"name\":\"剧名\",\"media_count\":1}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+    m.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try m.listDramas(.{ .limit = 10, .offset = 0 });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/listdramas?access_token=token-abc", tt.uri);
+    try std.testing.expectEqualStrings("{\"limit\":10,\"offset\":0}", tt.payload);
+    try std.testing.expectEqual(@as(i64, 88), parsed.value.drama_info_list[0].drama_id);
+    try std.testing.expectEqualStrings("剧名", parsed.value.drama_info_list[0].name);
+}
+
+test "getDrama POST 剧目详情并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"drama_info\":{\"drama_id\":88,\"producer\":\"制作方\",\"audit_detail\":{\"status\":2}}}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+    m.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try m.getDrama(.{ .drama_id = 88 });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/getdrama?access_token=token-abc", tt.uri);
+    try std.testing.expectEqualStrings("{\"drama_id\":88}", tt.payload);
+    try std.testing.expectEqualStrings("制作方", parsed.value.drama_info.producer);
+    try std.testing.expectEqual(@as(i64, 2), parsed.value.drama_info.audit_detail.?.status);
+}
+
+test "getCdnUsageData POST CDN 用量并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"data_interval\":1440,\"item_list\":[{\"time\":1725000000,\"value\":1024}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+    m.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try m.getCdnUsageData(.{ .start_time = 1725000000, .end_time = 1725600000 });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/getcdnusagedata?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"start_time\":1725000000") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"data_interval\":1440") != null);
+    try std.testing.expectEqual(@as(i64, 1440), parsed.value.data_interval);
+    try std.testing.expectEqual(@as(i64, 1024), parsed.value.item_list[0].value);
+}
+
+test "getCdnLogs POST CDN 日志并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"total_count\":1,\"domestic_cdn_logs\":[{\"date\":20240901,\"name\":\"log-1\",\"url\":\"https://cdn/log1.gz\"}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var m = MiniDrama.init(&ctx, allocator);
+    m.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try m.getCdnLogs(.{ .start_time = 1725000000, .end_time = 1725600000 });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/getcdnlogs?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"limit\":100") != null);
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.total_count);
+    try std.testing.expectEqualStrings("log-1", parsed.value.domestic_cdn_logs[0].name);
+    try std.testing.expectEqualStrings("https://cdn/log1.gz", parsed.value.domestic_cdn_logs[0].url);
+}
+
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
 
 const retry_testing = @import("../retry_testing.zig");

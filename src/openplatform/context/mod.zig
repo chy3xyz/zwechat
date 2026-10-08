@@ -298,3 +298,108 @@ test "TokenMutex 已迁移为 std.Io.Mutex：持锁期间同线程 tryLock 返�
     ctx.token_mutex.lock();
     ctx.token_mutex.unlock();
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 委托方法：Context.getAuthrAccessToken / Context.refreshAuthrAccessToken
+// （两个 pub 方法只是把调用转发到 access_token.zig，这里真实走一遍完整链路）
+// ──────────────────────────────────────────────────────────────────────────────
+
+test "Context.refreshAuthrAccessToken 经注入 transport 完成 component→authorizer 换取并双写缓存" {
+    const allocator = std.testing.allocator;
+    const util_http = @import("../../util/http.zig");
+
+    const memory = try @import("../../cache/memory.zig").Memory.create(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+
+    var mock = util_http.MockTransport.init(allocator);
+    defer mock.deinit();
+    try mock.addRoute(
+        "https://api.weixin.qq.com/cgi-bin/component/api_component_token",
+        .{ .body = "{\"component_access_token\":\"comp-tok\",\"expires_in\":7200}" },
+    );
+    try mock.addRoute(
+        "https://api.weixin.qq.com/cgi-bin/component/api_authorizer_token?component_access_token=comp-tok",
+        .{ .body = "{\"authorizer_appid\":\"wx-authr-1\",\"authorizer_access_token\":\"12_authr_tok\",\"expires_in\":7200,\"authorizer_refresh_token\":\"rotated_rt\"}" },
+    );
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-op", .app_secret = "sec", .cache = memory.asCache() },
+        .transport = util_http.MockTransport.dispatch,
+        .transport_ctx = @ptrCast(&mock),
+    };
+
+    // 1) 强制刷新：verify_ticket 非空 → 两次 HTTP（component + authorizer）
+    var token = try ctx.refreshAuthrAccessToken(allocator, "ticket", "wx-authr-1", "old_rt");
+    defer token.deinit(allocator);
+    try std.testing.expectEqualStrings("12_authr_tok", token.access_token);
+    try std.testing.expectEqualStrings("rotated_rt", token.refresh_token);
+    try std.testing.expectEqual(@as(i64, 7200), token.expires_in);
+    try std.testing.expectEqual(@as(usize, 2), mock.history.items.len);
+
+    // 2) 缓存已双写（authorizer access + 轮换后的 refresh）
+    const akey = try allocator.print("authorizer_access_token_{s}", .{"wx-authr-1"});
+    defer allocator.free(akey);
+    try std.testing.expectEqualStrings("12_authr_tok", (try memory.asCache().get(akey)).?);
+    const rkey = try allocator.print("authorizer_refresh_token_{s}", .{"wx-authr-1"});
+    defer allocator.free(rkey);
+    try std.testing.expectEqualStrings("rotated_rt", (try memory.asCache().get(rkey)).?);
+}
+
+test "Context.getAuthrAccessToken 缓存命中不发请求、未命中用 refresh token 回源、缺 refresh token 报错" {
+    const allocator = std.testing.allocator;
+    const util_http = @import("../../util/http.zig");
+
+    const memory = try @import("../../cache/memory.zig").Memory.create(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+
+    var mock = util_http.MockTransport.init(allocator);
+    defer mock.deinit();
+    try mock.addRoute(
+        "https://api.weixin.qq.com/cgi-bin/component/api_authorizer_token?component_access_token=comp-tok",
+        .{ .body = "{\"authorizer_appid\":\"wx-authr-2\",\"authorizer_access_token\":\"fresh_tok\",\"expires_in\":7200,\"authorizer_refresh_token\":\"rotated_rt\"}" },
+    );
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-op", .app_secret = "sec", .cache = memory.asCache() },
+        .transport = util_http.MockTransport.dispatch,
+        .transport_ctx = @ptrCast(&mock),
+    };
+
+    // 1) 未命中 / 无 refresh token 缓存 → RefreshTokenRequired
+    try std.testing.expectError(
+        error.RefreshTokenRequired,
+        ctx.getAuthrAccessToken(allocator, "wx-authr-2"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), mock.history.items.len);
+
+    // 2) 预置 component token（verify_ticket 传空只读缓存）+ refresh token → 回源一次
+    const ckey = try allocator.print("openplatform_component_access_token_{s}", .{"wx-op"});
+    defer allocator.free(ckey);
+    try memory.asCache().set(ckey, "comp-tok", 7000);
+    const rkey = try allocator.print("authorizer_refresh_token_{s}", .{"wx-authr-2"});
+    defer allocator.free(rkey);
+    try memory.asCache().set(rkey, "old_rt", 10 * 365 * 24 * 60 * 60);
+
+    const tok = try ctx.getAuthrAccessToken(allocator, "wx-authr-2");
+    defer allocator.free(tok);
+    try std.testing.expectEqualStrings("fresh_tok", tok);
+    try std.testing.expectEqual(@as(usize, 1), mock.history.items.len);
+
+    // 3) 再次调用：authorizer token 已缓存 → 不再发请求
+    const tok2 = try ctx.getAuthrAccessToken(allocator, "wx-authr-2");
+    defer allocator.free(tok2);
+    try std.testing.expectEqualStrings("fresh_tok", tok2);
+    try std.testing.expectEqual(@as(usize, 1), mock.history.items.len);
+
+    // 4) 空 appid 直接拒绝（不触网）
+    try std.testing.expectError(
+        error.AuthorizerAppidRequired,
+        ctx.getAuthrAccessToken(allocator, ""),
+    );
+}

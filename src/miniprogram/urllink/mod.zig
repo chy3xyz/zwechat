@@ -210,6 +210,79 @@ test "ULParams 序列化包含 path 与 is_expire" {
     try std.testing.expect(std.mem.find(u8, body, "\"is_expire\":false") != null);
 }
 
+// ── 可注入 transport 测试 ────────────────────────────────────────────────
+
+const credential = @import("../../credential/mod.zig");
+
+const StubToken = struct {
+    fn getToken(_: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+        return allocator.dupe(u8, "token-abc");
+    }
+};
+const token_vtable = credential.AccessTokenHandle.VTable{ .getAccessToken = StubToken.getToken };
+
+/// 记录 method / uri / payload 的 transport（generate 走线程默认 client）。
+const CapturingTransport = struct {
+    method: std.http.Method = .GET,
+    uri: []u8 = &.{},
+    payload: []u8 = &.{},
+    response: []const u8 = "",
+
+    fn dispatch(ctx: *anyopaque, allocator: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+        _ = content_type;
+        const self: *CapturingTransport = @ptrCast(@alignCast(ctx));
+        self.method = method;
+        if (self.uri.len > 0) allocator.free(self.uri);
+        if (self.payload.len > 0) allocator.free(self.payload);
+        self.uri = try allocator.dupe(u8, uri);
+        self.payload = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, self.response);
+    }
+
+    fn deinit(self: *CapturingTransport, allocator: std.mem.Allocator) void {
+        if (self.uri.len > 0) allocator.free(self.uri);
+        if (self.payload.len > 0) allocator.free(self.payload);
+    }
+};
+
+test "generate POST URL Link：URL/body 字段与解析 url_link" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"url_link\":\"https://wxaurl.cn/abc\"}" };
+    defer tt.deinit(allocator);
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(CapturingTransport.dispatch, @ptrCast(&tt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-ul" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var u = URLLink.init(&ctx, allocator);
+
+    const link = try u.generate(.{
+        .path = "pages/index",
+        .query = "id=1",
+        .env_version = "release",
+        .is_expire = true,
+        .expire_type = .interval,
+        .expire_interval = 7,
+    });
+    defer allocator.free(link);
+
+    try std.testing.expectEqual(std.http.Method.POST, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/generate_urllink?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"path\":\"pages/index\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"env_version\":\"release\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"is_expire\":true") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"expire_type\":1") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"expire_interval\":7") != null);
+    try std.testing.expectEqualStrings("https://wxaurl.cn/abc", link);
+}
+
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
 
 const retry_testing = @import("../retry_testing.zig");
@@ -249,4 +322,36 @@ test "queryWithType token 失效自愈：作废缓存后用新 token 重试成�
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
     try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
     try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
+}
+
+// ── URLLink.query（公开 API 真实调用；`query` 是 `queryWithType` 的薄封装）────
+
+test "query 请求成功并解析 url_link_info（公开 API 真实调用）" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/wxa/query_urllink?access_token=token-abc", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"url_link_info\":{\"appid\":\"wx-ul\",\"path\":\"pages/index\"}}",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var stub = retry_testing.RotatingToken{};
+    var ctx = Context{
+        .config = .{ .app_id = "wx-ul" },
+        .access_token_handle = stub.asHandle(),
+    };
+    var u = URLLink.init(&ctx, allocator);
+
+    var parsed = try u.query("https://wxaurl.cn/xyz");
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("pages/index", parsed.value.url_link_info.path);
+    try std.testing.expectEqual(@as(usize, 0), stub.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
 }

@@ -476,3 +476,103 @@ test "sendImage 非 token 类 errcode：直接 ApiError，不作废也不重试"
     try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
     try std.testing.expectEqual(@as(usize, 1), state.fetch_calls);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// sendMarkdown（此前无调用测试）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 同时记录 URI 与请求体的 transport：`MockTransport` 只留 URI，
+/// 断言 `msgtype` / `markdown.content` 需要看到真实发送的 JSON 负载。
+const UriBodyCaptureTransport = struct {
+    allocator: std.mem.Allocator,
+    uri: ?[]u8 = null,
+    body: ?[]u8 = null,
+
+    fn deinit(self: *UriBodyCaptureTransport) void {
+        if (self.uri) |u| self.allocator.free(u);
+        if (self.body) |b| self.allocator.free(b);
+    }
+
+    fn dispatch(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        method: std.http.Method,
+        payload: []const u8,
+        content_type: ?[]const u8,
+    ) anyerror![]u8 {
+        _ = method;
+        _ = content_type;
+        const self: *UriBodyCaptureTransport = @ptrCast(@alignCast(ctx));
+        if (self.uri) |u| self.allocator.free(u);
+        if (self.body) |b| self.allocator.free(b);
+        self.uri = try allocator.dupe(u8, uri);
+        self.body = try allocator.dupe(u8, payload);
+        return allocator.dupe(u8, "{\"errcode\":0,\"errmsg\":\"ok\",\"msgid\":\"MSGMD1\"}");
+    }
+};
+
+test "sendMarkdown 真实发送：URL / 强制 msgtype=markdown / 内容字段 / 响应解析" {
+    const allocator = std.testing.allocator;
+    var cap = UriBodyCaptureTransport{ .allocator = allocator };
+    defer cap.deinit();
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(UriBodyCaptureTransport.dispatch, @ptrCast(&cap));
+    defer {
+        util_http.getDefaultClient(allocator).setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = RetryTokenState{};
+    var ctx = makeRetryCtx(&state);
+    var msg = Message.init(&ctx, allocator);
+
+    var parsed = try msg.sendMarkdown(.{
+        // 故意把 msg_type 设成 text：sendMarkdown 必须覆盖为 markdown。
+        .common = .{ .to_user = "UserA|UserB", .agent_id = "1000002", .msg_type = "text" },
+        .content = "**周报**\n- 项 1",
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("MSGMD1", parsed.value.msgid);
+    try std.testing.expectEqual(@as(usize, 1), state.fetch_calls);
+    try std.testing.expectEqualStrings(
+        "https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=tok-old",
+        cap.uri.?,
+    );
+
+    const body = cap.body.?;
+    // msg_type 由 sendMarkdown 强制改写为 markdown；内容进 `markdown.content` 子对象。
+    try std.testing.expect(std.mem.find(u8, body, "\"msgtype\":\"markdown\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"markdown\":{\"content\":\"**周报**\\n- 项 1\"}") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"touser\":\"UserA|UserB\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"agentid\":\"1000002\"") != null);
+    // 调用方传入的 msg_type 被覆盖：body 里不得出现 text。
+    try std.testing.expect(std.mem.find(u8, body, "\"msgtype\":\"text\"") == null);
+}
+
+test "sendMarkdown 空内容返回 InvalidArgument（在发请求前拒绝）" {
+    const allocator = std.testing.allocator;
+    var cap = UriBodyCaptureTransport{ .allocator = allocator };
+    defer cap.deinit();
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(UriBodyCaptureTransport.dispatch, @ptrCast(&cap));
+    defer {
+        util_http.getDefaultClient(allocator).setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = RetryTokenState{};
+    var ctx = makeRetryCtx(&state);
+    var msg = Message.init(&ctx, allocator);
+
+    const result = msg.sendMarkdown(.{ .common = .{ .to_user = "UserA" }, .content = "" });
+    try std.testing.expectError(error.InvalidArgument, result);
+
+    // 序列化在「取 token 之后、发请求之前」失败：transport 从未被触达。
+    try std.testing.expectEqual(@as(usize, 1), state.fetch_calls);
+    try std.testing.expect(cap.uri == null);
+    try std.testing.expect(cap.body == null);
+}

@@ -759,3 +759,143 @@ test "DefaultAccessToken: lock 已迁移为 std.Io.Mutex（持锁期间同线程
     try std.testing.expect(dat.lock.tryLock());
     dat.lock.unlock(dat.io);
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// forceRefresh（token 失效自愈链路的「清缓存 + 立即回源」入口）
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// 按调用次序返回不同响应的 fetcher 桩：`forceRefresh` 的用例需要观察
+/// 「第二次回源是否真的发生」以及「返回值来自哪一次」。
+const SequenceFetcherCtx = struct {
+    responses: []const []const u8,
+    calls: usize = 0,
+
+    fn fetch(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, url: []const u8) CredentialError![]u8 {
+        _ = url;
+        const self: *SequenceFetcherCtx = @ptrCast(@alignCast(ctx_ptr));
+        const idx = @min(self.calls, self.responses.len - 1);
+        self.calls += 1;
+        return allocator.dupe(u8, self.responses[idx]);
+    }
+};
+
+test "DefaultAccessToken: forceRefresh 忽略有效缓存强制回源，且新值回写缓存" {
+    const allocator = std.testing.allocator;
+    const ctx = makeMemoryCache(allocator);
+    defer {
+        ctx.mem.deinit();
+        allocator.destroy(ctx.mem);
+    }
+
+    var stub_ctx = SequenceFetcherCtx{ .responses = &.{
+        "{\"access_token\":\"tok_v1\",\"expires_in\":7200}",
+        "{\"access_token\":\"tok_v2\",\"expires_in\":7200}",
+    } };
+
+    const prefix = "gowechat_test_";
+    const app_id = "wx_force_refresh";
+    var dat = DefaultAccessToken.initWithFetcher(
+        app_id,
+        "secret",
+        prefix,
+        ctx.cache,
+        SequenceFetcherCtx.fetch,
+        @ptrCast(&stub_ctx),
+    );
+
+    const key = try allocator.print("{s}_access_token_{s}", .{ prefix, app_id });
+    defer allocator.free(key);
+
+    // 1) 预热：一次回源，写 tok_v1
+    const first = try dat.getAccessToken(allocator);
+    defer allocator.free(first);
+    try std.testing.expectEqualStrings("tok_v1", first);
+    try std.testing.expectEqual(@as(usize, 1), stub_ctx.calls);
+
+    // 2) 缓存仍有效时 forceRefresh：必须忽略缓存，再回源一次
+    const second = try dat.forceRefresh(allocator);
+    defer allocator.free(second);
+    try std.testing.expectEqualStrings("tok_v2", second);
+    try std.testing.expectEqual(@as(usize, 2), stub_ctx.calls);
+
+    // 3) 新值已回写缓存（旧值被覆盖）
+    try std.testing.expectEqualStrings("tok_v2", (try ctx.cache.get(key)).?);
+
+    // 4) 随后 getAccessToken 命中缓存，不再回源
+    const third = try dat.getAccessToken(allocator);
+    defer allocator.free(third);
+    try std.testing.expectEqualStrings("tok_v2", third);
+    try std.testing.expectEqual(@as(usize, 2), stub_ctx.calls);
+}
+
+test "DefaultAccessToken: forceRefresh 在缓存为空时也能直接回源" {
+    const allocator = std.testing.allocator;
+    const ctx = makeMemoryCache(allocator);
+    defer {
+        ctx.mem.deinit();
+        allocator.destroy(ctx.mem);
+    }
+
+    var stub_ctx = SequenceFetcherCtx{ .responses = &.{
+        "{\"access_token\":\"cold_tok\",\"expires_in\":7200}",
+    } };
+
+    var dat = DefaultAccessToken.initWithFetcher(
+        "wx_force_cold",
+        "secret",
+        "gowechat_test_",
+        ctx.cache,
+        SequenceFetcherCtx.fetch,
+        @ptrCast(&stub_ctx),
+    );
+
+    const tok = try dat.forceRefresh(allocator);
+    defer allocator.free(tok);
+    try std.testing.expectEqualStrings("cold_tok", tok);
+    try std.testing.expectEqual(@as(usize, 1), stub_ctx.calls);
+
+    const key = try allocator.print("gowechat_test__access_token_{s}", .{"wx_force_cold"});
+    defer allocator.free(key);
+    try std.testing.expectEqualStrings("cold_tok", (try ctx.cache.get(key)).?);
+}
+
+test "DefaultAccessToken: forceRefresh 遇到 errcode != 0 返回 ApiError 且旧缓存已被清空" {
+    const allocator = std.testing.allocator;
+    const ctx = makeMemoryCache(allocator);
+    defer {
+        ctx.mem.deinit();
+        allocator.destroy(ctx.mem);
+    }
+
+    var stub_ctx = SequenceFetcherCtx{ .responses = &.{
+        "{\"access_token\":\"stale_tok\",\"expires_in\":7200}",
+        "{\"access_token\":\"\",\"expires_in\":0,\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
+    } };
+
+    const prefix = "gowechat_test_";
+    const app_id = "wx_force_err";
+    var dat = DefaultAccessToken.initWithFetcher(
+        app_id,
+        "secret",
+        prefix,
+        ctx.cache,
+        SequenceFetcherCtx.fetch,
+        @ptrCast(&stub_ctx),
+    );
+
+    const key = try allocator.print("{s}_access_token_{s}", .{ prefix, app_id });
+    defer allocator.free(key);
+
+    // 预热一个「陈旧但仍在缓存里」的 token
+    const first = try dat.getAccessToken(allocator);
+    defer allocator.free(first);
+    try std.testing.expect((try ctx.cache.get(key)) != null);
+
+    // 回源失败：报错，且陈旧条目必须先被清掉（否则失效 token 会一直命中）
+    try std.testing.expectError(
+        CredentialError.ApiError,
+        dat.forceRefresh(allocator),
+    );
+    try std.testing.expectEqual(@as(usize, 2), stub_ctx.calls);
+    try std.testing.expect((try ctx.cache.get(key)) == null);
+}

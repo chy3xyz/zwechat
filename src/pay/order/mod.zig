@@ -814,3 +814,120 @@ test "Order.io 默认值可用（未注入时 nonce_str 每次不同）" {
     try std.testing.expect(!std.mem.eql(u8, a.nonce_str, b.nonce_str));
     try std.testing.expectEqual(@as(usize, 32), a.nonce_str.len);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// queryOrder / closeOrder（此前无调用测试）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 记录最近一次请求（URI / 方法 / body）并返回预置应答的 transport。
+const RequestCaptureTransport = struct {
+    allocator: std.mem.Allocator,
+    response: []const u8,
+    uri: ?[]u8 = null,
+    payload: ?[]u8 = null,
+    method: std.http.Method = .GET,
+
+    fn deinit(self: *RequestCaptureTransport) void {
+        if (self.uri) |u| self.allocator.free(u);
+        if (self.payload) |p| self.allocator.free(p);
+    }
+
+    fn dispatch(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        method: std.http.Method,
+        payload: []const u8,
+        content_type: ?[]const u8,
+    ) anyerror![]u8 {
+        _ = content_type;
+        const self: *RequestCaptureTransport = @ptrCast(@alignCast(ctx));
+        if (self.uri) |u| self.allocator.free(u);
+        if (self.payload) |p| self.allocator.free(p);
+        self.uri = try allocator.dupe(u8, uri);
+        self.payload = try allocator.dupe(u8, payload);
+        self.method = method;
+        return allocator.dupe(u8, self.response);
+    }
+};
+
+test "queryOrder 真实请求：POST /pay/orderquery、body 字段、签名一致与响应解析" {
+    const allocator = std.testing.allocator;
+    var cap = RequestCaptureTransport{
+        .allocator = allocator,
+        .response =
+        \\<xml>
+        \\  <return_code><![CDATA[SUCCESS]]></return_code>
+        \\  <return_msg><![CDATA[OK]]></return_msg>
+        \\  <result_code><![CDATA[SUCCESS]]></result_code>
+        \\  <trade_state><![CDATA[SUCCESS]]></trade_state>
+        \\  <out_trade_no><![CDATA[t-query-1]]></out_trade_no>
+        \\  <transaction_id><![CDATA[4200001234202601011234567890]]></transaction_id>
+        \\</xml>
+        ,
+    };
+    defer cap.deinit();
+
+    var o = Order.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "test_key" });
+    o.setTransport(RequestCaptureTransport.dispatch, &cap);
+
+    var result = try o.queryOrder(allocator, "t-query-1");
+    defer result.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method);
+    try std.testing.expectEqualStrings("https://api.mch.weixin.qq.com/pay/orderquery", cap.uri.?);
+
+    // body 关键字段 + 签名与实际发送字段一致（签名错误回归）。
+    const body = cap.payload.?;
+    try std.testing.expect(std.mem.find(u8, body, "<appid><![CDATA[wx-app]]></appid>") != null);
+    try std.testing.expect(std.mem.find(u8, body, "<mch_id><![CDATA[mch]]></mch_id>") != null);
+    try std.testing.expect(std.mem.find(u8, body, "<out_trade_no><![CDATA[t-query-1]]></out_trade_no>") != null);
+    try std.testing.expect(std.mem.find(u8, body, "<nonce_str><![CDATA[") != null);
+    try std.testing.expect(std.mem.find(u8, body, "<sign><![CDATA[") != null);
+    try expectXmlSignConsistent(allocator, "test_key", body);
+
+    try std.testing.expectEqualStrings("SUCCESS", result.return_code);
+    try std.testing.expectEqualStrings("OK", result.return_msg);
+    try std.testing.expectEqualStrings("SUCCESS", result.result_code);
+    try std.testing.expectEqualStrings("SUCCESS", result.trade_state);
+    try std.testing.expectEqualStrings("t-query-1", result.out_trade_no);
+    try std.testing.expectEqualStrings("4200001234202601011234567890", result.transaction_id);
+}
+
+test "closeOrder 真实请求：POST /pay/closeorder、body 字段与响应解析" {
+    const allocator = std.testing.allocator;
+    var cap = RequestCaptureTransport{
+        .allocator = allocator,
+        .response =
+        \\<xml>
+        \\  <return_code><![CDATA[SUCCESS]]></return_code>
+        \\  <return_msg><![CDATA[OK]]></return_msg>
+        \\  <result_code><![CDATA[FAIL]]></result_code>
+        \\  <err_code><![CDATA[ORDERCLOSED]]></err_code>
+        \\  <err_code_des><![CDATA[订单已关闭]]></err_code_des>
+        \\</xml>
+        ,
+    };
+    defer cap.deinit();
+
+    var o = Order.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "test_key" });
+    o.setTransport(RequestCaptureTransport.dispatch, &cap);
+
+    var result = try o.closeOrder(allocator, "t-close-1");
+    defer result.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method);
+    try std.testing.expectEqualStrings("https://api.mch.weixin.qq.com/pay/closeorder", cap.uri.?);
+
+    const body = cap.payload.?;
+    try std.testing.expect(std.mem.find(u8, body, "<appid><![CDATA[wx-app]]></appid>") != null);
+    try std.testing.expect(std.mem.find(u8, body, "<mch_id><![CDATA[mch]]></mch_id>") != null);
+    try std.testing.expect(std.mem.find(u8, body, "<out_trade_no><![CDATA[t-close-1]]></out_trade_no>") != null);
+    try std.testing.expect(std.mem.find(u8, body, "<nonce_str><![CDATA[") != null);
+    try expectXmlSignConsistent(allocator, "test_key", body);
+
+    try std.testing.expectEqualStrings("SUCCESS", result.return_code);
+    try std.testing.expectEqualStrings("FAIL", result.result_code);
+    try std.testing.expectEqualStrings("ORDERCLOSED", result.err_code);
+    try std.testing.expectEqualStrings("订单已关闭", result.err_code_des);
+}

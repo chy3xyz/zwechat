@@ -2,13 +2,13 @@
 
 > Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付 v2/v3、开放平台、企业微信、智能对话等能力的 Zig 原生实现。
 
-**当前版本：v0.4.5**
+**当前版本：v0.6.0**
 
 | | |
 |---|---|
 | **Zig 版本** | ≥ `0.17.0`（正式版） |
 | **外部依赖** | 默认**零依赖**：无 Zig 包依赖、无 C 依赖（不链 OpenSSL / libc、构建期不联网取依赖） |
-| **测试覆盖** | 1004 个内联测试，**0 内存泄漏** |
+| **测试覆盖** | 1326 个内联测试，**0 内存泄漏** |
 | **基准性能** | SHA1 签名 ~274ns/op, AES 解密 ~107ns/op, XML 解析 ~148ns/op |
 | **命令行工具** | `zig build run` (CLI 开发者诊断工具) |
 | **基准测试** | `zig build bench` (基准性能评估) |
@@ -20,7 +20,7 @@
 
 - ✅ **零 GC & 显式内存管理**：所有 API 均显式传入 `std.mem.Allocator`，由调用方精准掌控内存释放与生命周期。
 - ✅ **智能 Token 自动重试与强刷**：内置 `isTokenInvalidErrCode`，在遇到 `40001`/`40014` 等 Token 失效时自动清除缓存并强刷重试。
-- ✅ **微信支付 v3 完整支持**：包含 HTTP `Authorization: WECHATPAY2-SHA256-RSA2048` 头签名、JSAPI/小程序调起签名及 **AEAD_AES_256_GCM** 零 C 依赖异步通知回调解密。
+- ✅ **微信支付 v3 完整支持**：HTTP `Authorization: WECHATPAY2-SHA256-RSA2048` 头签名、JSAPI/小程序调起签名、统一下单/查询/关单、退款、商家转账，以及 **回调验签（平台证书 / 微信支付公钥 + 时间戳窗口）+ AEAD_AES_256_GCM 解密** 的零 C 依赖通知链路（`NotifyVerifier.verifyAndDecrypt`）。
 - ✅ **Web 框架通用中间件**：提供 `src/middleware/` 适配器，开箱即用无缝挂载至 `zfinal` / `zigmodu` / `zap` / `httpz` 等 Zig Web 框架。
 - ✅ **编译期模板消息生成器 (`comptime`)**：基于 `comptime` 反射，零堆分配开销将任意平铺 Zig 结构体转换为符合微信规范的 `{"field":{"value":"..."}}` 模板 JSON。
 - ✅ **开发者 CLI 诊断工具**：内置 CLI 命令，支持终端签名快速验证 `verify-sig` 与模板生成调试 `template-demo`。
@@ -29,25 +29,26 @@
 
 ## 📦 业务域覆盖
 
-| 业务域 | 子模块数 | 状态 | 关键能力与新增特性 |
+| 业务域 | 实现文件数 | 状态 | 关键能力与新增特性 |
 |---|---|---|---|
-| `cache` | 4 | ✅ | `Cache` vtable 接口 + `Memory` / `Redis` / `Memcache` 后端（线程安全 + TTL）|
-| `credential` | 5 | ✅ | `DefaultAccessToken` / `DefaultJsTicket` / `WorkAccessToken` / `WorkJsTicket` + **`forceRefresh` 强刷** |
-| `util` | 14 | ✅ | HTTP 连接池复用 / AES-CBC+ECB+GCM / SHA1 签名 / **`template` 编译期生成器** / RSA-SHA256 / PKCS#12 / XML |
-| `officialaccount` | 15 | ✅ | menu / oauth / basic / **server (Webhook 消息解密/路由)** / message / material / js / user / datacube / broadcast / device / customerservice / ocr / draft / freepublish |
-| `pay` | 8 | ✅ | v2 (order/refund/notify/transfer/redpacket) + **v3 (signer/order/AEAD-AES-256-GCM notify 解密)** |
-| `miniprogram` | 5 | ✅ | auth (jscode2session/getPhoneNumber) + qrcode + urlscheme + **message (订阅消息) + security (内容安全审核)** |
-| `openplatform` | 6 | ✅ | account / miniprogram / officialaccount |
-| `work` | 13 | ✅ | oauth / jsapi / message / robot / **server (ReceiveID/CorpID 校验加解密)** + **`newDefaultWork` 工厂** |
+| `cache` | 5 | ✅ | `Cache` vtable 接口 + `Memory` / `Redis` / `Memcache` 后端（线程安全 + TTL + 可注入超时）|
+| `credential` | 5 | ✅ | `DefaultAccessToken` / `DefaultJsTicket` / `WorkAccessToken` / `WorkJsTicket`（双检锁 + 锁外回源 + **失效码自动作废重试**）|
+| `util` | 22 | ✅ | HTTP 连接池复用 + **connect/read 超时** / AES-CBC+ECB+GCM / SHA1 签名 / **`template` 编译期生成器** / RSA-SHA256 / PKCS#12 / XML / `queryEscape` |
+| `officialaccount` | 19 | ✅ | menu / oauth / basic / **server (Webhook 消息解密/路由)** / message / material / js / user / datacube / broadcast / device / customerservice / ocr / draft / freepublish（15 个子模块）|
+| `pay` | 16 | ✅ | v2 (order/refund/notify/transfer/redpacket) + v3 (**signer / order / refund / transfer / platform_cert / notify 验签+AEAD 解密**) |
+| `miniprogram` | 27 | ✅ | auth (jscode2session/getPhoneNumber) / qrcode / urlscheme / **message (订阅消息) / security (内容安全) / virtualpayment / tcb / order / analysis** 等 25 个子模块 |
+| `openplatform` | 10 | ✅ | account / context（**授权链路** queryAuthCode / getAuthrInfo / refresh） / miniprogram（**代运营**） / officialaccount |
+| `work` | 18 | ✅ | 企业微信 15 个子模块：oauth / jsapi / message / robot / **server (ReceiveID/CorpID 校验加解密)** / addresslist / externalcontact / kf / material / msgaudit / smartbot / appchat / checkin / invoice |
 | `middleware` | 2 | ✅ | **通用 Web 框架中间件** (`verifyServerSignature` / `handleServerMessage`) |
-| `aispeech` | 1 | ✅ | 智能对话接口骨架 |
+| `minigame` | 3 | ⚠️ | 小游戏接口骨架（未实装）|
+| `aispeech` | 1 | ⚠️ | 智能对话接口骨架（未实装）|
 
 ---
 
 ## 🛠 构建与常用命令
 
 ```bash
-# 1. 跑全部 1004 个单元测试（自动检测内存泄漏）
+# 1. 跑全部 1326 个单元测试（自动检测内存泄漏）
 zig build test
 
 # 2. 跑性能基准测试 (Benchmark)

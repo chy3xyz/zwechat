@@ -592,6 +592,133 @@ test "deleteConditional 请求 menuid" {
     try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
 }
 
+test "deleteMenu 请求 menu/delete 且带 access_token" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/menu/delete?access_token=token-abc", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\"}",
+    });
+
+    var ctx = makeCtx();
+    var m = Menu.init(&ctx, allocator);
+    m.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    try m.deleteMenu();
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/menu/delete?access_token=token-abc",
+        mt.history.items[0],
+    );
+}
+
+test "deleteMenu errcode 非 0 返回 ApiError" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/cgi-bin/menu/delete?access_token=token-abc", .{
+        .body = "{\"errcode\":48001,\"errmsg\":\"api unauthorized\"}",
+    });
+
+    var ctx = makeCtx();
+    var m = Menu.init(&ctx, allocator);
+    m.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    try std.testing.expectError(util_error.WechatError.ApiError, m.deleteMenu());
+}
+
+test "Button 拍照/扫码/相册类构造器字段正确" {
+    const sc_push = Button.setScanCodePush("扫码推事件", "r1");
+    try std.testing.expectEqualStrings("scancode_push", sc_push.type);
+    try std.testing.expectEqualStrings("扫码推事件", sc_push.name);
+    try std.testing.expectEqualStrings("r1", sc_push.key);
+
+    const sc_wait = Button.setScanCodeWaitMsg("扫码等待", "r2");
+    try std.testing.expectEqualStrings("scancode_waitmsg", sc_wait.type);
+    try std.testing.expectEqualStrings("扫码等待", sc_wait.name);
+    try std.testing.expectEqualStrings("r2", sc_wait.key);
+
+    const sys_photo = Button.setPicSysPhoto("系统拍照", "r3");
+    try std.testing.expectEqualStrings("pic_sysphoto", sys_photo.type);
+    try std.testing.expectEqualStrings("系统拍照", sys_photo.name);
+    try std.testing.expectEqualStrings("r3", sys_photo.key);
+
+    const album = Button.setPicPhotoOrAlbum("相册拍照", "r4");
+    try std.testing.expectEqualStrings("pic_photo_or_album", album.type);
+    try std.testing.expectEqualStrings("相册拍照", album.name);
+    try std.testing.expectEqualStrings("r4", album.key);
+
+    const wx = Button.setPicWeixin("微信相册", "r5");
+    try std.testing.expectEqualStrings("pic_weixin", wx.type);
+    try std.testing.expectEqualStrings("微信相册", wx.name);
+    try std.testing.expectEqualStrings("r5", wx.key);
+
+    const loc = Button.setLocationSelect("上报位置", "r6");
+    try std.testing.expectEqualStrings("location_select", loc.type);
+    try std.testing.expectEqualStrings("上报位置", loc.name);
+    try std.testing.expectEqualStrings("r6", loc.key);
+}
+
+test "Button 素材类构造器 media_id 落到正确字段" {
+    // media_id 走 `media_id` 字段，url/key 必须保持空（回归：字段错位会发错按钮类型）。
+    const media = Button.setMediaID("素材按钮", "MEDIA-1");
+    try std.testing.expectEqualStrings("media_id", media.type);
+    try std.testing.expectEqualStrings("素材按钮", media.name);
+    try std.testing.expectEqualStrings("MEDIA-1", media.media_id);
+    try std.testing.expectEqualStrings("", media.key);
+    try std.testing.expectEqualStrings("", media.url);
+
+    const limited = Button.setViewLimited("历史图文", "MEDIA-2");
+    try std.testing.expectEqualStrings("view_limited", limited.type);
+    try std.testing.expectEqualStrings("历史图文", limited.name);
+    try std.testing.expectEqualStrings("MEDIA-2", limited.media_id);
+    try std.testing.expectEqualStrings("", limited.key);
+    try std.testing.expectEqualStrings("", limited.url);
+}
+
+test "素材类按钮经 setMenu 序列化后 media_id 出现在 JSON" {
+    const allocator = std.testing.allocator;
+    const Capture = struct {
+        uri: []u8 = &.{},
+        payload: []u8 = &.{},
+        method: std.http.Method = .GET,
+        fn dispatch(ctx: *anyopaque, a: std.mem.Allocator, uri: []const u8, method: std.http.Method, payload: []const u8, content_type: ?[]const u8) anyerror![]u8 {
+            _ = content_type;
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.uri = try a.dupe(u8, uri);
+            self.payload = try a.dupe(u8, payload);
+            self.method = method;
+            return a.dupe(u8, "{\"errcode\":0,\"errmsg\":\"ok\"}");
+        }
+    };
+    var cap = Capture{};
+    defer allocator.free(cap.uri);
+    defer allocator.free(cap.payload);
+
+    var ctx = makeCtx();
+    var m = Menu.init(&ctx, allocator);
+    m.setTransport(Capture.dispatch, &cap);
+
+    const buttons = [_]Button{
+        Button.setMediaID("素材按钮", "MEDIA-1"),
+        Button.setViewLimited("历史图文", "MEDIA-2"),
+    };
+    try m.setMenu(&buttons);
+
+    try std.testing.expectEqual(std.http.Method.POST, cap.method);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/menu/create?access_token=token-abc",
+        cap.uri,
+    );
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, cap.payload, .{});
+    defer parsed.deinit();
+    const arr = parsed.value.object.get("button").?.array;
+    try std.testing.expectEqualStrings("media_id", arr.items[0].object.get("type").?.string);
+    try std.testing.expectEqualStrings("MEDIA-1", arr.items[0].object.get("media_id").?.string);
+    try std.testing.expectEqualStrings("view_limited", arr.items[1].object.get("type").?.string);
+    try std.testing.expectEqualStrings("MEDIA-2", arr.items[1].object.get("media_id").?.string);
+}
+
 test "getCurrentSelfMenuInfo 解析 selfmenu_info" {
     const allocator = std.testing.allocator;
     var mt = util_http.MockTransport.init(allocator);

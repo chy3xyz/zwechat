@@ -12,6 +12,7 @@ const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
 const util_uri = @import("../../util/uri.zig");
+const util_json = @import("../../util/json.zig");
 
 /// 追加一个已转义的 query 参数：先写 `prefix`（形如 `&action=`），
 /// 再把 `value` 按 Go `url.QueryEscape` 语义编码后追加。
@@ -276,10 +277,10 @@ pub const DataCube = struct {
                 );
                 defer a.free(uri);
 
-                const body = try a.print(
-                    "{{\"begin_date\":\"{s}\",\"end_date\":\"{s}\"}}",
-                    .{ c.begin_date, c.end_date },
-                );
+                const body = try util_json.stringFieldsObject(a, &.{
+                    .{ .name = "begin_date", .value = c.begin_date },
+                    .{ .name = "end_date", .value = c.end_date },
+                });
                 defer a.free(body);
 
                 const client = util_http.getDefaultClient(a);
@@ -536,6 +537,44 @@ test "DataCube.getInterfaceSummaryHour 请求与解析" {
     );
     try expectDateBody(cap.payload, "2024-01-01", "2024-01-01");
     try std.testing.expect(std.mem.find(u8, resp, "ref_hour") != null);
+}
+
+test "DataCube.getArticleSummary / getInterfaceSummary 请求与解析" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{ .allocator = alloc, .response = "{\"list\":[{\"ref_date\":\"2024-01-01\"}]}" };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx: Context = undefined;
+    var dc = makeDc(alloc, &state, &ctx);
+
+    const cases = [_]struct {
+        call: *const fn (*DataCube, []const u8, []const u8) anyerror![]u8,
+        endpoint: []const u8,
+    }{
+        .{ .call = struct {
+            fn f(d: *DataCube, b: []const u8, e: []const u8) anyerror![]u8 {
+                return d.getArticleSummary(b, e);
+            }
+        }.f, .endpoint = "getarticlesummary" },
+        .{ .call = struct {
+            fn f(d: *DataCube, b: []const u8, e: []const u8) anyerror![]u8 {
+                return d.getInterfaceSummary(b, e);
+            }
+        }.f, .endpoint = "getinterfacesummary" },
+    };
+
+    for (cases) |case| {
+        const resp = try case.call(&dc, "2024-01-01", "2024-01-07");
+        defer alloc.free(resp);
+        const expected_uri = try alloc.print("https://api.weixin.qq.com/datacube/{s}?access_token=stub-ak", .{case.endpoint});
+        try std.testing.expectEqualStrings(expected_uri, cap.uri);
+        try expectDateBody(cap.payload, "2024-01-01", "2024-01-07");
+    }
 }
 
 test "DataCube errcode 非 0 返回 ApiError" {

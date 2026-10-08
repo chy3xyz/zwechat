@@ -99,3 +99,97 @@ test "OpenMiniProgram 默认 app_id 兼容空字符串" {
     const omp = OpenMiniProgram.init(&ctx, "");
     try std.testing.expectEqualStrings("", omp.app_id);
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 懒加载入口的真实调用（getComponent / getBasic 此前零调用）
+// ──────────────────────────────────────────────────────────────────────────────
+
+test "OpenMiniProgram.getComponent 返回复用同一 ctx 的 Component，并可真实发出请求" {
+    const allocator = std.testing.allocator;
+    const util_http = @import("../../util/http.zig");
+
+    const memory = try @import("../../cache/memory.zig").Memory.create(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+
+    var mock = util_http.MockTransport.init(allocator);
+    defer mock.deinit();
+    // action=create + component_access_token 都来自缓存里的 openplatform_component_access_token_*
+    try mock.addRoute(
+        "https://api.weixin.qq.com/cgi-bin/component/fastregisterweapp?action=create&component_access_token=comp-tok",
+        .{ .body = "{\"errcode\":0,\"errmsg\":\"ok\"}" },
+    );
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-op-mp", .cache = memory.asCache() },
+        .transport = util_http.MockTransport.dispatch,
+        .transport_ctx = @ptrCast(&mock),
+    };
+    const ckey = try allocator.print("openplatform_component_access_token_{s}", .{"wx-op-mp"});
+    defer allocator.free(ckey);
+    try memory.asCache().set(ckey, "comp-tok", 7000);
+
+    var omp = OpenMiniProgram.init(&ctx, "wx-mp-authorized");
+    var component = omp.getComponent();
+    // 入口必须把上层 ctx 交出去（指针同一性）。
+    try std.testing.expect(component.ctx == &ctx);
+
+    try component.registerMiniProgram(allocator, .{
+        .name = "示例企业",
+        .code = "91330100MA27XW1G1Q",
+        .code_type = "1",
+        .legal_persona_wechat = "legal_wx",
+        .legal_persona_name = "张三",
+        .component_phone = "13800000000",
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), mock.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/component/fastregisterweapp?action=create&component_access_token=comp-tok",
+        mock.history.items[0],
+    );
+}
+
+test "OpenMiniProgram.getBasic 返回绑定 app_id 的 Basic，并走 authorizer_access_token 请求" {
+    const allocator = std.testing.allocator;
+    const util_http = @import("../../util/http.zig");
+
+    const memory = try @import("../../cache/memory.zig").Memory.create(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+
+    var mock = util_http.MockTransport.init(allocator);
+    defer mock.deinit();
+    try mock.addRoute(
+        "https://api.weixin.qq.com/cgi-bin/account/getaccountbasicinfo?access_token=12_authr_tok",
+        .{ .body = "{\"errcode\":0,\"errmsg\":\"ok\"}" },
+    );
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-op-mp", .cache = memory.asCache() },
+        .transport = util_http.MockTransport.dispatch,
+        .transport_ctx = @ptrCast(&mock),
+    };
+    // 预置被代运营小程序的 authorizer_access_token（getBasic 的 app_id 决定用哪个）。
+    const akey = try allocator.print("authorizer_access_token_{s}", .{"wx-mp-authorized"});
+    defer allocator.free(akey);
+    try memory.asCache().set(akey, "12_authr_tok", 7000);
+
+    var omp = OpenMiniProgram.init(&ctx, "wx-mp-authorized");
+    var basic = omp.getBasic();
+    try std.testing.expect(basic.ctx == &ctx);
+    try std.testing.expectEqualStrings("wx-mp-authorized", basic.app_id);
+
+    var info = try basic.getAccountBasicInfo(allocator);
+    defer info.deinit();
+    try std.testing.expectEqual(@as(i64, 0), info.value.errcode);
+    try std.testing.expectEqual(@as(usize, 1), mock.history.items.len);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/account/getaccountbasicinfo?access_token=12_authr_tok",
+        mock.history.items[0],
+    );
+}

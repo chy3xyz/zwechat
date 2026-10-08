@@ -338,6 +338,41 @@ test "Server.validateSignature 与 Go 行为一致" {
     try std.testing.expectEqualStrings("4b2424759d05f70ab6f7693974a17d6992999b96", sig);
 }
 
+test "Server.validateURL 签名匹配返回 true、不匹配返回 false" {
+    var ctx: Context = .{
+        .config = .{ .token = "token_test" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = undefined },
+    };
+    var buf: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var s = Server.init(&ctx, fba.allocator());
+
+    // 与 validateSignature 相同的 SHA1(sort([token, timestamp, nonce])) 期望值。
+    const q_ok = Query{
+        .signature = "4b2424759d05f70ab6f7693974a17d6992999b96",
+        .timestamp = "1700000000",
+        .nonce = "abc",
+        .echostr = "echo-1",
+    };
+    try std.testing.expect(try s.validateURL(q_ok));
+
+    // 签名被篡改 → 应拒绝握手。
+    const q_bad = Query{
+        .signature = "0000000000000000000000000000000000000000",
+        .timestamp = "1700000000",
+        .nonce = "abc",
+    };
+    try std.testing.expect(!try s.validateURL(q_bad));
+
+    // 时间戳不同 → 签名不同 → 拒绝。
+    const q_ts = Query{
+        .signature = "4b2424759d05f70ab6f7693974a17d6992999b96",
+        .timestamp = "1700000001",
+        .nonce = "abc",
+    };
+    try std.testing.expect(!try s.validateURL(q_ts));
+}
+
 test "Server.buildReply 输出合法 XML" {
     var ctx: Context = .{
         .config = .{ .token = "t" },

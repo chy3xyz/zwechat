@@ -525,3 +525,192 @@ test "parseCertificates 解密 /v3/certificates 应答并按序列号建索引" 
     // APIv3 密钥长度不对 → 立即拒绝。
     try std.testing.expectError(error.ApiV3KeyRequired, parseCertificates(allocator, "short", body));
 }
+
+// -----------------------------------------------------------------------------
+// tests: encryptResourceB64（测试辅助，此前无调用测试）
+// -----------------------------------------------------------------------------
+
+test "encryptResourceB64 与 decryptNotifyResource 加解密往返" {
+    const allocator = std.testing.allocator;
+    const key = "12345678901234567890123456789012";
+    const plaintext = "{\"serial_no\":\"1234\",\"encrypt_certificate\":\"x\"}";
+
+    const b64 = try encryptResourceB64(allocator, key, "certnonce123", "certificate", plaintext);
+    defer allocator.free(b64);
+
+    const decrypted = try notify.decryptNotifyResource(
+        allocator,
+        key,
+        b64,
+        "certificate",
+        "certnonce123",
+    );
+    defer allocator.free(decrypted);
+    try std.testing.expectEqualStrings(plaintext, decrypted);
+
+    // 换 nonce / associated_data 都会 GCM 认证失败——不返回半个明文。
+    try std.testing.expectError(
+        error.DecryptFailed,
+        notify.decryptNotifyResource(allocator, key, b64, "certificate", "othernonce12"),
+    );
+    try std.testing.expectError(
+        error.DecryptFailed,
+        notify.decryptNotifyResource(allocator, key, b64, "wrong-aad", "certnonce123"),
+    );
+}
+
+// -----------------------------------------------------------------------------
+// tests: PlatformCertStore（缓存 / 刷新 / 查找 / 清理）
+// -----------------------------------------------------------------------------
+
+/// 记录最近一次请求（方法 / URI / Authorization / Accept 头）并返回预置应答。
+const HeaderCaptureTransport = struct {
+    response: []const u8,
+    calls: usize = 0,
+    last_method: std.http.Method = .GET,
+    last_uri_buf: [256]u8 = undefined,
+    last_uri_len: usize = 0,
+    auth_buf: [512]u8 = undefined,
+    auth_len: usize = 0,
+    accept_buf: [64]u8 = undefined,
+    accept_len: usize = 0,
+
+    fn dispatch(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        uri: []const u8,
+        method: std.http.Method,
+        payload: []const u8,
+        content_type: ?[]const u8,
+        headers: []const std.http.Header,
+    ) anyerror![]u8 {
+        _ = payload;
+        _ = content_type;
+        const self: *HeaderCaptureTransport = @ptrCast(@alignCast(ctx));
+        self.calls += 1;
+        self.last_method = method;
+        self.last_uri_len = @min(uri.len, self.last_uri_buf.len);
+        @memcpy(self.last_uri_buf[0..self.last_uri_len], uri[0..self.last_uri_len]);
+        for (headers) |h| {
+            if (std.ascii.eqlIgnoreCase(h.name, "Authorization")) {
+                self.auth_len = @min(h.value.len, self.auth_buf.len);
+                @memcpy(self.auth_buf[0..self.auth_len], h.value[0..self.auth_len]);
+            } else if (std.ascii.eqlIgnoreCase(h.name, "Accept")) {
+                self.accept_len = @min(h.value.len, self.accept_buf.len);
+                @memcpy(self.accept_buf[0..self.accept_len], h.value[0..self.accept_len]);
+            }
+        }
+        return allocator.dupe(u8, self.response);
+    }
+};
+
+/// 测试用 store 配置：商户私钥用一次性 throwaway 密钥（离线可用，无真实凭据）。
+fn testStoreConfig(api_v3_key: []const u8) Config {
+    return .{
+        .app_id = "wx-v3-cert",
+        .mch_id = "1900000109",
+        .api_v3_key = api_v3_key,
+        .serial_no = "1DDE557876238",
+        .private_key_pem = test_private_key_pkcs1,
+    };
+}
+
+test "PlatformCertStore setTransport / refresh / count / find / certificateForSerial / clear" {
+    const allocator = std.testing.allocator;
+    const key = "12345678901234567890123456789012";
+    const serial = "5157F09EFDC096DE15EBE81A47057A7232F1B8E1";
+
+    const cert_resp = try buildCertificatesResponse(allocator, key, serial);
+    defer allocator.free(cert_resp);
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute(base_url ++ certificates_path, .{ .body = cert_resp });
+
+    var store = PlatformCertStore.init(allocator, testStoreConfig(key));
+    defer store.deinit();
+
+    // 初始为空：count / find 都是空结果，且不触网。
+    try std.testing.expectEqual(@as(usize, 0), store.count());
+    try std.testing.expect(store.find(serial) == null);
+
+    store.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    try store.refresh();
+
+    try std.testing.expectEqual(@as(usize, 1), store.count());
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+    try std.testing.expectEqualStrings(base_url ++ certificates_path, mt.history.items[0]);
+
+    const found = store.find(serial) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(serial, found.serial_no);
+    try std.testing.expectEqualStrings(test_platform_cert_pem, found.cert_pem);
+    try std.testing.expect(std.mem.startsWith(u8, found.public_key_pem, "-----BEGIN RSA PUBLIC KEY-----"));
+
+    // 命中缓存：certificateForSerial 不再回源。
+    const by_serial = try store.certificateForSerial(serial);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+    try std.testing.expectEqualStrings(serial, by_serial.serial_no);
+
+    // 未命中：拉取一次后仍找不到 → SerialNotFound（且确实多打了一次 /v3/certificates）。
+    try std.testing.expectError(error.SerialNotFound, store.certificateForSerial("NO-SUCH-SERIAL"));
+    try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
+
+    // clear 清空缓存后 count / find 复原。
+    store.clear();
+    try std.testing.expectEqual(@as(usize, 0), store.count());
+    try std.testing.expect(store.find(serial) == null);
+}
+
+test "PlatformCertStore.setHeaderTransport 发出签名头（Authorization / Accept / GET）" {
+    const allocator = std.testing.allocator;
+    const key = "12345678901234567890123456789012";
+    const serial = "DEADBEEF00000000000000000000000000000000";
+
+    const cert_resp = try buildCertificatesResponse(allocator, key, serial);
+    defer allocator.free(cert_resp);
+
+    var cap = HeaderCaptureTransport{ .response = cert_resp };
+    var store = PlatformCertStore.init(allocator, testStoreConfig(key));
+    defer store.deinit();
+
+    store.setHeaderTransport(HeaderCaptureTransport.dispatch, @ptrCast(&cap));
+    try store.refresh();
+
+    try std.testing.expectEqual(@as(usize, 1), cap.calls);
+    try std.testing.expectEqual(std.http.Method.GET, cap.last_method);
+    try std.testing.expectEqualStrings(
+        base_url ++ certificates_path,
+        cap.last_uri_buf[0..cap.last_uri_len],
+    );
+
+    const auth = cap.auth_buf[0..cap.auth_len];
+    try std.testing.expect(std.mem.startsWith(u8, auth, "WECHATPAY2-SHA256-RSA2048 "));
+    try std.testing.expect(std.mem.find(u8, auth, "mchid=\"1900000109\"") != null);
+    try std.testing.expect(std.mem.find(u8, auth, "signature=\"") != null);
+    try std.testing.expectEqualStrings("application/json", cap.accept_buf[0..cap.accept_len]);
+
+    try std.testing.expectEqual(@as(usize, 1), store.count());
+    try std.testing.expect(store.find(serial) != null);
+
+    // setTransport 与 setHeaderTransport 互斥：设置普通 transport 后 header transport 被清掉，
+    // 后续 refresh 不再走 `cap`。
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute(base_url ++ certificates_path, .{ .body = cert_resp });
+    store.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    try store.refresh();
+    try std.testing.expectEqual(@as(usize, 1), cap.calls);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+
+    // 两个注入点互斥：任意时刻至多有一个非空。
+    // （`setTransport(null, null)` 即「彻底恢复真实 HTTPS」。）
+    store.setTransport(null, null);
+    try std.testing.expect(store.transport == null);
+    try std.testing.expect(store.header_transport == null);
+
+    // setHeaderTransport 同样会清掉普通 transport（反向互斥）。
+    store.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    store.setHeaderTransport(HeaderCaptureTransport.dispatch, @ptrCast(&cap));
+    try std.testing.expect(store.transport == null);
+    try std.testing.expect(store.header_transport != null);
+}

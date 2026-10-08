@@ -394,6 +394,89 @@ test "queryTrace POST 查询运单并解析状态" {
     try std.testing.expectEqualStrings("顺丰速运", parsed.value.delivery_info.delivery_name);
 }
 
+test "followWaybill POST 跟踪运单并解析 waybill_token" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"waybill_token\":\"wb-follow-1\"}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var e = Express.init(&ctx, allocator);
+    e.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try e.followWaybill(.{
+        .openid = "openid-1",
+        .delivery_id = "SF",
+        .waybill_id = "SF123",
+        .trans_id = "wxpay-tx-1",
+        .goods_info = .{ .detail_list = &[_]FollowWaybillGoodsInfoItem{.{ .goods_name = "商品A", .goods_img_url = "https://img/a.png" }} },
+    });
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.POST, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/express/delivery/open_msg/follow_waybill?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"goods_name\":\"商品A\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"waybill_id\":\"SF123\"") != null);
+    try std.testing.expectEqualStrings("wb-follow-1", parsed.value.waybill_token);
+}
+
+test "queryFollowTrace POST 查询跟踪运单并解析物品信息" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"waybill_info\":{\"waybill_id\":\"SF123\",\"status\":1},\"shop_info\":{\"goods_info\":{\"detail_list\":[{\"goods_name\":\"商品A\",\"goods_img_url\":\"https://img/a.png\"}]}},\"delivery_info\":{\"delivery_id\":\"SF\",\"delivery_name\":\"顺丰速运\"}}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var e = Express.init(&ctx, allocator);
+    e.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try e.queryFollowTrace(.{ .waybill_token = "wb-follow-1" });
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/express/delivery/open_msg/query_follow_trace?access_token=token-abc", tt.uri);
+    try std.testing.expectEqualStrings("{\"waybill_token\":\"wb-follow-1\"}", tt.payload);
+    try std.testing.expectEqual(WaybillStatus.picked, parsed.value.waybill_info.status);
+    try std.testing.expectEqualStrings("商品A", parsed.value.shop_info.goods_info.detail_list[0].goods_name);
+    try std.testing.expectEqualStrings("顺丰速运", parsed.value.delivery_info.delivery_name);
+}
+
+test "updateFollowWaybillGoods POST 更新物品信息（成功无返回体）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var e = Express.init(&ctx, allocator);
+    e.setTransport(CapturingTransport.dispatch, &tt);
+
+    try e.updateFollowWaybillGoods(.{
+        .waybill_token = "wb-follow-1",
+        .goods_info = .{ .detail_list = &[_]FollowWaybillGoodsInfoItem{.{ .goods_name = "商品B", .goods_img_url = "https://img/b.png", .goods_desc = "描述" }} },
+    });
+
+    try std.testing.expectEqual(std.http.Method.POST, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/express/delivery/open_msg/update_follow_waybill_goods?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"waybill_token\":\"wb-follow-1\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"goods_desc\":\"描述\"") != null);
+}
+
+test "getDeliveryList POST 运力 id 列表并解析" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"count\":1,\"delivery_list\":[{\"delivery_id\":\"SF\",\"delivery_name\":\"顺丰速运\"}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var e = Express.init(&ctx, allocator);
+    e.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try e.getDeliveryList();
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/express/delivery/open_msg/get_delivery_list?access_token=token-abc", tt.uri);
+    try std.testing.expectEqualStrings("{}", tt.payload);
+    try std.testing.expectEqual(@as(i64, 1), parsed.value.count);
+    try std.testing.expectEqualStrings("SF", parsed.value.delivery_list[0].delivery_id);
+    try std.testing.expectEqualStrings("顺丰速运", parsed.value.delivery_list[0].delivery_name);
+}
+
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
 
 const retry_testing = @import("../retry_testing.zig");

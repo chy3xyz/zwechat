@@ -484,6 +484,48 @@ test "getShippingOrderList POST 查询订单列表并解析" {
     try std.testing.expectEqual(State.wait_shipment, parsed.value.order_list[0].order_state);
 }
 
+test "uploadShippingInfo POST 发货信息录入（成功无返回体）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var sh = Shipping.init(&ctx, allocator);
+    sh.setTransport(CapturingTransport.dispatch, &tt);
+
+    try sh.uploadShippingInfo(.{
+        .order_key = .{ .out_trade_no = "t1", .mchid = "m1" },
+        .logistics_type = .virtual,
+        .shipping_list = &[_]ShippingInfo{.{ .item_desc = "虚拟商品", .tracking_no = "no-tracking" }},
+    });
+
+    try std.testing.expectEqual(std.http.Method.POST, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/order/upload_shipping_info?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"out_trade_no\":\"t1\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"logistics_type\":3") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"item_desc\":\"虚拟商品\"") != null);
+}
+
+test "notifyConfirmReceive POST 确认收货提醒（成功无返回体）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var sh = Shipping.init(&ctx, allocator);
+    sh.setTransport(CapturingTransport.dispatch, &tt);
+
+    try sh.notifyConfirmReceive(.{
+        .transaction_id = "tx-1",
+        .merchant_id = "m1",
+        .received_time = 1725000000,
+    });
+
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/order/notify_confirm_receive?access_token=token-abc", tt.uri);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"transaction_id\":\"tx-1\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"received_time\":1725000000") != null);
+}
+
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
 
 const retry_testing = @import("../retry_testing.zig");

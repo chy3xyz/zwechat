@@ -441,3 +441,53 @@ test "AESDecryptMsg 拒绝空 app_id 且空正文的报文（长度守卫）" {
     const r = aesDecryptMsg(allocator, cipher, aes_key);
     try std.testing.expectError(WechatError.DecodeError, r);
 }
+
+test "pkcs5Pad 按块大小 8 补位，pkcs5Unpad 还原（往返）" {
+    const allocator = std.testing.allocator;
+
+    // 3 字节 → 补 5 个 0x05
+    const padded = try pkcs5Pad(allocator, "abc");
+    defer allocator.free(padded);
+    try std.testing.expectEqual(@as(usize, 8), padded.len);
+    try std.testing.expectEqualStrings("abc\x05\x05\x05\x05\x05", padded);
+    try std.testing.expectEqualStrings("abc", pkcs5Unpad(padded));
+
+    // 恰好整块：补满一整块 8 个 0x08（不是零补位）
+    const exact = try pkcs5Pad(allocator, "12345678");
+    defer allocator.free(exact);
+    try std.testing.expectEqual(@as(usize, 16), exact.len);
+    for (exact[8..]) |b| try std.testing.expectEqual(@as(u8, 8), b);
+    try std.testing.expectEqualStrings("12345678", pkcs5Unpad(exact));
+
+    // 空输入同样补满一整块
+    const empty = try pkcs5Pad(allocator, "");
+    defer allocator.free(empty);
+    try std.testing.expectEqual(@as(usize, 8), empty.len);
+    for (empty) |b| try std.testing.expectEqual(@as(u8, 8), b);
+    try std.testing.expectEqual(@as(usize, 0), pkcs5Unpad(empty).len);
+
+    // 跨多个块的往返
+    const long = "0123456789ABCDEFGHIJ"; // 20 字节 → 24
+    const long_padded = try pkcs5Pad(allocator, long);
+    defer allocator.free(long_padded);
+    try std.testing.expectEqual(@as(usize, 24), long_padded.len);
+    for (long_padded[20..]) |b| try std.testing.expectEqual(@as(u8, 4), b);
+    try std.testing.expectEqualStrings(long, pkcs5Unpad(long_padded));
+}
+
+test "pkcs5Unpad 对非法补位不报错而是原样返回（既有契约，无错误分支）" {
+    // 去补位只看最后一个字节：`pad == 0` 或 `pad > len` 时**不截断**、不报错
+    // （`pkcs7Unpad` 的返回类型不含错误，`pkcs5Unpad` 又完全等价）。
+    try std.testing.expectEqualStrings("", pkcs5Unpad(""));
+    try std.testing.expectEqualStrings("ab\x00", pkcs5Unpad("ab\x00")); // pad = 0
+    const too_big = [_]u8{ 'a', 0xff };
+    try std.testing.expectEqualSlices(u8, &too_big, pkcs5Unpad(&too_big)); // pad = 255 > len
+    // 合法补位则正常截断。
+    try std.testing.expectEqualStrings("ab", pkcs5Unpad("ab\x01"));
+    try std.testing.expectEqualStrings("ab", pkcs5Unpad("ab\x02\x02"));
+    // 与 pkcs7Unpad 完全等价（同一内核）。
+    try std.testing.expectEqualStrings(
+        pkcs7Unpad("abc\x05\x05\x05\x05\x05"),
+        pkcs5Unpad("abc\x05\x05\x05\x05\x05"),
+    );
+}

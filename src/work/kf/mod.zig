@@ -4279,3 +4279,44 @@ test "getServicerList 正常输入 URI 逐字节不变、特殊字符 open_kfid 
         mt.history.items[1],
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SyncMessage.jsonParse 直接调用（此前只经由 std.json 内部间接触达）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test "SyncMessage.jsonParse 直接调用：强类型字段与 origin_data 同时就绪" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const json =
+        \\{"msgid":"m_direct","open_kfid":"kf_1","external_userid":"wm_1","send_time":1700000000,
+        \\ "origin":3,"msgtype":"text","text":{"content":"你好","menu_id":"menu_9"},
+        \\ "new_wechat_field":"keep-me"}
+    ;
+
+    var scanner = std.json.Scanner.initCompleteInput(a, json);
+    defer scanner.deinit();
+
+    const msg = try SyncMessage.jsonParse(a, &scanner, .{
+        .ignore_unknown_fields = true,
+        // 直接调用（非 std.json 内部路径）时需要显式给出这两个字段。
+        .max_value_len = json.len,
+        .allocate = .alloc_if_needed,
+    });
+
+    try std.testing.expectEqualStrings("m_direct", msg.msgid);
+    try std.testing.expectEqualStrings("kf_1", msg.open_kfid);
+    try std.testing.expectEqualStrings("wm_1", msg.external_userid);
+    try std.testing.expectEqual(@as(u64, 1700000000), msg.send_time);
+    try std.testing.expectEqual(@as(u32, 3), msg.origin);
+    try std.testing.expectEqualStrings("text", msg.msgtype);
+    try std.testing.expectEqualStrings("你好", msg.text.content);
+    try std.testing.expectEqualStrings("menu_9", msg.text.menu_id);
+
+    // origin_data 保留强类型结构体里没有的字段（本特性的核心价值）。
+    const origin = msg.getOriginValue() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("keep-me", origin.object.get("new_wechat_field").?.string);
+    try std.testing.expectEqualStrings("你好", origin.object.get("text").?.object.get("content").?.string);
+}

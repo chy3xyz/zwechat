@@ -9,6 +9,17 @@
 //! - 关闭订单：`POST /v3/pay/transactions/out-trade-no/{out_trade_no}/close`
 //!   <https://pay.weixin.qq.com/doc/v3/merchant/4012791881>
 //! - 前端拉起支付签名：`appId\ntimeStamp\nnonceStr\npackage\n`（RSA-SHA256）
+//!
+//! **关于路径段转义**：`out_trade_no` 直接拼进 URL 路径（`out-trade-no/{s}`），
+//! 这里**刻意不做** percent-encoding。依据是官方对商户订单号的字符集约束——
+//! 「只能是数字、大小写字母 `_-|*@`」（[JSAPI 下单](https://pay.weixin.qq.com/doc/v3/merchant/4012791856)、
+//! [查单](https://pay.weixin.qq.com/doc/v3/merchant/4012791859)），
+//! 该集合不含 `/` `?` `#` 与空格，因此 Go `url.PathEscape` 在**合法输入上是恒等变换**；
+//! 而这段 URL（`canonical_url`）同时是 v3 签名的待签原文，多绕一层编码反而要
+//! 保证"签的串与发的串"逐字一致，徒增出错面。若你确实要传非法字符，服务端会以
+//! 参数错误拒绝——这是期望行为，不要靠转义"抹平"。
+//! 同一约定适用于 `pay/v3/refund.zig` 的 `out_refund_no`（字符集 `_-|@`）与
+//! `pay/v3/transfer.zig` 的 `out_bill_no`。
 
 const std = @import("std");
 const Config = @import("config.zig").Config;
