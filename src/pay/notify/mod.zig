@@ -38,7 +38,7 @@ pub fn verifyPaidNotify(allocator: std.mem.Allocator, cfg: Config, xml_body: []c
         try param_array.append(allocator, .{ .key = el.key, .value = el.value });
     }
 
-    const biz = try std.fmt.allocPrint(allocator, "&key={s}", .{cfg.key});
+    const biz = try allocator.print("&key={s}", .{cfg.key});
     defer allocator.free(biz);
 
     const ordered = try util_param.orderParam(allocator, param_array.items, biz);
@@ -126,7 +126,7 @@ test "verifyPaidNotify 真实测试向量：签名匹配返回 true" {
         .{ .key = "transaction_id", .value = "4001234567890123456" },
     };
 
-    const biz = try std.fmt.allocPrint(allocator, "&key={s}", .{cfg.key});
+    const biz = try allocator.print("&key={s}", .{cfg.key});
     defer allocator.free(biz);
     const ordered = try util_param.orderParam(allocator, &test_params, biz);
     defer allocator.free(ordered);
@@ -180,8 +180,8 @@ test "decryptRefund 真实退款通知向量（Go 版 refund_test.go）" {
     const plain = try n.decryptRefund(allocator, req_info);
     defer allocator.free(plain);
     try std.testing.expect(std.mem.startsWith(u8, plain, "<root>"));
-    try std.testing.expect(std.mem.indexOf(u8, plain, "<out_refund_no>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plain, "50000404922017112502468056157") != null);
+    try std.testing.expect(std.mem.find(u8, plain, "<out_refund_no>") != null);
+    try std.testing.expect(std.mem.find(u8, plain, "50000404922017112502468056157") != null);
 }
 
 test "verifyPaidNotify 支持 HMAC-SHA256 sign_type" {
@@ -196,14 +196,14 @@ test "verifyPaidNotify 支持 HMAC-SHA256 sign_type" {
         .{ .key = "result_code", .value = "SUCCESS" },
         .{ .key = "sign_type", .value = "HMAC-SHA256" },
     };
-    const biz = try std.fmt.allocPrint(allocator, "&key={s}", .{cfg.key});
+    const biz = try allocator.print("&key={s}", .{cfg.key});
     defer allocator.free(biz);
     const ordered = try util_param.orderParam(allocator, &params, biz);
     defer allocator.free(ordered);
     const sign = try util_crypto.calculateSign(allocator, ordered, util_crypto.SignTypeHMACSHA256, cfg.key);
     defer allocator.free(sign);
 
-    const good = try std.fmt.allocPrint(allocator,
+    const good = try allocator.print(
         \\<xml><appid>wx123</appid><mch_id>m</mch_id><nonce_str>abc</nonce_str><result_code>SUCCESS</result_code><sign_type>HMAC-SHA256</sign_type><sign>{s}</sign></xml>
     , .{sign});
     defer allocator.free(good);
@@ -212,7 +212,7 @@ test "verifyPaidNotify 支持 HMAC-SHA256 sign_type" {
     // 同样的参数但用 MD5 伪造签名 → 必须验签失败（修复前恒按 MD5 计算则无法区分）。
     const md5_sign = try util_crypto.calculateSign(allocator, ordered, util_crypto.SignTypeMD5, "");
     defer allocator.free(md5_sign);
-    const bad = try std.fmt.allocPrint(allocator,
+    const bad = try allocator.print(
         \\<xml><appid>wx123</appid><mch_id>m</mch_id><nonce_str>abc</nonce_str><result_code>SUCCESS</result_code><sign_type>HMAC-SHA256</sign_type><sign>{s}</sign></xml>
     , .{md5_sign});
     defer allocator.free(bad);

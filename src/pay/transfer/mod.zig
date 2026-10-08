@@ -67,7 +67,7 @@ pub const Transfer = struct {
         const nonce_str = try util_util.randomStrWithIo(allocator, self.io, 32);
         defer allocator.free(nonce_str);
 
-        const amount_str = try std.fmt.allocPrint(allocator, "{d}", .{p.amount});
+        const amount_str = try allocator.print("{d}", .{p.amount});
         defer allocator.free(amount_str);
 
         const params = [_]util_param.Param{
@@ -84,7 +84,7 @@ pub const Transfer = struct {
             .{ .key = "re_user_name", .value = p.re_user_name },
         };
 
-        const biz = try std.fmt.allocPrint(allocator, "&key={s}", .{self.cfg.key});
+        const biz = try allocator.print("&key={s}", .{self.cfg.key});
         defer allocator.free(biz);
         const ordered = try util_param.orderParam(allocator, &params, biz);
         defer allocator.free(ordered);
@@ -239,7 +239,7 @@ test "toWallet FORCE_CHECK 时 re_user_name 参与签名（签名错误回归）
         if (el.value.len == 0) continue;
         try params.append(allocator, .{ .key = el.key, .value = el.value });
     }
-    const biz = try std.fmt.allocPrint(allocator, "&key={s}", .{"test_key"});
+    const biz = try allocator.print("&key={s}", .{"test_key"});
     defer allocator.free(biz);
     const ordered = try util_param.orderParam(allocator, params.items, biz);
     defer allocator.free(ordered);
@@ -253,7 +253,8 @@ test "toWallet FORCE_CHECK 时 re_user_name 参与签名（签名错误回归）
 
 // —— io 注入：nonce_str 不再直接访问全局单例 ——
 
-/// 冻结时钟的可观测 `Io`：`now` 恒定返回 `frozen_ns`。
+/// 冻结时钟 + 确定性随机源的可观测 `Io`：`now` 恒定返回 `frozen_ns`，
+/// `random` 恒定填 `0xAB`。用来证明 `nonce_str` 真的取自注入的 `io`。
 const FixedIo = struct {
     vtable: std.Io.VTable = undefined,
 
@@ -263,9 +264,14 @@ const FixedIo = struct {
         return .{ .nanoseconds = frozen_ns };
     }
 
+    fn random(_: ?*anyopaque, buf: []u8) void {
+        @memset(buf, 0xAB);
+    }
+
     fn io(self: *FixedIo) std.Io {
         self.vtable = default_io.io().vtable.*;
         self.vtable.now = now;
+        self.vtable.random = random;
         return .{ .userdata = null, .vtable = &self.vtable };
     }
 };
@@ -303,7 +309,7 @@ const NonceCapture = struct {
     }
 };
 
-test "toWallet 的 nonce_str 取自注入的 io（冻结时钟 → 可复现）" {
+test "toWallet 的 nonce_str 取自注入的 io（确定性随机源 → 可复现）" {
     const allocator = std.testing.allocator;
     var fixed = FixedIo{};
     var cap = NonceCapture{ .allocator = allocator };
@@ -331,6 +337,6 @@ test "toWallet 的 nonce_str 取自注入的 io（冻结时钟 → 可复现）"
     defer allocator.free(n2);
 
     try std.testing.expectEqual(@as(usize, 32), n1.len);
-    // 冻结时钟播种的 PRNG 可复现；若仍走全局单例（真实时间）两次结果不会相同。
+    // 注入的确定性 `io.random` 保证可复现；若改走全局单例（真实熵源）两次结果不会相同。
     try std.testing.expectEqualStrings(n1, n2);
 }

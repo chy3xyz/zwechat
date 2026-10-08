@@ -309,13 +309,13 @@ pub const Order = struct {
 
     /// 构造 APP 拉起支付参数。
     pub fn bridgeAppConfig(self: *Self, allocator: std.mem.Allocator, pre_order: PreOrder) !AppConfig {
-        const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{util_time.getCurrTSWithIo(self.io)});
+        const timestamp = try allocator.print("{d}", .{util_time.getCurrTSWithIo(self.io)});
         defer allocator.free(timestamp);
 
         const nonce_str = try util_util.randomStrWithIo(allocator, self.io, 32);
         defer allocator.free(nonce_str);
 
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(allocator);
         try buf.print(
             allocator,
@@ -341,7 +341,7 @@ pub const Order = struct {
     ///
     /// 签名算法由 `p.sign_type` 决定（与上游 Go 版一致，修复前恒为 MD5）。
     pub fn bridgeConfig(self: *Self, allocator: std.mem.Allocator, p: Params, pre_order: PreOrder) !BridgeConfig {
-        const timestamp = try std.fmt.allocPrint(allocator, "{d}", .{util_time.getCurrTSWithIo(self.io)});
+        const timestamp = try allocator.print("{d}", .{util_time.getCurrTSWithIo(self.io)});
         defer allocator.free(timestamp);
 
         const nonce_str = try util_util.randomStrWithIo(allocator, self.io, 32);
@@ -359,7 +359,7 @@ pub const Order = struct {
         defer allocator.free(sign_md5);
 
         // package 字段值是 "prepay_id=xxx"
-        const package_val = try std.fmt.allocPrint(allocator, "prepay_id={s}", .{pre_order.prepay_id});
+        const package_val = try allocator.print("prepay_id={s}", .{pre_order.prepay_id});
         defer allocator.free(package_val);
 
         return .{
@@ -386,7 +386,7 @@ pub fn bridgeJsPaySign(
     sign_type: []const u8,
     key: []const u8,
 ) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try buf.print(allocator, "appId={s}&nonceStr={s}&package=prepay_id={s}&signType={s}&timeStamp={s}&key={s}", .{
         app_id,
@@ -415,7 +415,7 @@ fn signParams(
     if (!std.mem.eql(u8, sign_type, util_crypto.SignTypeMD5) and
         !std.mem.eql(u8, sign_type, util_crypto.SignTypeHMACSHA256))
         return WechatError.InvalidArgument;
-    const biz = try std.fmt.allocPrint(allocator, "&key={s}", .{key});
+    const biz = try allocator.print("&key={s}", .{key});
     defer allocator.free(biz);
     const ordered = try util_param.orderParam(allocator, params, biz);
     defer allocator.free(ordered);
@@ -568,7 +568,7 @@ fn expectXmlSignConsistent(allocator: std.mem.Allocator, key: []const u8, xml_bo
         if (el.value.len == 0) continue;
         try params.append(allocator, .{ .key = el.key, .value = el.value });
     }
-    const biz = try std.fmt.allocPrint(allocator, "&key={s}", .{key});
+    const biz = try allocator.print("&key={s}", .{key});
     defer allocator.free(biz);
     const ordered = try util_param.orderParam(allocator, params.items, biz);
     defer allocator.free(ordered);
@@ -657,7 +657,7 @@ test "prePayOrder HMAC-SHA256 sign_type 签名与 XML 一致" {
         if (el.value.len == 0) continue;
         try params.append(allocator, .{ .key = el.key, .value = el.value });
     }
-    const biz = try std.fmt.allocPrint(allocator, "&key={s}", .{"test_key"});
+    const biz = try allocator.print("&key={s}", .{"test_key"});
     defer allocator.free(biz);
     const ordered = try util_param.orderParam(allocator, params.items, biz);
     defer allocator.free(ordered);
@@ -706,7 +706,8 @@ test "bridgeConfig 透传 sign_type（修复前恒为 MD5）" {
 
 // —— io 注入：nonce_str / timestamp 不再直接访问全局单例 ——
 
-/// 冻结时钟的可观测 `Io`：`now` 恒定返回 `frozen_ns`。
+/// 冻结时钟 + 确定性随机源的可观测 `Io`：`now` 恒定返回 `frozen_ns`，
+/// `random` 恒定填 `0xAB`。用来证明 `timestamp` / `nonce_str` 真的取自注入的 `io`。
 const FixedIo = struct {
     vtable: std.Io.VTable = undefined,
 
@@ -716,9 +717,14 @@ const FixedIo = struct {
         return .{ .nanoseconds = frozen_ns };
     }
 
+    fn random(_: ?*anyopaque, buf: []u8) void {
+        @memset(buf, 0xAB);
+    }
+
     fn io(self: *FixedIo) std.Io {
         self.vtable = default_io.io().vtable.*;
         self.vtable.now = now;
+        self.vtable.random = random;
         return .{ .userdata = null, .vtable = &self.vtable };
     }
 };
@@ -750,8 +756,7 @@ test "bridgeConfig / bridgeAppConfig 的 timestamp 与 nonce_str 取自注入的
     }
     try std.testing.expectEqualStrings("1700000000", cfg.timestamp);
 
-    // 冻结时钟播种的 PRNG：两次调用得到的 nonce_str 完全一致，
-    // 证明 randomStr 走的是注入的 io 而不是全局单例（后者取真实时间，几乎不可能重复）。
+    // 注入的确定性 `io.random` 保证可复现；若改走全局单例（真实熵源）两次结果不会相同。
     const cfg2 = try o.bridgeConfig(allocator, params, pre);
     defer {
         allocator.free(@constCast(cfg2.timestamp));
@@ -795,6 +800,10 @@ test "Order.io 默认值可用（未注入时 nonce_str 每次不同）" {
         allocator.free(@constCast(a.package));
         allocator.free(@constCast(a.pay_sign));
     }
+    // 未注入 io 时走 `default_io` 的真实熵源：两次紧邻调用也必须不同。
+    // （旧实现用「纳秒时间戳低 32 位」播种 PRNG，而 macOS 上 real clock 只有 1µs
+    // 粒度，ReleaseFast 下这两次紧邻调用会拿到完全相同的 nonce —— 这条断言当时
+    // 被迫用 `sleep(2ms)` 绕开计时竞争，现在不再需要。）
     const b = try o.bridgeConfig(allocator, params, pre);
     defer {
         allocator.free(@constCast(b.timestamp));
