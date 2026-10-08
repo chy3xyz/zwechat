@@ -188,7 +188,7 @@ const PosixImpl = struct {
         if (code == 0) return;
         var buf: [256]u8 = undefined;
         c.ERR_error_string_n(code, &buf, buf.len);
-        const len = std.mem.indexOfScalar(u8, &buf, 0) orelse buf.len;
+        const len = std.mem.findScalar(u8, &buf, 0) orelse buf.len;
         log.warn("mtls: OpenSSL 失败: {s}", .{buf[0..len]});
         code = c.ERR_get_error();
         while (code != 0) code = c.ERR_get_error();

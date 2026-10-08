@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! pay/v3 — 微信支付 v3 模块入口
 //!
-//! 包含 API v3 Config、Authorization 签名器、JSAPI/小程序拉起支付、v3 退款
-//! 与 v3 商家转账。
+//! 包含 API v3 Config、Authorization 签名器、JSAPI/小程序统一下单（下单 / 查单 /
+//! 关单）与前端拉起支付、回调验签 + 解密（平台证书管理）、v3 退款与 v3 商家转账。
 
 const std = @import("std");
 
@@ -11,8 +11,23 @@ pub const signer = @import("signer.zig");
 pub const OrderV3 = @import("order.zig").OrderV3;
 pub const JsapiPayParams = @import("order.zig").JsapiPayParams;
 pub const JsapiOrderParams = @import("order.zig").JsapiOrderParams;
+pub const CreateOrderResult = @import("order.zig").CreateOrderResult;
+pub const OrderQueryAmount = @import("order.zig").OrderQueryAmount;
+pub const OrderQueryPayer = @import("order.zig").OrderQueryPayer;
+pub const OrderQueryResult = @import("order.zig").OrderQueryResult;
 pub const notify = @import("notify.zig");
 pub const decryptNotifyResource = notify.decryptNotifyResource;
+pub const NotifyHeaders = notify.NotifyHeaders;
+pub const NotifyError = notify.NotifyError;
+pub const NotifyVerifier = notify.NotifyVerifier;
+pub const VerifiedNotify = notify.VerifiedNotify;
+pub const platform_cert = @import("platform_cert.zig");
+pub const PlatformCert = platform_cert.PlatformCert;
+pub const PlatformCertStore = platform_cert.PlatformCertStore;
+pub const CertificatesResponse = platform_cert.CertificatesResponse;
+pub const CertificateEntry = platform_cert.CertificateEntry;
+pub const EncryptCertificate = platform_cert.EncryptCertificate;
+pub const publicKeyPemFromCertificate = platform_cert.publicKeyPemFromCertificate;
 pub const RefundV3 = @import("refund.zig").RefundV3;
 pub const RefundParams = @import("refund.zig").RefundParams;
 pub const RefundAmount = @import("refund.zig").RefundAmount;
@@ -41,6 +56,34 @@ test "pay/v3 模块导出" {
     _ = RefundAmount;
     _ = RefundResult;
     _ = RefundNotifyResource;
+
+    // 统一下单：构造实例并走一遍 setter，确保 order.zig 被真正实例化。
+    var order_v3 = OrderV3.init(.{ .app_id = "wx-demo", .mch_id = "1900000109" });
+    order_v3.setTransport(null, null);
+    order_v3.setHeaderTransport(null, null);
+    try std.testing.expectEqualStrings("wx-demo", order_v3.cfg.app_id);
+    _ = CreateOrderResult;
+    _ = OrderQueryAmount;
+    _ = OrderQueryPayer;
+    _ = OrderQueryResult;
+
+    // 验签 + 平台证书：同样需要真实实例化（notify.zig / platform_cert.zig）。
+    var verifier = NotifyVerifier.init(std.testing.allocator, .{ .app_id = "wx-demo" });
+    defer verifier.deinit();
+    verifier.setTransport(null, null);
+    verifier.setHeaderTransport(null, null);
+    try std.testing.expectEqual(@as(usize, 0), verifier.cachedCertCount());
+    var headers = NotifyHeaders{};
+    headers.signature_type = "WECHATPAY2-SHA256-RSA2048";
+    try std.testing.expectEqualStrings("WECHATPAY2-SHA256-RSA2048", headers.signature_type);
+    _ = NotifyError;
+    _ = VerifiedNotify;
+    _ = PlatformCert;
+    _ = PlatformCertStore;
+    _ = CertificatesResponse;
+    _ = CertificateEntry;
+    _ = EncryptCertificate;
+    _ = publicKeyPemFromCertificate;
 
     // 商家转账：构造真实实例并取其字段，确保 transfer.zig 被真正实例化
     // （否则其 inline test 在懒分析下可能被整文件丢弃）。

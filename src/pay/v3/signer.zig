@@ -69,8 +69,7 @@ pub fn buildAuthorizationHeaderWithIo(
     errdefer allocator.free(nonce_str);
 
     // 构造待签名 Message
-    const message = try std.fmt.allocPrint(
-        allocator,
+    const message = try allocator.print(
         "{s}\n{s}\n{d}\n{s}\n{s}\n",
         .{ method, canonical_url, timestamp, nonce_str, body },
     );
@@ -84,8 +83,7 @@ pub fn buildAuthorizationHeaderWithIo(
     defer allocator.free(base64_sig);
     _ = std.base64.standard.Encoder.encode(base64_sig, raw_sig);
 
-    const auth_header = try std.fmt.allocPrint(
-        allocator,
+    const auth_header = try allocator.print(
         "WECHATPAY2-SHA256-RSA2048 mchid=\"{s}\",nonce_str=\"{s}\",signature=\"{s}\",timestamp=\"{d}\",serial_no=\"{s}\"",
         .{ cfg.mch_id, nonce_str, base64_sig, timestamp, cfg.serial_no },
     );
@@ -127,7 +125,8 @@ test "buildAuthorizationHeader 缺私钥返回 MissingPrivateKey（不再静默�
 
 // —— io 注入：timestamp / nonce_str 不再直接访问全局单例 ——
 
-/// 冻结时钟的可观测 `Io`：`now` 恒定返回 `frozen_ns`。
+/// 冻结时钟 + 确定性随机源的可观测 `Io`：`now` 恒定返回 `frozen_ns`，
+/// `random` 恒定填 `0xAB`。用来证明 `timestamp` / `nonce_str` 真的取自注入的 `io`。
 const FixedIo = struct {
     vtable: std.Io.VTable = undefined,
 
@@ -137,9 +136,14 @@ const FixedIo = struct {
         return .{ .nanoseconds = frozen_ns };
     }
 
+    fn random(_: ?*anyopaque, buf: []u8) void {
+        @memset(buf, 0xAB);
+    }
+
     fn io(self: *FixedIo) std.Io {
         self.vtable = default_io.io().vtable.*;
         self.vtable.now = now;
+        self.vtable.random = random;
         return .{ .userdata = null, .vtable = &self.vtable };
     }
 };
@@ -184,14 +188,14 @@ test "buildAuthorizationHeaderWithIo 的 timestamp / nonce_str 取自注入的 i
     defer r.deinit(allocator);
 
     try std.testing.expectEqual(@as(i64, 1_700_000_000), r.timestamp);
-    try std.testing.expect(std.mem.indexOf(u8, r.authorization, "timestamp=\"1700000000\"") != null);
+    try std.testing.expect(std.mem.find(u8, r.authorization, "timestamp=\"1700000000\"") != null);
 
-    const nonce_field = try std.fmt.allocPrint(allocator, "nonce_str=\"{s}\"", .{r.nonce_str});
+    const nonce_field = try allocator.print("nonce_str=\"{s}\"", .{r.nonce_str});
     defer allocator.free(nonce_field);
-    try std.testing.expect(std.mem.indexOf(u8, r.authorization, nonce_field) != null);
+    try std.testing.expect(std.mem.find(u8, r.authorization, nonce_field) != null);
 }
 
-test "buildAuthorizationHeaderWithIo 冻结时钟下 nonce_str 可复现（证明走注入 io）" {
+test "buildAuthorizationHeaderWithIo 注入确定性 random 时 nonce_str 可复现（证明走注入 io）" {
     const allocator = std.testing.allocator;
     var fixed = FixedIo{};
     const io = fixed.io();

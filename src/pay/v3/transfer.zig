@@ -226,14 +226,13 @@ pub const TransferV3 = struct {
     ) !std.json.Parsed(TransferBillResult) {
         if (out_bill_no.len == 0) return util_error.WechatError.InvalidArgument;
 
-        const canonical_url = try std.fmt.allocPrint(
-            allocator,
+        const canonical_url = try allocator.print(
             transfer_path ++ "/out-bill-no/{s}",
             .{out_bill_no},
         );
         defer allocator.free(canonical_url);
 
-        const full_url = try std.fmt.allocPrint(allocator, "{s}{s}", .{ transfer_host, canonical_url });
+        const full_url = try allocator.print("{s}{s}", .{ transfer_host, canonical_url });
         defer allocator.free(full_url);
 
         const resp = try self.doRequest(allocator, .GET, canonical_url, full_url, "");
@@ -258,14 +257,13 @@ pub const TransferV3 = struct {
     ) !std.json.Parsed(TransferCancelResult) {
         if (out_bill_no.len == 0) return util_error.WechatError.InvalidArgument;
 
-        const canonical_url = try std.fmt.allocPrint(
-            allocator,
+        const canonical_url = try allocator.print(
             transfer_path ++ "/out-bill-no/{s}/cancel",
             .{out_bill_no},
         );
         defer allocator.free(canonical_url);
 
-        const full_url = try std.fmt.allocPrint(allocator, "{s}{s}", .{ transfer_host, canonical_url });
+        const full_url = try allocator.print("{s}{s}", .{ transfer_host, canonical_url });
         defer allocator.free(full_url);
 
         const resp = try self.doRequest(allocator, .POST, canonical_url, full_url, "");
@@ -599,9 +597,9 @@ test "TransferV3.transfer 把 signer 生成的 Authorization 与 Wechatpay-Seria
     try std.testing.expect(cap.headerValue("Authorization") != null);
     const auth = cap.headerValue("Authorization").?;
     try std.testing.expect(std.mem.startsWith(u8, auth, "WECHATPAY2-SHA256-RSA2048 "));
-    try std.testing.expect(std.mem.indexOf(u8, auth, "mchid=\"1900000109\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, auth, "serial_no=\"1DDE557876238\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, auth, "signature=\"") != null);
+    try std.testing.expect(std.mem.find(u8, auth, "mchid=\"1900000109\"") != null);
+    try std.testing.expect(std.mem.find(u8, auth, "serial_no=\"1DDE557876238\"") != null);
+    try std.testing.expect(std.mem.find(u8, auth, "signature=\"") != null);
     // 原有的 Accept / Wechatpay-Serial 头部语义不变。
     try std.testing.expectEqualStrings("application/json", cap.headerValue("Accept").?);
     try std.testing.expectEqualStrings("PUB_KEY_ID_3000000001", cap.headerValue("Wechatpay-Serial").?);
@@ -715,21 +713,21 @@ test "TransferV3.transfer 请求体与应答解析（对照官方文档示例）
     );
 
     const payload = stub.lastPayload();
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"out_bill_no\":\"plfk2020042013\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"transfer_scene_id\":\"1000\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"openid\":\"o-MYE42l80oelYMDE34nYD456Xoy\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"transfer_amount\":400000") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"appid\":\"wxf636efh567hg4356\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"user_recv_perception\":\"现金奖励\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"user_recv_style\":{\"type\":\"RED_PACKET\"}") != null);
+    try std.testing.expect(std.mem.find(u8, payload, "\"out_bill_no\":\"plfk2020042013\"") != null);
+    try std.testing.expect(std.mem.find(u8, payload, "\"transfer_scene_id\":\"1000\"") != null);
+    try std.testing.expect(std.mem.find(u8, payload, "\"openid\":\"o-MYE42l80oelYMDE34nYD456Xoy\"") != null);
+    try std.testing.expect(std.mem.find(u8, payload, "\"transfer_amount\":400000") != null);
+    try std.testing.expect(std.mem.find(u8, payload, "\"appid\":\"wxf636efh567hg4356\"") != null);
+    try std.testing.expect(std.mem.find(u8, payload, "\"user_recv_perception\":\"现金奖励\"") != null);
+    try std.testing.expect(std.mem.find(u8, payload, "\"user_recv_style\":{\"type\":\"RED_PACKET\"}") != null);
     // 报备信息数组逐字对齐官方字段名
-    try std.testing.expect(std.mem.indexOf(u8, payload, "{\"info_type\":\"活动名称\",\"info_content\":\"新会员有礼\"}") != null);
+    try std.testing.expect(std.mem.find(u8, payload, "{\"info_type\":\"活动名称\",\"info_content\":\"新会员有礼\"}") != null);
     // 字符串转义：备注中的 " 与换行必须被 JSON 转义，不得裸插值
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"transfer_remark\":\"含\\\"引号\\\"\\n换行的备注\"") != null);
+    try std.testing.expect(std.mem.find(u8, payload, "\"transfer_remark\":\"含\\\"引号\\\"\\n换行的备注\"") != null);
     // notify_url 未显式传入时回退 Config.notify_url
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"notify_url\":\"https://merchant.example.com/wxpay/transfer/notify\"") != null);
+    try std.testing.expect(std.mem.find(u8, payload, "\"notify_url\":\"https://merchant.example.com/wxpay/transfer/notify\"") != null);
     // user_name 以密文原样透传（SDK 不做加密）
-    try std.testing.expect(std.mem.indexOf(u8, payload, "757b340b45ebef5467rter35gf464344v3542sdf4t6re4tb4f54ty45t4yyry45") != null);
+    try std.testing.expect(std.mem.find(u8, payload, "757b340b45ebef5467rter35gf464344v3542sdf4t6re4tb4f54ty45t4yyry45") != null);
 
     try std.testing.expectEqualStrings("plfk2020042013", parsed.value.out_bill_no);
     try std.testing.expectEqualStrings("1330000071100999991182020050700019480001", parsed.value.transfer_bill_no);
@@ -748,10 +746,10 @@ test "TransferV3.transfer 省略空可选字段（不含 user_name / notify_url 
     defer parsed.deinit();
 
     const payload = stub.lastPayload();
-    try std.testing.expect(std.mem.indexOf(u8, payload, "user_name") == null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "notify_url") == null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "user_recv_style") == null);
-    try std.testing.expect(std.mem.indexOf(u8, payload, "\"appid\":\"wx-appid-only\"") != null);
+    try std.testing.expect(std.mem.find(u8, payload, "user_name") == null);
+    try std.testing.expect(std.mem.find(u8, payload, "notify_url") == null);
+    try std.testing.expect(std.mem.find(u8, payload, "user_recv_style") == null);
+    try std.testing.expect(std.mem.find(u8, payload, "\"appid\":\"wx-appid-only\"") != null);
     // HTTP 200 但状态未终态：须能正常解析出状态
     try std.testing.expectEqualStrings("WAIT_USER_CONFIRM", parsed.value.state);
 }

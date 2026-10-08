@@ -51,7 +51,7 @@ pub fn parseHttpsUri(uri: []const u8) !Endpoint {
         return error.InvalidUri;
 
     const rest = uri[prefix.len..];
-    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+    const slash = std.mem.findScalar(u8, rest, '/') orelse rest.len;
     const authority = rest[0..slash];
     const path: []const u8 = if (slash == rest.len) "/" else rest[slash..];
     if (authority.len == 0) return error.InvalidUri;
@@ -60,14 +60,14 @@ pub fn parseHttpsUri(uri: []const u8) !Endpoint {
     var port: u16 = 443;
 
     if (authority[0] == '[') {
-        const close = std.mem.indexOfScalar(u8, authority, ']') orelse return error.InvalidUri;
+        const close = std.mem.findScalar(u8, authority, ']') orelse return error.InvalidUri;
         host = authority[1..close];
         const tail = authority[close + 1 ..];
         if (tail.len > 0) {
             if (tail[0] != ':') return error.InvalidUri;
             port = std.fmt.parseInt(u16, tail[1..], 10) catch return error.InvalidUri;
         }
-    } else if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
+    } else if (std.mem.findScalarLast(u8, authority, ':')) |colon| {
         host = authority[0..colon];
         port = std.fmt.parseInt(u16, authority[colon + 1 ..], 10) catch return error.InvalidUri;
     }
@@ -237,6 +237,18 @@ const backend = if (options.enabled) @import("mtls_openssl.zig") else StubBacken
 ///
 /// 关闭 `-Dmtls` 时返回 `error.MtlsNotEnabled`（不会发起任何连接）。
 /// 返回的响应体由调用方 `free`。
+///
+/// **已知缺口：这条通道没有超时**。`util.http` 的 `connect_timeout_ms` /
+/// `read_timeout_ms` 只作用于 `std.http.Client`，而 mTLS 走的是
+/// `mtls_openssl.zig` 的裸 socket + OpenSSL —— 对端"连上不回包"时这里的
+/// `SSL_read` / `connect` 会一直等下去。补它需要在后端内部对 fd 做
+/// `poll`（或设 `SO_RCVTIMEO`）并把 deadline 一路传进来，而
+/// `backend.exchange` 目前没有超时参数（改它属于 `mtls_openssl.zig` 的范围）。
+/// 在生产环境中若不能接受这个缺口，两条替代路径：
+/// 1. 把调用放在带 deadline 的线程 / 任务里（由调用方兜底取消）；
+/// 2. 迁到 v3 接口（`pay/v3/refund.zig` / `pay/v3/transfer.zig`）—— 走
+///    `std.http.Client`，因此**受** `HttpClient` 的 connect/read 超时保护。
+/// 目前仍刚需 mTLS 的只有 v2 现金红包。
 pub fn postXML(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -339,7 +351,7 @@ test "buildRequest 非 443 端口在 Host 头里带端口" {
     try std.testing.expect(
         std.mem.startsWith(u8, req, "POST /pay HTTP/1.1\r\nHost: 127.0.0.1:8443\r\n"),
     );
-    try std.testing.expect(std.mem.indexOf(u8, req, "Content-Length: 0\r\n") != null);
+    try std.testing.expect(std.mem.find(u8, req, "Content-Length: 0\r\n") != null);
 }
 
 test "parseResponse 解析 Content-Length 响应" {

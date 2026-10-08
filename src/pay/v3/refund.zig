@@ -179,15 +179,13 @@ pub const RefundV3 = struct {
     pub fn queryRefund(self: *Self, allocator: std.mem.Allocator, out_refund_no: []const u8) !std.json.Parsed(RefundResult) {
         if (out_refund_no.len == 0) return util_error.WechatError.InvalidArgument;
 
-        const canonical_url = try std.fmt.allocPrint(
-            allocator,
+        const canonical_url = try allocator.print(
             "/v3/refund/domestic/refunds/{s}?mchid={s}",
             .{ out_refund_no, self.cfg.mch_id },
         );
         defer allocator.free(canonical_url);
 
-        const full_url = try std.fmt.allocPrint(
-            allocator,
+        const full_url = try allocator.print(
             "https://api.mch.weixin.qq.com{s}",
             .{canonical_url},
         );
@@ -475,10 +473,10 @@ test "RefundV3.refund 把 signer 生成的 Authorization 交给请求头入口�
     try std.testing.expect(cap.headerValue("Authorization") != null);
     const auth = cap.headerValue("Authorization").?;
     try std.testing.expect(std.mem.startsWith(u8, auth, "WECHATPAY2-SHA256-RSA2048 "));
-    try std.testing.expect(std.mem.indexOf(u8, auth, "mchid=\"1900000109\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, auth, "serial_no=\"1DDE557876238\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, auth, "signature=\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, auth, "nonce_str=\"") != null);
+    try std.testing.expect(std.mem.find(u8, auth, "mchid=\"1900000109\"") != null);
+    try std.testing.expect(std.mem.find(u8, auth, "serial_no=\"1DDE557876238\"") != null);
+    try std.testing.expect(std.mem.find(u8, auth, "signature=\"") != null);
+    try std.testing.expect(std.mem.find(u8, auth, "nonce_str=\"") != null);
     try std.testing.expectEqualStrings("application/json", cap.headerValue("Accept").?);
 
     // 签名前的 canonical URL 是路径 + query（不含 host），body 签名串与请求体一致。
@@ -569,10 +567,10 @@ test "RefundV3.refund 请求体与应答解析（对照官方文档示例）" {
 
     try std.testing.expectEqual(std.http.Method.POST, stub.last_method);
     try std.testing.expectEqualStrings("https://api.mch.weixin.qq.com/v3/refund/domestic/refunds", stub.lastUri());
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"transaction_id\":\"1217752501201407033233368018\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"out_refund_no\":\"1217752501201407033233368018\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"refund\":888") != null);
-    try std.testing.expect(std.mem.indexOf(u8, stub.lastPayload(), "\"currency\":\"CNY\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"transaction_id\":\"1217752501201407033233368018\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"out_refund_no\":\"1217752501201407033233368018\"") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"refund\":888") != null);
+    try std.testing.expect(std.mem.find(u8, stub.lastPayload(), "\"currency\":\"CNY\"") != null);
 
     try std.testing.expectEqualStrings("50000000382019052709732678859", parsed.value.refund_id);
     try std.testing.expectEqualStrings("SUCCESS", parsed.value.status);
