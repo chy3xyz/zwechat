@@ -5,6 +5,33 @@ All notable changes to `zwechat` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`nonce_str` 在优化构建下会重复（真实缺陷，release 模式测试挖出）**：`util/util.zig` 的 `randomStrWithIo` 原用纳秒时间戳低 32 位播种 PRNG，而 macOS 上 real clock 只有 **1µs 粒度**——ReleaseSafe/ReleaseFast/ReleaseSmall 下**同一微秒内的两次调用会产出完全相同的 nonce**（实测旧实现 2000 次连续调用有 1764 次碰撞，新实现 0 次），削弱了 nonce 的防重放意义，影响 `pay/{order,refund,transfer,redpacket}`、`pay/v3/signer`、`officialaccount/js`、`work/jsapi`。现改为 `io.random`（`std.Random.IoSource`）取熵；函数签名、长度与字符集契约不变。配套把 7 处"冻结时钟"测试夹具改为注入**确定性 `random`**（断言仍验证"nonce 取自注入的 io"），并删掉此前为绕开计时竞争而加的 `sleep`。
+- **`Allocator.ptr` 比较属 UB**：`std/mem/Allocator.zig` 明确写着该字段在无状态分配器下可能是 `undefined`、"任何比较都可能导致非法行为"（`page_allocator`/`smp_allocator`/`c_allocator` 均如此）。`util/http.zig` 的 `sameAllocator` 改为三级判定：`vtable` 不等即不同 → 可命名的无状态单例按 `vtable` 判等（不触碰 `ptr`）→ 其余才比 `ptr`；`initDefaultClient` / `defaultClientAllocatorMatches` 的文档补充"best-effort"限制。fail-closed 语义未削弱（两个不同 `ArenaAllocator` 仍判为不一致）。
+- **ReleaseSafe/ReleaseFast/ReleaseSmall 下测试失败**（Debug 全绿）：三处用例依赖"`page_allocator` 与 `testing.allocator` 天然不同"与"`@intFromPtr(&局部变量)`"这类 release-sensitive 行为；已改为显式构造可区分的分配器与指针同一性断言。另全仓清掉 8 处同类 `@intFromPtr` 指针同一性写法（保留 2 处"同一对象内偏移量"的正当用法）。
+
+### Added
+
+- **HTTP 客户端超时（P0，默认非零）**：`HttpClient` 新增 `connect_timeout_ms`（默认 **10s**）与 `read_timeout_ms`（默认 **30s**）及 `setTimeouts()`；`0` = 不限（逃生阀）。此前**一行超时都没有**——对端半死会让调用线程永久挂起（生产上已发生过同类出站挂死）。实现方式是给 `std.http.Client` 套一个**覆写了 `operate` / `netConnectIp` 并逐项转发调度/取消族的 `Io`**（`std` 未提供 `net_connect` 操作，非阻塞 connect + `poll` 自行实现）；超时后连接**不进池**（有断言）。transport/mock 路径不套超时并在文档写明。新错误：`error.ConnectTimeout` / `error.ReadTimeout`（注：Windows 上建连超时暂不生效，DNS 查询不受 connect 超时约束）。
+- **微信支付 v3 回调验签层（P0，安全）**：此前只有 AES-GCM 解密，**没有验签**。现补齐：`Wechatpay-{Signature,Timestamp,Nonce,Serial}` 头提取、待签名串 `timestamp\nnonce\nbody\n` + RSA-SHA256 验签（复用 `util/rsa.zig`，未手写 RSA）、时间戳窗口（默认 ±300s，i128 差值防溢出）、签名探测流量按失败处理、**平台证书管理**（`GET /v3/certificates` + APIv3 密钥 GCM 解密 + 按 serial 缓存 + 未命中重拉一次应对轮换 + 失败保留旧缓存）、公钥模式（`PUB_KEY_ID_`）。新增 `NotifyVerifier.verifyAndDecrypt(headers, body)` 串联入口；原纯解密函数签名不变。
+- **v3 统一下单 / 查询 / 关单**：`POST /v3/pay/transactions/jsapi`（返回 `prepay_id`）、`GET /v3/pay/transactions/out-trade-no/{no}?mchid=`、`POST .../close`（204 无包体视为成功）。此前 v3 只有"prepay_id → 前端调起签名"，没有下单端点。
+- **小程序域 live probe**：新增 `mp.operation.domain`（`/wxa/getwxadevinfo`）与 `mp.subscribe.templates`（`/wxaapi/newtmpl/gettemplate`）两个只读探针（只需 appid+secret）；`code2session` 因需要一次性真实 `js_code` 而**不做探针**（已在注释说明）。
+
+### Fixed
+
+- **`Subscribe.getCategory` 无法编译（懒分析陷阱）**：返回类型与 `parseFromSlice` 里各写了一份**结构相同的匿名 struct**，Zig 视其为不同类型 → 该公开 API **一旦被调用就编译失败**，而 `zig build` 引用它不报错。现提取为具名 `CategoryList` 并补真实调用测试（公开面签名文本随之变化，见 Changed）。
+- **`code2Session` 绕过 `setTransport` 且零测试**：它原先直接 `getDefaultClient()`，因此无法被注入测试（这正是"全仓零测试"的原因）；现走模块内 `httpGet`，并补齐测试（正常解析、`40029` 错误码记入 `lastErrorDetail` 通道、`js_code` 转义、非 JSON 响应、secret 不泄漏）。
+- **GET query 参数转义纪律（22 处）**：`officialaccount/{oauth,user,material}`、`work/{oauth,externalcontact,addresslist,kf,appchat,robot,material}`、`openplatform/context/auth` 的用户可控参数（`code`/`openid`/`next_openid`/`refresh_token`/`cursor`/`userid`/`chatid`/`open_kfid`/`media_id`/`key`/`biz_appid`/`state`/`redirect_uri`）统一走 `util_uri.queryEscape`；并更正 2 处与实现矛盾的文档注释。**刻意保留**：`customerservice` 的 `kf_account`（契约格式含 `@`，Go 参考也不转义，转义反而破坏既有逐字节断言）、pay v3 的**路径段**（非 query，需 Go `url.PathEscape` 语义的独立编码器，列为待办）、各类签名原文串（转义会算错签名）。
+- **`sendWithHeaders` 非 2xx 不再丢状态码/响应体**：改为把微信形态的错误体写进 `lastErrorDetail()` 通道并打一条含状态码与截断 body 的 warn（URI 去掉 query，避免泄漏 `access_token`）；顺带修掉 `response.bodyErr().?` 在 `Content-Length` 定界响应上必然 panic 的隐患。
+
+### Changed
+
+- **Zig 0.17.0 弃用别名清扫（838 处，机械替换、语义逐字等价）**：`std.mem.indexOf*` → `find*`（439）、`std.fmt.allocPrint` → `Allocator.print`（278）、`std.fmt.bufPrint` → `std.mem.print`（35）、`std.ArrayListUnmanaged` → `std.ArrayList`（63）、`std.mem.copyForwards` → `@memmove`（3）、`std.fs.path` → `std.Io.Dir.path`（5）。**字段类型文本变化**：`Redis.idle`（`std.ArrayListUnmanaged(*Conn)` → `std.ArrayList(*Conn)`，同一类型的改名）。
+- **`build.zig` 三处适配 0.17.0**：`addDirectoryArg`（已弃用）→ `addDirectoryArg2`；`addFmt` 覆盖范围加入 `tools/`；给 `live-probe` 加 `Run.addPassthruArgs`，于是 **`zig build live-probe -- --strict` 现在真的会转发**（此前注释断言"不可能"，已更正）。
+
 ## [0.5.2] — 2026-10-04
 
 ### Changed

@@ -99,7 +99,7 @@ src/cache/redis.zig: field PoolStats.timeouts: usize
 src/cache/redis.zig: field Redis.allocator: std.mem.Allocator
 src/cache/redis.zig: field Redis.created_total: usize
 src/cache/redis.zig: field Redis.discarded_total: usize
-src/cache/redis.zig: field Redis.idle: std.ArrayListUnmanaged(*Conn)
+src/cache/redis.zig: field Redis.idle: std.ArrayList(*Conn)
 src/cache/redis.zig: field Redis.io: std.Io
 src/cache/redis.zig: field Redis.live: usize
 src/cache/redis.zig: field Redis.max_connections: usize
@@ -1835,6 +1835,9 @@ src/miniprogram/shortlink/mod.zig: sig ShortLink.generateShortLinkTemp(*Self, []
 src/miniprogram/shortlink/mod.zig: sig ShortLink.init(*Context, std.mem.Allocator) Self
 src/miniprogram/subscribe/mod.zig: field Category.id: i64
 src/miniprogram/subscribe/mod.zig: field Category.name: []const u8
+src/miniprogram/subscribe/mod.zig: field CategoryList.data: []const Category
+src/miniprogram/subscribe/mod.zig: field CategoryList.errcode: i64
+src/miniprogram/subscribe/mod.zig: field CategoryList.errmsg: []const u8
 src/miniprogram/subscribe/mod.zig: field DataEntry.color: []const u8
 src/miniprogram/subscribe/mod.zig: field DataEntry.key: []const u8
 src/miniprogram/subscribe/mod.zig: field DataEntry.value: []const u8
@@ -1879,6 +1882,7 @@ src/miniprogram/subscribe/mod.zig: field WeappTemplateMsg.form_id: []const u8
 src/miniprogram/subscribe/mod.zig: field WeappTemplateMsg.page: []const u8
 src/miniprogram/subscribe/mod.zig: field WeappTemplateMsg.template_id: []const u8
 src/miniprogram/subscribe/mod.zig: pub const Category
+src/miniprogram/subscribe/mod.zig: pub const CategoryList
 src/miniprogram/subscribe/mod.zig: pub const DataEntry
 src/miniprogram/subscribe/mod.zig: pub const KeywordEnumValue
 src/miniprogram/subscribe/mod.zig: pub const Message
@@ -1898,7 +1902,7 @@ src/miniprogram/subscribe/mod.zig: pub fn Subscribe.send
 src/miniprogram/subscribe/mod.zig: pub fn Subscribe.sendGetMsgId
 src/miniprogram/subscribe/mod.zig: pub fn Subscribe.setTransport
 src/miniprogram/subscribe/mod.zig: pub fn Subscribe.uniformSend
-src/miniprogram/subscribe/mod.zig: sig Subscribe.getCategory(*Self) std.json.Parsed(struct { errcode: i64 = 0, errmsg: []const u8 = "", data: []const Category = &.{}, })
+src/miniprogram/subscribe/mod.zig: sig Subscribe.getCategory(*Self) std.json.Parsed(CategoryList)
 src/miniprogram/subscribe/mod.zig: sig Subscribe.init(*Context, std.mem.Allocator) Self
 src/miniprogram/subscribe/mod.zig: sig Subscribe.listTemplates(*Self) std.json.Parsed(TemplateList)
 src/miniprogram/subscribe/mod.zig: sig Subscribe.send(*Self, Message) void
@@ -4106,10 +4110,22 @@ src/pay/v3/config.zig: field Config.private_key_pem: []const u8
 src/pay/v3/config.zig: field Config.serial_no: []const u8
 src/pay/v3/config.zig: field Config.wechatpay_serial: []const u8
 src/pay/v3/config.zig: pub const Config
+src/pay/v3/mod.zig: pub const CertificateEntry
+src/pay/v3/mod.zig: pub const CertificatesResponse
 src/pay/v3/mod.zig: pub const Config
+src/pay/v3/mod.zig: pub const CreateOrderResult
+src/pay/v3/mod.zig: pub const EncryptCertificate
 src/pay/v3/mod.zig: pub const JsapiOrderParams
 src/pay/v3/mod.zig: pub const JsapiPayParams
+src/pay/v3/mod.zig: pub const NotifyError
+src/pay/v3/mod.zig: pub const NotifyHeaders
+src/pay/v3/mod.zig: pub const NotifyVerifier
+src/pay/v3/mod.zig: pub const OrderQueryAmount
+src/pay/v3/mod.zig: pub const OrderQueryPayer
+src/pay/v3/mod.zig: pub const OrderQueryResult
 src/pay/v3/mod.zig: pub const OrderV3
+src/pay/v3/mod.zig: pub const PlatformCert
+src/pay/v3/mod.zig: pub const PlatformCertStore
 src/pay/v3/mod.zig: pub const RefundAmount
 src/pay/v3/mod.zig: pub const RefundNotifyResource
 src/pay/v3/mod.zig: pub const RefundParams
@@ -4123,9 +4139,17 @@ src/pay/v3/mod.zig: pub const TransferResult
 src/pay/v3/mod.zig: pub const TransferSceneReportInfo
 src/pay/v3/mod.zig: pub const TransferV3
 src/pay/v3/mod.zig: pub const UserRecvStyle
+src/pay/v3/mod.zig: pub const VerifiedNotify
 src/pay/v3/mod.zig: pub const decryptNotifyResource
 src/pay/v3/mod.zig: pub const notify
+src/pay/v3/mod.zig: pub const platform_cert
+src/pay/v3/mod.zig: pub const publicKeyPemFromCertificate
 src/pay/v3/mod.zig: pub const signer
+src/pay/v3/notify.zig: field NotifyHeaders.nonce: []const u8
+src/pay/v3/notify.zig: field NotifyHeaders.serial: []const u8
+src/pay/v3/notify.zig: field NotifyHeaders.signature: []const u8
+src/pay/v3/notify.zig: field NotifyHeaders.signature_type: []const u8
+src/pay/v3/notify.zig: field NotifyHeaders.timestamp: []const u8
 src/pay/v3/notify.zig: field NotifyResource.algorithm: []const u8
 src/pay/v3/notify.zig: field NotifyResource.associated_data: []const u8
 src/pay/v3/notify.zig: field NotifyResource.ciphertext: []const u8
@@ -4136,37 +4160,170 @@ src/pay/v3/notify.zig: field NotifyResponseBody.id: []const u8
 src/pay/v3/notify.zig: field NotifyResponseBody.resource: NotifyResource
 src/pay/v3/notify.zig: field NotifyResponseBody.resource_type: []const u8
 src/pay/v3/notify.zig: field NotifyResponseBody.summary: []const u8
+src/pay/v3/notify.zig: field NotifyVerifier.cfg: Config
+src/pay/v3/notify.zig: field NotifyVerifier.io: std.Io
+src/pay/v3/notify.zig: field NotifyVerifier.max_timestamp_skew_seconds: i64
+src/pay/v3/notify.zig: field NotifyVerifier.store: platform_cert.PlatformCertStore
+src/pay/v3/notify.zig: field NotifyVerifier.wechatpay_public_key_pem: []const u8
+src/pay/v3/notify.zig: field VerifiedNotify.body: std.json.Parsed(NotifyResponseBody)
+src/pay/v3/notify.zig: field VerifiedNotify.plaintext: []u8
+src/pay/v3/notify.zig: pub const NotifyError
+src/pay/v3/notify.zig: pub const NotifyHeaders
 src/pay/v3/notify.zig: pub const NotifyResource
 src/pay/v3/notify.zig: pub const NotifyResponseBody
+src/pay/v3/notify.zig: pub const NotifyVerifier
+src/pay/v3/notify.zig: pub const VerifiedNotify
+src/pay/v3/notify.zig: pub const default_max_timestamp_skew_seconds
+src/pay/v3/notify.zig: pub const pub_key_id_prefix
+src/pay/v3/notify.zig: pub fn NotifyHeaders.fromHeaders
+src/pay/v3/notify.zig: pub fn NotifyVerifier.cachedCertCount
+src/pay/v3/notify.zig: pub fn NotifyVerifier.deinit
+src/pay/v3/notify.zig: pub fn NotifyVerifier.init
+src/pay/v3/notify.zig: pub fn NotifyVerifier.setHeaderTransport
+src/pay/v3/notify.zig: pub fn NotifyVerifier.setTransport
+src/pay/v3/notify.zig: pub fn NotifyVerifier.verify
+src/pay/v3/notify.zig: pub fn NotifyVerifier.verifyAndDecrypt
+src/pay/v3/notify.zig: pub fn VerifiedNotify.deinit
 src/pay/v3/notify.zig: pub fn decryptNotifyResource
+src/pay/v3/notify.zig: pub fn verifySignature
+src/pay/v3/notify.zig: pub fn verifySignatureWithIo
+src/pay/v3/notify.zig: sig NotifyHeaders.fromHeaders([]const std.http.Header) NotifyHeaders
+src/pay/v3/notify.zig: sig NotifyVerifier.cachedCertCount(*const Self) usize
+src/pay/v3/notify.zig: sig NotifyVerifier.deinit(*Self) void
+src/pay/v3/notify.zig: sig NotifyVerifier.init(std.mem.Allocator, Config) Self
+src/pay/v3/notify.zig: sig NotifyVerifier.setHeaderTransport(*Self, ?util_http.HeaderTransport, ?*anyopaque) void
+src/pay/v3/notify.zig: sig NotifyVerifier.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/pay/v3/notify.zig: sig NotifyVerifier.verify(*Self, NotifyHeaders, []const u8) NotifyError!void
+src/pay/v3/notify.zig: sig NotifyVerifier.verifyAndDecrypt(*Self, std.mem.Allocator, NotifyHeaders, []const u8) VerifiedNotify
+src/pay/v3/notify.zig: sig VerifiedNotify.deinit(*VerifiedNotify, std.mem.Allocator) void
 src/pay/v3/notify.zig: sig decryptNotifyResource(std.mem.Allocator, []const u8, []const u8, []const u8, []const u8) []u8
+src/pay/v3/notify.zig: sig verifySignature(std.mem.Allocator, NotifyHeaders, []const u8, []const u8) NotifyError!void
+src/pay/v3/notify.zig: sig verifySignatureWithIo(std.mem.Allocator, std.Io, NotifyHeaders, []const u8, []const u8, i64) NotifyError!void
 src/pay/v3/order.zig: field Amount.currency: []const u8
 src/pay/v3/order.zig: field Amount.total: i64
+src/pay/v3/order.zig: field CreateOrderResult.prepay_id: []const u8
 src/pay/v3/order.zig: field JsapiOrderParams.amount: Amount
+src/pay/v3/order.zig: field JsapiOrderParams.attach: []const u8
 src/pay/v3/order.zig: field JsapiOrderParams.description: []const u8
+src/pay/v3/order.zig: field JsapiOrderParams.goods_tag: []const u8
 src/pay/v3/order.zig: field JsapiOrderParams.notify_url: []const u8
 src/pay/v3/order.zig: field JsapiOrderParams.out_trade_no: []const u8
 src/pay/v3/order.zig: field JsapiOrderParams.payer: Payer
+src/pay/v3/order.zig: field JsapiOrderParams.support_fapiao: bool
+src/pay/v3/order.zig: field JsapiOrderParams.time_expire: []const u8
 src/pay/v3/order.zig: field JsapiPayParams.app_id: []const u8
 src/pay/v3/order.zig: field JsapiPayParams.nonce_str: []const u8
 src/pay/v3/order.zig: field JsapiPayParams.package: []const u8
 src/pay/v3/order.zig: field JsapiPayParams.pay_sign: []const u8
 src/pay/v3/order.zig: field JsapiPayParams.sign_type: []const u8
 src/pay/v3/order.zig: field JsapiPayParams.time_stamp: []const u8
+src/pay/v3/order.zig: field OrderQueryAmount.currency: []const u8
+src/pay/v3/order.zig: field OrderQueryAmount.payer_currency: []const u8
+src/pay/v3/order.zig: field OrderQueryAmount.payer_total: i64
+src/pay/v3/order.zig: field OrderQueryAmount.total: i64
+src/pay/v3/order.zig: field OrderQueryPayer.openid: []const u8
+src/pay/v3/order.zig: field OrderQueryResult.amount: OrderQueryAmount
+src/pay/v3/order.zig: field OrderQueryResult.appid: []const u8
+src/pay/v3/order.zig: field OrderQueryResult.attach: []const u8
+src/pay/v3/order.zig: field OrderQueryResult.bank_type: []const u8
+src/pay/v3/order.zig: field OrderQueryResult.mchid: []const u8
+src/pay/v3/order.zig: field OrderQueryResult.out_trade_no: []const u8
+src/pay/v3/order.zig: field OrderQueryResult.payer: OrderQueryPayer
+src/pay/v3/order.zig: field OrderQueryResult.success_time: []const u8
+src/pay/v3/order.zig: field OrderQueryResult.trade_state: []const u8
+src/pay/v3/order.zig: field OrderQueryResult.trade_state_desc: []const u8
+src/pay/v3/order.zig: field OrderQueryResult.trade_type: []const u8
+src/pay/v3/order.zig: field OrderQueryResult.transaction_id: []const u8
 src/pay/v3/order.zig: field OrderV3.cfg: Config
+src/pay/v3/order.zig: field OrderV3.header_transport: ?util_http.HeaderTransport
 src/pay/v3/order.zig: field OrderV3.io: std.Io
+src/pay/v3/order.zig: field OrderV3.transport: ?util_http.HttpClient.Transport
+src/pay/v3/order.zig: field OrderV3.transport_ctx: ?*anyopaque
 src/pay/v3/order.zig: field Payer.openid: []const u8
 src/pay/v3/order.zig: pub const Amount
+src/pay/v3/order.zig: pub const CreateOrderResult
 src/pay/v3/order.zig: pub const JsapiOrderParams
 src/pay/v3/order.zig: pub const JsapiPayParams
+src/pay/v3/order.zig: pub const OrderQueryAmount
+src/pay/v3/order.zig: pub const OrderQueryPayer
+src/pay/v3/order.zig: pub const OrderQueryResult
 src/pay/v3/order.zig: pub const OrderV3
 src/pay/v3/order.zig: pub const Payer
+src/pay/v3/order.zig: pub const base_url
 src/pay/v3/order.zig: pub fn JsapiPayParams.deinit
+src/pay/v3/order.zig: pub fn OrderV3.closeOrder
+src/pay/v3/order.zig: pub fn OrderV3.createJsapiOrder
 src/pay/v3/order.zig: pub fn OrderV3.getJsPayParams
 src/pay/v3/order.zig: pub fn OrderV3.init
+src/pay/v3/order.zig: pub fn OrderV3.queryOrderByOutTradeNo
+src/pay/v3/order.zig: pub fn OrderV3.setHeaderTransport
+src/pay/v3/order.zig: pub fn OrderV3.setTransport
 src/pay/v3/order.zig: sig JsapiPayParams.deinit(*JsapiPayParams, std.mem.Allocator) void
+src/pay/v3/order.zig: sig OrderV3.closeOrder(*Self, std.mem.Allocator, []const u8) void
+src/pay/v3/order.zig: sig OrderV3.createJsapiOrder(*Self, std.mem.Allocator, JsapiOrderParams) std.json.Parsed(CreateOrderResult)
 src/pay/v3/order.zig: sig OrderV3.getJsPayParams(OrderV3, std.mem.Allocator, []const u8) JsapiPayParams
 src/pay/v3/order.zig: sig OrderV3.init(Config) OrderV3
+src/pay/v3/order.zig: sig OrderV3.queryOrderByOutTradeNo(*Self, std.mem.Allocator, []const u8) std.json.Parsed(OrderQueryResult)
+src/pay/v3/order.zig: sig OrderV3.setHeaderTransport(*Self, ?util_http.HeaderTransport, ?*anyopaque) void
+src/pay/v3/order.zig: sig OrderV3.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/pay/v3/platform_cert.zig: field CertificateEntry.effective_time: []const u8
+src/pay/v3/platform_cert.zig: field CertificateEntry.encrypt_certificate: EncryptCertificate
+src/pay/v3/platform_cert.zig: field CertificateEntry.expire_time: []const u8
+src/pay/v3/platform_cert.zig: field CertificateEntry.serial_no: []const u8
+src/pay/v3/platform_cert.zig: field CertificatesResponse.data: []const CertificateEntry
+src/pay/v3/platform_cert.zig: field EncryptCertificate.algorithm: []const u8
+src/pay/v3/platform_cert.zig: field EncryptCertificate.associated_data: []const u8
+src/pay/v3/platform_cert.zig: field EncryptCertificate.ciphertext: []const u8
+src/pay/v3/platform_cert.zig: field EncryptCertificate.nonce: []const u8
+src/pay/v3/platform_cert.zig: field PlatformCert.cert_pem: []u8
+src/pay/v3/platform_cert.zig: field PlatformCert.public_key_pem: []u8
+src/pay/v3/platform_cert.zig: field PlatformCert.serial_no: []u8
+src/pay/v3/platform_cert.zig: field PlatformCertStore.allocator: std.mem.Allocator
+src/pay/v3/platform_cert.zig: field PlatformCertStore.certs: []PlatformCert
+src/pay/v3/platform_cert.zig: field PlatformCertStore.cfg: Config
+src/pay/v3/platform_cert.zig: field PlatformCertStore.header_transport: ?util_http.HeaderTransport
+src/pay/v3/platform_cert.zig: field PlatformCertStore.io: std.Io
+src/pay/v3/platform_cert.zig: field PlatformCertStore.transport: ?util_http.HttpClient.Transport
+src/pay/v3/platform_cert.zig: field PlatformCertStore.transport_ctx: ?*anyopaque
+src/pay/v3/platform_cert.zig: pub const CertificateEntry
+src/pay/v3/platform_cert.zig: pub const CertificatesResponse
+src/pay/v3/platform_cert.zig: pub const EncryptCertificate
+src/pay/v3/platform_cert.zig: pub const PlatformCert
+src/pay/v3/platform_cert.zig: pub const PlatformCertStore
+src/pay/v3/platform_cert.zig: pub const base_url
+src/pay/v3/platform_cert.zig: pub const certificates_path
+src/pay/v3/platform_cert.zig: pub const test_platform_cert_pem
+src/pay/v3/platform_cert.zig: pub const test_private_key_pkcs1
+src/pay/v3/platform_cert.zig: pub fn PlatformCert.deinit
+src/pay/v3/platform_cert.zig: pub fn PlatformCertStore.certificateForSerial
+src/pay/v3/platform_cert.zig: pub fn PlatformCertStore.clear
+src/pay/v3/platform_cert.zig: pub fn PlatformCertStore.count
+src/pay/v3/platform_cert.zig: pub fn PlatformCertStore.deinit
+src/pay/v3/platform_cert.zig: pub fn PlatformCertStore.find
+src/pay/v3/platform_cert.zig: pub fn PlatformCertStore.init
+src/pay/v3/platform_cert.zig: pub fn PlatformCertStore.refresh
+src/pay/v3/platform_cert.zig: pub fn PlatformCertStore.setHeaderTransport
+src/pay/v3/platform_cert.zig: pub fn PlatformCertStore.setTransport
+src/pay/v3/platform_cert.zig: pub fn buildCertificatesResponse
+src/pay/v3/platform_cert.zig: pub fn encryptResourceB64
+src/pay/v3/platform_cert.zig: pub fn freeCertificates
+src/pay/v3/platform_cert.zig: pub fn parseCertificates
+src/pay/v3/platform_cert.zig: pub fn publicKeyPemFromCertificate
+src/pay/v3/platform_cert.zig: sig PlatformCert.deinit(*PlatformCert, std.mem.Allocator) void
+src/pay/v3/platform_cert.zig: sig PlatformCertStore.certificateForSerial(*Self, []const u8) *const PlatformCert
+src/pay/v3/platform_cert.zig: sig PlatformCertStore.clear(*Self) void
+src/pay/v3/platform_cert.zig: sig PlatformCertStore.count(*const Self) usize
+src/pay/v3/platform_cert.zig: sig PlatformCertStore.deinit(*Self) void
+src/pay/v3/platform_cert.zig: sig PlatformCertStore.find(*const Self, []const u8) ?*const PlatformCert
+src/pay/v3/platform_cert.zig: sig PlatformCertStore.init(std.mem.Allocator, Config) Self
+src/pay/v3/platform_cert.zig: sig PlatformCertStore.refresh(*Self) void
+src/pay/v3/platform_cert.zig: sig PlatformCertStore.setHeaderTransport(*Self, ?util_http.HeaderTransport, ?*anyopaque) void
+src/pay/v3/platform_cert.zig: sig PlatformCertStore.setTransport(*Self, ?util_http.HttpClient.Transport, ?*anyopaque) void
+src/pay/v3/platform_cert.zig: sig buildCertificatesResponse(std.mem.Allocator, []const u8, []const u8) []u8
+src/pay/v3/platform_cert.zig: sig encryptResourceB64(std.mem.Allocator, []const u8, []const u8, []const u8, []const u8) []u8
+src/pay/v3/platform_cert.zig: sig freeCertificates(std.mem.Allocator, []PlatformCert) void
+src/pay/v3/platform_cert.zig: sig parseCertificates(std.mem.Allocator, []const u8, []const u8) []PlatformCert
+src/pay/v3/platform_cert.zig: sig publicKeyPemFromCertificate(std.mem.Allocator, []const u8) []u8
 src/pay/v3/refund.zig: field RefundAmount.currency: []const u8
 src/pay/v3/refund.zig: field RefundAmount.from: []const RefundFrom
 src/pay/v3/refund.zig: field RefundAmount.refund: i64
@@ -4418,10 +4575,13 @@ src/util/error.zig: sig handleFileResponse([]const u8, []const u8) WechatErrorDe
 src/util/error.zig: sig isTokenInvalidErrCode(i64) bool
 src/util/error.zig: sig lastErrorDetail() ?ErrorDetail
 src/util/error.zig: sig parseCommonError(std.mem.Allocator, []const u8, []const u8) WechatErrorDecodeError!?CommonError
+src/util/http.zig: field HttpClient._timeout_state: ?*TimeoutState
 src/util/http.zig: field HttpClient.allocator: std.mem.Allocator
+src/util/http.zig: field HttpClient.connect_timeout_ms: u64
 src/util/http.zig: field HttpClient.header_transport: ?HeaderTransport
 src/util/http.zig: field HttpClient.inner: std.http.Client
 src/util/http.zig: field HttpClient.max_response_bytes: usize
+src/util/http.zig: field HttpClient.read_timeout_ms: u64
 src/util/http.zig: field HttpClient.transport: ?Transport
 src/util/http.zig: field HttpClient.transport_ctx: ?*anyopaque
 src/util/http.zig: field HttpResponse.body: []u8
@@ -4445,8 +4605,10 @@ src/util/http.zig: pub const MockTransport
 src/util/http.zig: pub const MockTransport.Response
 src/util/http.zig: pub const MultipartField
 src/util/http.zig: pub const UriModifier
+src/util/http.zig: pub const default_connect_timeout_ms
 src/util/http.zig: pub const default_max_redirects
 src/util/http.zig: pub const default_max_response_bytes
+src/util/http.zig: pub const default_read_timeout_ms
 src/util/http.zig: pub const max_redirect_hops
 src/util/http.zig: pub fn HttpClient.deinit
 src/util/http.zig: pub fn HttpClient.get
@@ -4464,6 +4626,7 @@ src/util/http.zig: pub fn HttpClient.requestWithHeaders
 src/util/http.zig: pub fn HttpClient.sendWithHeaders
 src/util/http.zig: pub fn HttpClient.setHeaderTransport
 src/util/http.zig: pub fn HttpClient.setMaxResponseBytes
+src/util/http.zig: pub fn HttpClient.setTimeouts
 src/util/http.zig: pub fn HttpClient.setTransport
 src/util/http.zig: pub fn HttpResponse.deinit
 src/util/http.zig: pub fn MockTransport.addRoute
@@ -4492,6 +4655,7 @@ src/util/http.zig: sig HttpClient.requestWithHeaders(*HttpClient, std.http.Metho
 src/util/http.zig: sig HttpClient.sendWithHeaders(*HttpClient, std.http.Method, []const u8, []const u8, ?[]const u8, []const std.http.Header) []u8
 src/util/http.zig: sig HttpClient.setHeaderTransport(*HttpClient, ?HeaderTransport, ?*anyopaque) void
 src/util/http.zig: sig HttpClient.setMaxResponseBytes(*HttpClient, usize) void
+src/util/http.zig: sig HttpClient.setTimeouts(*HttpClient, u64, u64) void
 src/util/http.zig: sig HttpClient.setTransport(*HttpClient, ?Transport, ?*anyopaque) void
 src/util/http.zig: sig HttpResponse.deinit(*HttpResponse, std.mem.Allocator) void
 src/util/http.zig: sig MockTransport.addRoute(*MockTransport, []const u8, Response) void
