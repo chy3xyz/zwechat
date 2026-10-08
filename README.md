@@ -2,7 +2,7 @@
 
 > Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付 v2/v3、开放平台、企业微信、智能对话等能力的 Zig 原生实现。
 
-**当前版本：v0.6.0**
+**当前版本：v0.7.0**
 
 | | |
 |---|---|
