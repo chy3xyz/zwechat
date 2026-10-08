@@ -122,6 +122,23 @@ pub const WorkJsTicket = struct {
         };
     }
 
+    /// 持锁读缓存并返回**深拷贝**（`null` = 未命中或值为空）。
+    ///
+    /// **深拷贝必须在锁内完成**：`Cache.get` 返回的是**借用**切片，其有效期只到该 Cache
+    /// 实例的下一次写操作（见 `src/cache/mod.zig` 的生命周期契约）。本模块此前先在锁外
+    /// `get` 再 `dupe`，而"加锁双检"分支也是**先 `unlock` 再 `dupe`** —— 两条路径都留了窗口：
+    /// 并发的 `invalidate` / 回源回写若落在窗口内，`dupe` 就是读已释放内存。
+    /// 现在"取借用 + 深拷贝"整体在临界区内完成（与 `DefaultAccessToken.readCachedCopy` 同）。
+    fn readCachedCopy(self: *Self, allocator: std.mem.Allocator, key: []const u8) credential.CredentialError!?[]u8 {
+        self.lock.lockUncancelable(self.io);
+        defer self.lock.unlock(self.io);
+
+        const hit = try self.cache.get(key);
+        const val = hit orelse return null;
+        if (val.len == 0) return null;
+        return try allocator.dupe(u8, val);
+    }
+
     /// 获取 ticket（singleflight 风格：加锁双检缓存 → 锁外回源 →
     /// 重新加锁双检并回写）。并发 miss 允许多个并发回源（幂等 GET，last-write-wins 无害）。
     pub fn getTicket(
@@ -133,22 +150,10 @@ pub const WorkJsTicket = struct {
         const key = try self.cacheKey(allocator, ticket_type);
         defer allocator.free(key);
 
-        // 1) 先查缓存
-        if (try self.cache.get(key)) |val| {
-            if (val.len > 0) return allocator.dupe(u8, val);
-        }
+        // 1) 加锁双检：命中则直接用现成值（深拷贝在锁内完成）
+        if (try self.readCachedCopy(allocator, key)) |tok| return tok;
 
-        // 2) 加锁双检：命中则直接用现成值
-        self.lock.lockUncancelable(self.io);
-        if (try self.cache.get(key)) |val| {
-            if (val.len > 0) {
-                self.lock.unlock(self.io);
-                return allocator.dupe(u8, val);
-            }
-        }
-        self.lock.unlock(self.io);
-
-        // 3) 锁外从服务端拉取（锁不跨网络 I/O）
+        // 2) 锁外从服务端拉取（锁不跨网络 I/O）
         const url = try self.buildURL(allocator, ticket_type, access_token);
         defer allocator.free(url);
 
@@ -162,14 +167,15 @@ pub const WorkJsTicket = struct {
 
         if (parsed.value.errcode != 0) return credential.CredentialError.ApiError;
 
-        // 4) 重新加锁双检：回源期间可能已被其他线程回写，命中直接用现成的
+        // 3) 重新加锁双检：回源期间可能已被其他线程回写，命中直接用现成的。
+        //    `defer unlock` 持锁到函数返回，故下面的 `dupe` 与 `set` 都在临界区内。
         self.lock.lockUncancelable(self.io);
         defer self.lock.unlock(self.io);
         if (try self.cache.get(key)) |val| {
             if (val.len > 0) return allocator.dupe(u8, val);
         }
 
-        // 5) 写入缓存（TTL 由 `credential.tokenTTL` 计算：expires_in - 1500，极值防溢出）
+        // 4) 写入缓存（TTL 由 `credential.tokenTTL` 计算：expires_in - 1500，极值防溢出）
         try self.cache.set(key, parsed.value.ticket, credential.tokenTTL(parsed.value.expires_in));
 
         return allocator.dupe(u8, parsed.value.ticket);

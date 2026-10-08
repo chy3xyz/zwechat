@@ -573,7 +573,7 @@ access_token 中途失效（微信侧提前作废，如被其他实例刷新）�
 
 **影响**
 - ~~`README.md:10` 与 `README.md:49` 写"**357** 个内联测试"~~ →
-  **已在 v0.4.5 修正为 1004**；此后以实际 `zig build test` 输出与 CHANGELOG 为准（当前 **1326**，见 CHANGELOG `[Unreleased]`）。
+  **已在 v0.4.5 修正为 1004**；此后以实际 `zig build test` 输出与 CHANGELOG 为准（当前 **1331**，见 CHANGELOG `[Unreleased]`）。
 - **2026-10 一轮文档对齐（已修）**：`README.md` 的「业务域覆盖」表原先把 `miniprogram` 写成
   "5 个子模块"（实际 25）、`work` 写成 13（实际 15）、并把只到骨架的 `minigame`/`aispeech`
   与完成域同列 `✅`；`AGENTS.md` 表头写"87 文件 / 15711 行"（实际 134 / 76051）、
@@ -745,6 +745,45 @@ Zig 工具链升级后；或该行**伴随** `zig build test` 退出码非 0（�
 需要把本库嵌入 evented/协程运行时；或因"服务端半死"出现过线上挂起事故。
 
 ---
+
+---
+
+## 15. 凭据缓存的「借用切片」残留竞态（跨实例 / 共享 Cache）
+
+**决策（部分修复；残留面已知并记录）**
+`DefaultAccessToken` / `DefaultJsTicket` / `WorkAccessToken` / `WorkJsTicket` 的缓存读取原先有**两条**
+有窗口的路径：① 锁外 `cache.get` 之后才 `dupe`；② "加锁双检"分支**先 `unlock` 再 `dupe`**。
+已在最新 [Unreleased] 修成"**取借用 + 深拷贝整体在临界区内**"（私有 helper `readCachedCopy`）。
+
+**仍然存在的残留面**
+锁是**每个凭据对象自带**的（`lock: std.Io.Mutex`）。因此若出现下列任一情况，跨对象的写互斥仍然缺失：
+1. 同进程内**两个凭据对象**指向同一个 `Cache` 实例且 appid / 前缀相同（= 同一个 key）；
+2. 宿主其它模块与凭据**共享同一个 `Cache` 实例**，并在凭据 `get` → `dupe` 的窗口内并发写同一 key。
+
+依据是 `Cache.get` 的契约："返回**借用**切片，有效期至该 Cache 实例的任何后续写操作"
+（`src/cache/mod.zig`）。`Memory` 后端要精确覆盖同一个 key 才触发；`Redis` / `Memcache` 后端更脆
+——它们复用内部 `last_value` 缓冲区，**任何** key 的后续 `get` 都会 free 掉上一份。
+
+**为什么没有一并修掉**
+彻底解法是给 `Cache` 增加一个"返回**所有权副本**"的入口（在实现内部的临界区里完成拷贝），
+但那要改 `Cache.VTable` —— 对任何自定义 `Cache` 实现者都是**破坏性变更**，按本仓"公开面变更必须有
+CHANGELOG 记录 + 快照刷新"的纪律应当单独一拍，而不是夹在别处修复里顺带做掉。
+
+**缓解**
+- 默认用法（一个 `Wechat` 实例、凭据与缓存一一对应）在本次修复后**已无窗口**；
+- 需要 `forceRefresh` / `invalidate` 时，避免与**同一 key 的另一个凭据对象**并发；
+- 后端优先 `Memory`（按条目存储，仅同 key 覆盖写才失效）。
+
+**触发再评估的条件**
+出现"多实例共享 Redis 缓存 + 高频 forceRefresh"的真实部署，或有人实现了自定义 `Cache`。
+届时按下面的形状加 vtable 方法（草案）：
+
+```zig
+// src/cache/mod.zig
+/// 命中则返回**调用方拥有**的副本（内部在临界区内完成拷贝），未命中返回 null。
+/// 与 `get` 的区别：`get` 返回借用切片（有效期至本实例下一次写操作）。
+getOwned: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, key: []const u8) CacheError!?[]u8,
+```
 
 ---
 

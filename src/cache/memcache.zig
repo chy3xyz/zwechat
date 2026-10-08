@@ -987,26 +987,55 @@ test "memcache 多线程并发 set/get 不同 key 全部正确" {
     const OPS = 20;
 
     const Worker = struct {
-        fn run(client: *Memcache, tid: usize) !void {
+        /// 同 `redis` 侧：签名必须是 `void` —— `std.Thread.spawn` 对返回 error union 的线程
+        /// 函数只打印错误名然后丢弃，`join()` 观察不到失败，因此走原子标志。
+        fn run(client: *Memcache, tid: usize, go_flag: *std.atomic.Value(bool), failed: *std.atomic.Value(bool)) void {
+            while (!go_flag.load(.acquire)) std.atomic.spinLoopHint();
             var i: usize = 0;
             while (i < OPS) : (i += 1) {
                 var key_buf: [32]u8 = undefined;
                 var val_buf: [32]u8 = undefined;
-                const key = try std.mem.print(&key_buf, "wk_{d}_{d}", .{ tid, i });
-                const val = try std.mem.print(&val_buf, "val_{d}_{d}", .{ tid, i });
+                const key = std.mem.print(&key_buf, "wk_{d}_{d}", .{ tid, i }) catch {
+                    failed.store(true, .release);
+                    return;
+                };
+                const val = std.mem.print(&val_buf, "val_{d}_{d}", .{ tid, i }) catch {
+                    failed.store(true, .release);
+                    return;
+                };
                 const c = client.asCache();
-                try c.set(key, val, 60);
-                const got = (try c.get(key)).?;
+                c.set(key, val, 60) catch {
+                    failed.store(true, .release);
+                    return;
+                };
+                const got_opt = c.get(key) catch {
+                    failed.store(true, .release);
+                    return;
+                };
+                const got = got_opt orelse {
+                    failed.store(true, .release);
+                    return;
+                };
                 // get 返回借用切片，必须在下一次缓存操作前比较。
-                if (!std.mem.eql(u8, got, val)) return error.ValueMismatch;
+                if (!std.mem.eql(u8, got, val)) {
+                    failed.store(true, .release);
+                    return;
+                }
             }
         }
     };
 
+    var go = std.atomic.Value(bool).init(false);
+    var bad = std.atomic.Value(bool).init(false);
     const threads = try allocator.alloc(std.Thread, THREADS);
     defer allocator.free(threads);
-    for (threads, 0..) |*t, tid| t.* = try std.Thread.spawn(.{}, Worker.run, .{ mc, tid });
+    for (threads, 0..) |*t, tid| t.* = try std.Thread.spawn(.{}, Worker.run, .{ mc, tid, &go, &bad });
+    go.store(true, .release);
     for (threads) |t| t.join();
+
+    // 回归：此前 worker 是 `!void`，错误被 spawn 吞掉，本测试**永远不可能失败**
+    // （连"并发读到的值对不对"都没验，只验了锁没泄漏）。
+    try std.testing.expect(!bad.load(.acquire));
 
     // 每个 RTT 结束时都必须归还锁（`Io.Mutex` 留给下一次；跨 RTT 泄漏锁会让
     // 后续请求全部卡死）。这里顺带证明锁已回到 unlocked 状态。

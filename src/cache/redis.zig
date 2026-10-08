@@ -1387,26 +1387,56 @@ test "redis 多线程并发 set/get 不同 key 全部正确" {
     const OPS = 20;
 
     const Worker = struct {
-        fn run(client: *Redis, tid: usize) !void {
+        /// 注意签名是 `void` 而**不是** `!void`：`std.Thread.spawn` 对返回 error union 的
+        /// 线程函数只 `std.debug.print` 错误名然后丢弃，`join()` 拿不到任何结果
+        /// （`std/Thread.zig`）。所以失败必须写进原子标志，由主线程 join 后断言。
+        fn run(client: *Redis, tid: usize, go_flag: *std.atomic.Value(bool), failed: *std.atomic.Value(bool)) void {
+            while (!go_flag.load(.acquire)) std.atomic.spinLoopHint();
             var i: usize = 0;
             while (i < OPS) : (i += 1) {
                 var key_buf: [32]u8 = undefined;
                 var val_buf: [32]u8 = undefined;
-                const key = try std.mem.print(&key_buf, "wk_{d}_{d}", .{ tid, i });
-                const val = try std.mem.print(&val_buf, "val_{d}_{d}", .{ tid, i });
+                const key = std.mem.print(&key_buf, "wk_{d}_{d}", .{ tid, i }) catch {
+                    failed.store(true, .release);
+                    return;
+                };
+                const val = std.mem.print(&val_buf, "val_{d}_{d}", .{ tid, i }) catch {
+                    failed.store(true, .release);
+                    return;
+                };
                 const c = client.asCache();
-                try c.set(key, val, 60);
-                const got = (try c.get(key)).?;
+                c.set(key, val, 60) catch {
+                    failed.store(true, .release);
+                    return;
+                };
+                const got_opt = c.get(key) catch {
+                    failed.store(true, .release);
+                    return;
+                };
+                const got = got_opt orelse {
+                    failed.store(true, .release);
+                    return;
+                };
                 // get 返回借用切片，必须在下一次缓存操作前比较。
-                if (!std.mem.eql(u8, got, val)) return error.ValueMismatch;
+                if (!std.mem.eql(u8, got, val)) {
+                    failed.store(true, .release);
+                    return;
+                }
             }
         }
     };
 
+    var go = std.atomic.Value(bool).init(false);
+    var bad = std.atomic.Value(bool).init(false);
     const threads = try allocator.alloc(std.Thread, THREADS);
     defer allocator.free(threads);
-    for (threads, 0..) |*t, tid| t.* = try std.Thread.spawn(.{}, Worker.run, .{ redis, tid });
+    for (threads, 0..) |*t, tid| t.* = try std.Thread.spawn(.{}, Worker.run, .{ redis, tid, &go, &bad });
+    go.store(true, .release);
     for (threads) |t| t.join();
+
+    // 回归：此前 worker 是 `!void`，`error.ValueMismatch` 被 spawn 吞掉、主线程也没有
+    // 终断言 —— 这条测试名叫「全部正确」但**永远不可能失败**。
+    try std.testing.expect(!bad.load(.acquire));
 
     // 先断开客户端连接（服务器读循环随之退出），再 join 服务器线程。
     redis.deinit();

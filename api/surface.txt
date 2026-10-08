@@ -1590,7 +1590,7 @@ src/miniprogram/order/mod.zig: field GetShippingOrderListRequest.last_index: []c
 src/miniprogram/order/mod.zig: field GetShippingOrderListRequest.openid: []const u8
 src/miniprogram/order/mod.zig: field GetShippingOrderListRequest.order_state: ?State
 src/miniprogram/order/mod.zig: field GetShippingOrderListRequest.page_size: i64
-src/miniprogram/order/mod.zig: field GetShippingOrderListRequest.pay_time_range: TimeRange
+src/miniprogram/order/mod.zig: field GetShippingOrderListRequest.pay_time_range: ?TimeRange
 src/miniprogram/order/mod.zig: field GetShippingOrderListResponse.errcode: i64
 src/miniprogram/order/mod.zig: field GetShippingOrderListResponse.errmsg: []const u8
 src/miniprogram/order/mod.zig: field GetShippingOrderListResponse.has_more: bool
@@ -1627,7 +1627,9 @@ src/miniprogram/order/mod.zig: field ShippingInfo.contact: ShippingContact
 src/miniprogram/order/mod.zig: field ShippingInfo.express_company: []const u8
 src/miniprogram/order/mod.zig: field ShippingInfo.item_desc: []const u8
 src/miniprogram/order/mod.zig: field ShippingInfo.tracking_no: []const u8
+src/miniprogram/order/mod.zig: field ShippingItem.contact: ShippingContact
 src/miniprogram/order/mod.zig: field ShippingItem.express_company: []const u8
+src/miniprogram/order/mod.zig: field ShippingItem.goods_desc: []const u8
 src/miniprogram/order/mod.zig: field ShippingItem.tracking_no: []const u8
 src/miniprogram/order/mod.zig: field ShippingItem.upload_time: i64
 src/miniprogram/order/mod.zig: field ShippingOrder.description: []const u8
@@ -1650,13 +1652,15 @@ src/miniprogram/order/mod.zig: field ShippingOrderResponse.errcode: i64
 src/miniprogram/order/mod.zig: field ShippingOrderResponse.errmsg: []const u8
 src/miniprogram/order/mod.zig: field ShippingOrderResponse.order: ShippingOrder
 src/miniprogram/order/mod.zig: field ShippingPayer.openid: []const u8
+src/miniprogram/order/mod.zig: field State._
 src/miniprogram/order/mod.zig: field State.complete
 src/miniprogram/order/mod.zig: field State.confirm
 src/miniprogram/order/mod.zig: field State.refund
+src/miniprogram/order/mod.zig: field State.settled
 src/miniprogram/order/mod.zig: field State.shipped
 src/miniprogram/order/mod.zig: field State.wait_shipment
-src/miniprogram/order/mod.zig: field TimeRange.begin_time: i64
-src/miniprogram/order/mod.zig: field TimeRange.end_time: i64
+src/miniprogram/order/mod.zig: field TimeRange.begin_time: ?i64
+src/miniprogram/order/mod.zig: field TimeRange.end_time: ?i64
 src/miniprogram/order/mod.zig: field UploadShippingInfoRequest.delivery_mode: DeliveryMode
 src/miniprogram/order/mod.zig: field UploadShippingInfoRequest.is_all_delivered: bool
 src/miniprogram/order/mod.zig: field UploadShippingInfoRequest.logistics_type: LogisticsType

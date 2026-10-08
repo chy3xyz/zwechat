@@ -55,6 +55,29 @@ jobs:
       - name: Run Unit Tests
         run: zig build test
 
+      # 仓库纪律：AGENTS.md 明确要求「测试必须在四种优化模式下都过」，而此前 CI 只跑 Debug。
+      # ReleaseFast 下 `page_allocator.ptr == null`、`@intFromPtr(&局部变量)` 被折叠成无意义值，
+      # 这类问题只在本地手工验证时才被发现 —— v0.6.0 就真的漏过一次（三处用例 Debug 全绿、
+      # ReleaseSafe/ReleaseFast/ReleaseSmall 全挂）。
+      - name: Run Unit Tests (all optimize modes)
+        run: |
+          set -euo pipefail
+          for mode in ReleaseSafe ReleaseFast ReleaseSmall; do
+            echo "== zig build test -Doptimize=$mode =="
+            zig build test -Doptimize=$mode
+          done
+
+      # `src/live_probe.zig` 与 `src/util/benchmark.zig` 是两个**独立 root module**，
+      # `zig build` 与 `zig build test` 都既不编译也不运行它们 —— 不在这里过一遍，
+      # 它们的编译错误永远进不了门禁。
+      # 无凭据时 `live-probe` 会打印凭据说明并 exit 0（进程内还有 ZWECHAT_LIVE_PROBE 门控）。
+      - name: Build & run auxiliary targets (live-probe-test / bench / live-probe)
+        run: |
+          set -euo pipefail
+          zig build live-probe-test
+          zig build bench
+          zig build live-probe
+
       - name: Build Library, CLI & Examples
         run: zig build
 

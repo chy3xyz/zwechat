@@ -5,6 +5,47 @@ All notable changes to `zwechat` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`miniprogram/order` 的 `State` 枚举缺官方第 6 个值 → 真实响应必然 `DecodeError`**：官方 `order_state` 有 6 个取值（`(6) 资金待结算`），实现只到 `refund = 5`。`State` 是**穷举**枚举，而 `std.json` 对整数枚举走 `std.enums.fromInt(...) orelse error.InvalidEnumTag` → 只要订单处于「资金待结算」，`get_order` / `get_order_list` 就 **100% 解析失败**（既有 mock 夹具只造过 1/2，故测试全绿）。现补 `settled = 6`，并声明为**非穷举**（`enum(u8) { …, _ }`）：`std.enums.fromInt` 对非穷举枚举接受任意 tag，上游将来再新增状态值也不会让整条查单链路失败。
+- **`miniprogram/order` 三处「静默产出非法或语义被锁死的请求体」**（同一类：mock 夹具照实现写，测试测不出）：
+  - `uploadShippingInfo`：官方把 `upload_time` 与 `payer.openid` 标为**必填**，而这两者默认是空值且序列化器会跳过空值 —— 裸构请求会静默发出缺必填字段的请求体（微信侧回 `10060014` / `268485216` / `268485195`）。现改为 **fail-closed**：缺任一必填字段直接 `error.InvalidArgument`（与 `SendTextRequest` 空 content 的口径一致）。
+  - `getShippingOrderList` 的 `pay_time_range`：官方两个子字段都是「不填有默认语义」（`begin_time` 不填 = 从 0 开始，`end_time` 不填 = u32 最大值），而实现**恒把整个键写成 `{0,0}`**，等于把区间锁死成 `[0,0]` → 只想按 `openid` / `order_state` 查询时会拿到空列表。现改为「未设置则整键省略，子字段非 null 才写出」。
+  - `getShippingOrderList` 的 `page_size`：官方默认 **100**，实现恒写 `0`。现 `0` 视为「未设置」→ 省略该键。
+  - 另外 `ShippingItem` 补官方存在的 `goods_desc` 与 `contact`（此前因 `ignore_unknown_fields` 而**静默丢字段**）。
+- **两条并发测试此前「永远不可能失败」**：`src/cache/redis.zig` 与 `src/cache/memcache.zig` 的
+  *「多线程并发 set/get 不同 key 全部正确」* 里 worker 签名是 `!void` —— 而 `std.Thread.spawn`
+  对返回 error union 的线程函数只 `std.debug.print` 错误名然后丢弃（`std/Thread.zig`），
+  `join()` 观察不到任何失败；主线程 join 之后也没有终断言（memcache 侧只验了「锁没泄漏」）。
+  也就是说并发读写全错也会 PASS。现改用仓库既有的正确范式（`std.atomic.Value(bool)` 坏标志 +
+  `go` 起跑标志 + join 后断言，同 `redis` 连接池并发测试与 `memory` 并发写表测试）。
+- **两组凭据的缓存读取存在「借用切片」窗口期（潜在 UAF）**：`DefaultAccessToken` / `DefaultJsTicket` /
+  `WorkAccessToken` / `WorkJsTicket` 四个获取器原先都有**两条**有问题的路径：① 锁外 `cache.get` 后
+  才 `dupe`；② "加锁双检"分支是**先 `unlock` 再 `dupe`**。而 `Cache.get` 的契约是"返回**借用**切片，
+  有效期只到该 Cache 实例的下一次写操作"（`src/cache/mod.zig`）—— 并发的 `invalidate` / 回源回写一旦
+  落在窗口内，`dupe` 就是在读已释放内存（Debug 可能崩，ReleaseFast 是 UB）。
+  现统一为私有 helper `readCachedCopy`：**取借用 + 深拷贝整体在临界区内完成**（代价是一次互斥量
+  acquire，相对随后必然发生的 HTTP RTT 可忽略）；"重新加锁双检"分支本就靠 `defer unlock` 持锁到返回，
+  补上说明注释即可。**残留面已记入 `docs/OPEN_ITEMS.md`**：锁是每个凭据对象自带的，若**另一个**
+  凭据实例或宿主其它模块共享同一个 `Cache` 实例并并发写同一 key，跨实例仍无互斥（彻底解决需要给
+  `Cache` 增一个"返回所有权副本"的 vtable 方法，属公开面变更，未做）。
+  注：数据竞争无法在单测里确定性复现，故本次**未加**回归测试（加了也只能是永过的烟测）——改动的
+  依据是代码审查 + 既有并发用例（`default_access_token` 的 worker 内 `std.debug.panic` 口径）仍全绿。
+
+### Changed
+
+- **`miniprogram/order` 公开面类型变更（下游会编译失败）** —— 为表达官方「不填」语义：
+  - 字段 `GetShippingOrderListRequest.pay_time_range`：`TimeRange` → `?TimeRange`（`null` = 整键省略）
+  - 字段 `TimeRange.begin_time`：`i64` → `?i64`（`null` = 不填，从 0 开始）
+  - 字段 `TimeRange.end_time`：`i64` → `?i64`（`null` = 不填，视为 u32 最大值）
+- **CI 补齐仓库纪律里缺的两项**（`.github/workflows/ci.yml`）：① 增加 *「Run Unit Tests (all optimize modes)」*，跑 `ReleaseSafe` / `ReleaseFast` / `ReleaseSmall` —— 此前 CI **只跑 Debug**，而"四种优化模式都过"是仓库明写的纪律（release 模式独有的 `page_allocator.ptr == null` / 指针同一性折叠问题过去只在本地手工发现）；② 增加 *「Build & run auxiliary targets」*，跑 `zig build live-probe-test` / `bench` / `live-probe` —— `src/live_probe.zig` 与 `src/util/benchmark.zig` 是两个独立 root module，`zig build` 与 `zig build test` 都覆盖不到，它们的编译错误此前进不了门禁。
+
+### Tests
+
+- 测试总数 1326 → **1331**（其中 fuzz 测试 5 条；另 1 条为环境相关 skip）。
+
 ## [0.7.0] — 2026-10-08
 
 ### Fixed

@@ -32,12 +32,25 @@ pub const NumberType = enum(u8) {
 };
 
 /// 订单状态。
+///
+/// 官方枚举共 **6** 个值（`(6) 资金待结算`），见
+/// [查询订单列表](https://developers.weixin.qq.com/miniprogram/dev/server/API/order_shipping/api_getorderlist.html)。
+/// 此前只到 `refund = 5`，而本枚举是**穷举**的 —— `std.json` 对整数枚举走
+/// `std.enums.fromInt(T, i) orelse error.InvalidEnumTag`，于是「资金待结算」的订单
+/// 在 `get_order` / `get_order_list` 上**必然 `DecodeError`**（既有 mock 夹具只造过 1/2，
+/// 所以测试全绿也没暴露）。
+///
+/// 现补上 `settled`，并声明为**非穷举**（`_`）：`std.enums.fromInt` 对非穷举枚举接受
+/// 任意 tag 值，因此上游将来再新增状态值时**不会再让整条查单链路解析失败**（响应侧
+/// 的枚举本就该按"未来可能加值"对待）。
 pub const State = enum(u8) {
     wait_shipment = 1, // 待发货
     shipped = 2, // 已发货
     confirm = 3, // 确认收货
     complete = 4, // 交易完成
     refund = 5, // 已退款
+    settled = 6, // 资金待结算
+    _,
 };
 
 pub const ShippingOrderKey = struct {
@@ -80,10 +93,17 @@ pub const GetShippingOrderRequest = struct {
     merchant_trade_no: []const u8 = "",
 };
 
+/// 物流信息列表元素（`order.shipping.shipping_list[]`）。
+///
+/// 官方还有 `goods_desc`（该物流单对应的商品描述）与 `contact`
+/// （寄件人 / 收件人联系方式）两个字段，此前缺失 —— 因解析开了
+/// `ignore_unknown_fields` 不会报错，只是**静默丢字段**，故补上。
 pub const ShippingItem = struct {
     tracking_no: []const u8 = "",
     express_company: []const u8 = "",
+    goods_desc: []const u8 = "",
     upload_time: i64 = 0,
+    contact: ShippingContact = .{},
 };
 
 pub const ShippingDetail = struct {
@@ -116,16 +136,26 @@ pub const ShippingOrderResponse = struct {
     order: ShippingOrder = .{},
 };
 
+/// 支付时间所属范围。
+///
+/// 官方两个子字段都是**可选**语义：`begin_time` 不填视为从 0 开始，`end_time` 不填视为
+/// 32 位无符号整型最大值。因此这里用 `?i64` 表示"不填"。
+///
+/// 此前两者是 `i64 = 0` 且序列化器**恒把整个 `pay_time_range` 写出去**，等于把区间锁死成
+/// `[0, 0]` —— 调用方只想按 `openid` / `order_state` 查询时会拿到空列表。
 pub const TimeRange = struct {
-    begin_time: i64 = 0,
-    end_time: i64 = 0,
+    begin_time: ?i64 = null,
+    end_time: ?i64 = null,
 };
 
 pub const GetShippingOrderListRequest = struct {
-    pay_time_range: TimeRange = .{},
+    /// 支付时间所属范围。`null` = 整个键省略（不按支付时间过滤）。
+    pay_time_range: ?TimeRange = null,
     order_state: ?State = null,
     openid: []const u8 = "",
     last_index: []const u8 = "",
+    /// 返回列表长度，官方默认 **100**。`0` 视为「未设置」→ 省略该键，交给服务端默认值
+    /// （此前恒写 `page_size: 0`）。
     page_size: i64 = 0,
 };
 
@@ -167,7 +197,21 @@ pub const Shipping = struct {
     }
 
     /// 发货信息录入。
+    ///
+    /// **会做必填校验（fail-closed）**：官方把 `upload_time` 与 `payer.openid` 标为必填
+    /// （[发货信息录入](https://developers.weixin.qq.com/miniprogram/dev/server/API/order_shipping/api_uploadshippinginfo.html)），
+    /// 而这两个字段在本结构体里默认是空值、且序列化器会**跳过空值** —— 也就是说
+    /// 裸构 `UploadShippingInfoRequest` 会静默发出**缺必填字段的请求体**（微信侧回
+    /// `10060014` / `268485216` / `268485195`，且错误信息不指向缺失字段本身）。
+    /// 因此这里直接返回 `error.InvalidArgument`，与 `SendTextRequest` 空 content 的处理口径一致。
+    ///
+    /// 注意 `upload_time` 必须是 RFC 3339 格式（如 `2022-12-15T13:29:35.120+08:00`），
+    /// 且更新发货信息时它必须比上一次请求更新。
     pub fn uploadShippingInfo(self: *Self, req: UploadShippingInfoRequest) !void {
+        if (req.upload_time.len == 0) return error.InvalidArgument;
+        const payer = req.payer orelse return error.InvalidArgument;
+        if (payer.openid.len == 0) return error.InvalidArgument;
+
         const body = try jsonStringifyUpload(self.allocator, req);
         defer self.allocator.free(body);
         try self.postCommon("upload_shipping_info", body, "UploadShippingInfo");
@@ -341,13 +385,21 @@ fn jsonStringifyGetOrderList(allocator: std.mem.Allocator, req: GetShippingOrder
     defer out.deinit();
     var s: std.json.Stringify = .{ .writer = &out.writer };
     try s.beginObject();
-    try s.objectField("pay_time_range");
-    try s.beginObject();
-    try s.objectField("begin_time");
-    try s.write(req.pay_time_range.begin_time);
-    try s.objectField("end_time");
-    try s.write(req.pay_time_range.end_time);
-    try s.endObject();
+    // `pay_time_range` 与 `page_size` 都是官方**可选**字段，未设置时整键省略；
+    // 子字段 `begin_time` / `end_time` 同样只在非 null 时写出（官方「不填」有语义）。
+    if (req.pay_time_range) |range| {
+        try s.objectField("pay_time_range");
+        try s.beginObject();
+        if (range.begin_time) |bt| {
+            try s.objectField("begin_time");
+            try s.write(bt);
+        }
+        if (range.end_time) |et| {
+            try s.objectField("end_time");
+            try s.write(et);
+        }
+        try s.endObject();
+    }
     if (req.order_state) |st| {
         try s.objectField("order_state");
         try s.write(@backingInt(st));
@@ -360,8 +412,10 @@ fn jsonStringifyGetOrderList(allocator: std.mem.Allocator, req: GetShippingOrder
         try s.objectField("last_index");
         try s.write(req.last_index);
     }
-    try s.objectField("page_size");
-    try s.write(req.page_size);
+    if (req.page_size > 0) {
+        try s.objectField("page_size");
+        try s.write(req.page_size);
+    }
     try s.endObject();
     return out.toOwnedSlice();
 }
@@ -433,6 +487,18 @@ const CapturingTransport = struct {
         allocator.free(self.uri);
         allocator.free(self.payload);
     }
+
+    /// 释放并清空上一次捕获的 URI / payload。
+    ///
+    /// 同一个 transport 被**连续调用多次**时必须先 `reset`，否则 `dispatch` 会直接覆盖
+    /// `uri` / `payload` 指针，丢掉上一份分配（该夹具的既有隐患）。`reset` 把两者置回
+    /// 空串，因此随后的 `deinit` 仍可安全调用（零长度 free 是 no-op）。
+    fn reset(self: *CapturingTransport, allocator: std.mem.Allocator) void {
+        allocator.free(self.uri);
+        allocator.free(self.payload);
+        self.uri = "";
+        self.payload = "";
+    }
 };
 
 fn makeCtx() Context {
@@ -497,6 +563,9 @@ test "uploadShippingInfo POST 发货信息录入（成功无返回体）" {
         .order_key = .{ .out_trade_no = "t1", .mchid = "m1" },
         .logistics_type = .virtual,
         .shipping_list = &[_]ShippingInfo{.{ .item_desc = "虚拟商品", .tracking_no = "no-tracking" }},
+        // 官方必填（见 `uploadShippingInfo` 的必填校验）。
+        .upload_time = "2022-12-15T13:29:35.120+08:00",
+        .payer = .{ .openid = "openid-1" },
     });
 
     try std.testing.expectEqual(std.http.Method.POST, tt.method);
@@ -504,6 +573,136 @@ test "uploadShippingInfo POST 发货信息录入（成功无返回体）" {
     try std.testing.expect(std.mem.find(u8, tt.payload, "\"out_trade_no\":\"t1\"") != null);
     try std.testing.expect(std.mem.find(u8, tt.payload, "\"logistics_type\":3") != null);
     try std.testing.expect(std.mem.find(u8, tt.payload, "\"item_desc\":\"虚拟商品\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"upload_time\":\"2022-12-15T13:29:35.120+08:00\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"payer\":{\"openid\":\"openid-1\"}") != null);
+}
+
+test "uploadShippingInfo 缺官方必填字段时 fail-closed（回归：此前静默发出非法请求体）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var sh = Shipping.init(&ctx, allocator);
+    sh.setTransport(CapturingTransport.dispatch, &tt);
+
+    const base = UploadShippingInfoRequest{
+        .order_key = .{ .out_trade_no = "t1", .mchid = "m1" },
+        .logistics_type = .virtual,
+        .shipping_list = &[_]ShippingInfo{.{ .item_desc = "虚拟商品", .tracking_no = "no-tracking" }},
+    };
+
+    // 缺 upload_time
+    try std.testing.expectError(error.InvalidArgument, sh.uploadShippingInfo(base));
+    // 有 upload_time 但缺 payer
+    try std.testing.expectError(error.InvalidArgument, sh.uploadShippingInfo(.{
+        .order_key = base.order_key,
+        .logistics_type = base.logistics_type,
+        .shipping_list = base.shipping_list,
+        .upload_time = "2022-12-15T13:29:35.120+08:00",
+    }));
+    // payer 给了但 openid 为空
+    try std.testing.expectError(error.InvalidArgument, sh.uploadShippingInfo(.{
+        .order_key = base.order_key,
+        .logistics_type = base.logistics_type,
+        .shipping_list = base.shipping_list,
+        .upload_time = "2022-12-15T13:29:35.120+08:00",
+        .payer = .{ .openid = "" },
+    }));
+    // 三次都应在发请求之前被拦下。
+    try std.testing.expectEqualStrings("", tt.uri);
+}
+
+test "order_state 的 6=资金待结算 可解析（回归：穷举枚举缺值导致必然 DecodeError）" {
+    const allocator = std.testing.allocator;
+    // 单查：order_state = 6
+    var tt = CapturingTransport{ .response = "{\"order\":{\"transaction_id\":\"tx-6\",\"order_state\":6}}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var sh = Shipping.init(&ctx, allocator);
+    sh.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try sh.getShippingOrder(.{ .transaction_id = "tx-6" });
+    defer parsed.deinit();
+    try std.testing.expectEqual(State.settled, parsed.value.order.order_state);
+    try std.testing.expectEqual(@as(u8, 6), @backingInt(parsed.value.order.order_state));
+
+    // 列表：order_state = 6
+    tt.reset(allocator);
+    tt.response = "{\"order_list\":[{\"transaction_id\":\"tx-7\",\"order_state\":6}],\"has_more\":false}";
+    var parsed_list = try sh.getShippingOrderList(.{});
+    defer parsed_list.deinit();
+    try std.testing.expectEqual(State.settled, parsed_list.value.order_list[0].order_state);
+}
+
+test "order_state 非穷举：上游将来新增的状态值不再让整条链路 DecodeError" {
+    const allocator = std.testing.allocator;
+    // 99 不在官方枚举里；`State` 声明为 `enum(u8) { …, _ }`，`std.enums.fromInt` 接受任意 tag。
+    var tt = CapturingTransport{ .response = "{\"order\":{\"transaction_id\":\"tx-99\",\"order_state\":99}}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var sh = Shipping.init(&ctx, allocator);
+    sh.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try sh.getShippingOrder(.{ .transaction_id = "tx-99" });
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(u8, 99), @backingInt(parsed.value.order.order_state));
+}
+
+test "getShippingOrderList 的可选字段：未设置时整键省略（回归：恒写 {0,0} 锁死区间）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"order_list\":[],\"has_more\":false}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var sh = Shipping.init(&ctx, allocator);
+    sh.setTransport(CapturingTransport.dispatch, &tt);
+
+    // 1) 全部默认：请求体应为空对象 `{}`（三个可选键都不该出现）。
+    var p1 = try sh.getShippingOrderList(.{});
+    defer p1.deinit();
+    try std.testing.expectEqualStrings("{}", tt.payload);
+
+    // 2) 只给 begin_time：`end_time` 不填（官方语义 = u32 最大值），故不出现。
+    tt.reset(allocator);
+    var p2 = try sh.getShippingOrderList(.{ .pay_time_range = .{ .begin_time = 1727000000 } });
+    defer p2.deinit();
+    try std.testing.expectEqualStrings("{\"pay_time_range\":{\"begin_time\":1727000000}}", tt.payload);
+
+    // 3) 完整区间 + page_size。
+    tt.reset(allocator);
+    var p3 = try sh.getShippingOrderList(.{
+        .pay_time_range = .{ .begin_time = 1727000000, .end_time = 1727600000 },
+        .page_size = 50,
+    });
+    defer p3.deinit();
+    try std.testing.expectEqualStrings(
+        "{\"pay_time_range\":{\"begin_time\":1727000000,\"end_time\":1727600000},\"page_size\":50}",
+        tt.payload,
+    );
+}
+
+test "ShippingItem 解析 goods_desc 与 contact（回归：静默丢字段）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"order\":{\"transaction_id\":\"tx-8\",\"order_state\":2,\"shipping\":{\"shipping_list\":[{\"tracking_no\":\"SF123\",\"express_company\":\"SF\",\"goods_desc\":\"抱枕*1\",\"upload_time\":1725000000,\"contact\":{\"consignor_contact\":\"189****1234\",\"receiver_contact\":\"138****5678\"}}]}}}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var sh = Shipping.init(&ctx, allocator);
+    sh.setTransport(CapturingTransport.dispatch, &tt);
+
+    var parsed = try sh.getShippingOrder(.{ .transaction_id = "tx-8" });
+    defer parsed.deinit();
+    const item = parsed.value.order.shipping.?.shipping_list[0];
+    try std.testing.expectEqualDeep(ShippingItem{
+        .tracking_no = "SF123",
+        .express_company = "SF",
+        .goods_desc = "抱枕*1",
+        .upload_time = 1725000000,
+        .contact = .{ .consignor_contact = "189****1234", .receiver_contact = "138****5678" },
+    }, item);
 }
 
 test "notifyConfirmReceive POST 确认收货提醒（成功无返回体）" {

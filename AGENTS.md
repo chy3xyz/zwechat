@@ -2,7 +2,7 @@
 
 `zwechat` 是使用 Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付、开放平台、企业微信、智能对话等能力。
 
-> ✅ **当前状态**：`zig 0.17.0`（正式版）。`zig build` / `zig build test` / `zig build run` 全部通过，**1326 个内联单元测试全部通过且零内存泄漏**。
+> ✅ **当前状态**：`zig 0.17.0`（正式版）。`zig build` / `zig build test` / `zig build run` 全部通过，**1331 个内联单元测试全部通过且零内存泄漏**。
 >
 > 目录包括：
 > - `_ref/wechat/` — 完整克隆的 Go 参考实现（`silenceper/wechat/v2`，Apache-2.0），作为移植依据（**只读**）。
@@ -39,7 +39,7 @@
 | 构建系统 | 原生 `zig build`（`build.zig` + `build.zig.zon`） |
 | 许可证 | Apache License 2.0（与上游参考保持一致，保留 `_ref/wechat/LICENSE`） |
 | 运行目标 | 静态库 + 可执行示例 |
-| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **1326 个测试（含 5 个 fuzz 测试），0 泄漏** |
+| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **1331 个测试（含 5 个 fuzz 测试），0 泄漏** |
 
 外部依赖按需声明在 `build.zig.zon`，尽量减少三方依赖；优先使用 Zig 标准库。**当前为零三方依赖**：`build.zig.zon` 的 `.dependencies` 为空（原唯一依赖 `httpz`（`chy3xyz/zhttp`）已移除——它只为微信支付 v2 的 mTLS 服务，却把 OpenSSL + libc 链到所有构建目标）。mTLS 改为仓库内自建 + 构建选项 `-Dmtls`（默认 `false`）门控，详见「移植备注」。
 
@@ -109,7 +109,7 @@ src/
 ├── openplatform/          # 开放平台：account / context（含授权链路）/ miniprogram（代运营）/ officialaccount
 ├── work/                  # 企业微信：addresslist/appchat/checkin/externalcontact/invoice/jsapi/kf/material/message/msgaudit/oauth/robot/server/smartbot
 ├── aispeech/              # 智能对话（占位）
-└── test_runner.zig        # ✅ 编译门（强制 @import 每个模块），1326 个测试全部发现
+└── test_runner.zig        # ✅ 编译门（强制 @import 每个模块），1331 个测试全部发现
 ```
 
 ---

@@ -705,7 +705,7 @@ zig fetch --save=zwechat "git+https://github.com/<your-org>/zwechat?ref=v0.4.4"
 # 1) 先格式化门禁：CI 里 zig build fmt 是绿灯前提（等价 zig fmt --check）
 zig build fmt
 
-# 2) 全量单元测试（1326 个内联测试，零内存泄漏）
+# 2) 全量单元测试（1331 个内联测试，零内存泄漏）
 #    在 zwechat 自己的 checkout 里跑；它同时是"编译门"，会实例化绝大多数公开 API
 #    若你用 v2 mTLS，记得带上 -Dmtls=true，否则 mTLS 用例覆盖不到
 cd path/to/zwechat && zig build test
@@ -772,7 +772,7 @@ bash tools/api_surface_check.sh
 
 ### 3.3 测试与格式化门禁
 
-- **`zig build test`**：在 zwechat checkout 里是"1326 个内联测试 + 零泄漏"的完整回归；
+- **`zig build test`**：在 zwechat checkout 里是"1331 个内联测试 + 零泄漏"的完整回归；
   在**你的项目**里跑则只覆盖你的调用点。CI 同时跑两者才有意义。
   （`zig build` 里的 `src/test_runner.zig` 是编译门，强制 `@import` 每个子文件——
   否则 Zig 的 dead-strip 会静默跳过带 inline test 的文件，报出 "All 1 tests passed" 的假绿。）
