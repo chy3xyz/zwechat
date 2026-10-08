@@ -55,8 +55,7 @@ pub const Message = struct {
             body: []const u8,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const url = try std.fmt.allocPrint(
-                    a,
+                const url = try a.print(
                     "https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token={s}",
                     .{token},
                 );
@@ -961,18 +960,18 @@ fn parseXmlEventItems(
 ) ![]Item {
     const open = "<" ++ event_tag ++ ">";
     const close = "</" ++ event_tag ++ ">";
-    const start = std.mem.indexOf(u8, data, open) orelse return &.{};
+    const start = std.mem.find(u8, data, open) orelse return &.{};
     const block_start = start + open.len;
-    const block_end = std.mem.indexOfPos(u8, data, block_start, close) orelse return &.{};
+    const block_end = std.mem.findPos(u8, data, block_start, close) orelse return &.{};
     const block = data[block_start..block_end];
 
-    var items: std.ArrayListUnmanaged(Item) = .empty;
+    var items: std.ArrayList(Item) = .empty;
     errdefer items.deinit(allocator);
     var pos: usize = 0;
-    while (std.mem.indexOfPos(u8, block, pos, "<item>")) |item_start| {
+    while (std.mem.findPos(u8, block, pos, "<item>")) |item_start| {
         const inner_start = item_start + "<item>".len;
-        const item_end = std.mem.indexOfPos(u8, block, inner_start, "</item>") orelse return error.MalformedXml;
-        const wrap = try std.fmt.allocPrint(allocator, "<xml>{s}</xml>", .{block[inner_start..item_end]});
+        const item_end = std.mem.findPos(u8, block, inner_start, "</item>") orelse return error.MalformedXml;
+        const wrap = try allocator.print("<xml>{s}</xml>", .{block[inner_start..item_end]});
         var doc = util_xml.parse(allocator, wrap) catch {
             allocator.free(wrap);
             return error.MalformedXml;
@@ -1367,9 +1366,9 @@ fn eventJsonToPushData(allocator: std.mem.Allocator, common: CommonPushData, obj
 fn xmlBlockInner(data: []const u8, comptime tag: []const u8) ?[]const u8 {
     const open = "<" ++ tag ++ ">";
     const close = "</" ++ tag ++ ">";
-    const start = std.mem.indexOf(u8, data, open) orelse return null;
+    const start = std.mem.find(u8, data, open) orelse return null;
     const inner_start = start + open.len;
-    const end = std.mem.indexOfPos(u8, data, inner_start, close) orelse return null;
+    const end = std.mem.findPos(u8, data, inner_start, close) orelse return null;
     return data[inner_start..end];
 }
 
@@ -1393,7 +1392,7 @@ fn xmlIntInBlock(data: []const u8, comptime block: []const u8, comptime tag: []c
 /// 所有 `<detail>` 之后（与 Go 结构体的平铺解码语义一致）。
 fn xmlAfterLast(data: []const u8, comptime tag: []const u8) []const u8 {
     const close = "</" ++ tag ++ ">";
-    const i = std.mem.lastIndexOf(u8, data, close) orelse return data;
+    const i = std.mem.findLast(u8, data, close) orelse return data;
     return data[i + close.len ..];
 }
 
@@ -1473,17 +1472,17 @@ fn parseXmlRepeatedFlat(
 ) ![]Item {
     const open = "<" ++ tag ++ ">";
     const close = "</" ++ tag ++ ">";
-    var items: std.ArrayListUnmanaged(Item) = .empty;
+    var items: std.ArrayList(Item) = .empty;
     errdefer items.deinit(allocator);
     var pos: usize = 0;
-    while (std.mem.indexOfPos(u8, data, pos, open)) |start| {
+    while (std.mem.findPos(u8, data, pos, open)) |start| {
         const inner_start = start + open.len;
-        const end = std.mem.indexOfPos(u8, data, inner_start, close) orelse return error.MalformedXml;
+        const end = std.mem.findPos(u8, data, inner_start, close) orelse return error.MalformedXml;
         pos = end + close.len;
         const inner = data[inner_start..end];
         if (std.mem.trim(u8, inner, " \t\r\n").len == 0) continue;
 
-        const wrap = try std.fmt.allocPrint(allocator, "<xml>{s}</xml>", .{inner});
+        const wrap = try allocator.print("<xml>{s}</xml>", .{inner});
         var doc = util_xml.parse(allocator, wrap) catch {
             allocator.free(wrap);
             return error.MalformedXml;
@@ -1511,7 +1510,7 @@ fn parseXmlBlockList(
     comptime Item: type,
     comptime parseItemDoc: fn (std.mem.Allocator, util_xml.XmlDoc) std.mem.Allocator.Error!Item,
 ) ![]Item {
-    if (inner.len > 0 and std.mem.indexOf(u8, data, "<" ++ inner ++ ">") != null) {
+    if (inner.len > 0 and std.mem.find(u8, data, "<" ++ inner ++ ">") != null) {
         return parseXmlRepeatedFlat(allocator, data, inner, Item, parseItemDoc);
     }
     return parseXmlRepeatedFlat(allocator, data, outer, Item, parseItemDoc);
@@ -1707,14 +1706,14 @@ fn dupeOrEmpty(allocator: std.mem.Allocator, s: ?[]const u8) std.mem.Allocator.E
 fn xmlTagValue(data: []const u8, comptime tag: []const u8) ?[]const u8 {
     const open = "<" ++ tag ++ ">";
     const close = "</" ++ tag ++ ">";
-    const start = std.mem.indexOf(u8, data, open) orelse return null;
+    const start = std.mem.find(u8, data, open) orelse return null;
     var pos = start + open.len;
     if (std.mem.startsWith(u8, data[pos..], "<![CDATA[")) {
         pos += "<![CDATA[".len;
-        const end = std.mem.indexOfPos(u8, data, pos, "]]>") orelse return null;
+        const end = std.mem.findPos(u8, data, pos, "]]>") orelse return null;
         return data[pos..end];
     }
-    const end = std.mem.indexOfPos(u8, data, pos, close) orelse return null;
+    const end = std.mem.findPos(u8, data, pos, close) orelse return null;
     return data[pos..end];
 }
 
@@ -1804,7 +1803,7 @@ test "PushReceiver JSON 非事件消息与未知事件返回 raw 明文" {
     const text_msg = "{\"ToUserName\":\"gh_x\",\"FromUserName\":\"oX\",\"CreateTime\":1,\"MsgType\":\"text\",\"Content\":\"hi\"}";
     const got_text = try r.getMsgData(alloc, text_msg, .json);
     try std.testing.expectEqualStrings("text", got_text.msg_type);
-    try std.testing.expect(std.mem.indexOf(u8, got_text.data.raw, "\"Content\":\"hi\"") != null);
+    try std.testing.expect(std.mem.find(u8, got_text.data.raw, "\"Content\":\"hi\"") != null);
 
     const unknown_event =
         \\{"ToUserName":"gh_x","FromUserName":"oX","CreateTime":1,"MsgType":"event",
@@ -1813,7 +1812,7 @@ test "PushReceiver JSON 非事件消息与未知事件返回 raw 明文" {
     const got_unknown = try r.getMsgData(alloc, unknown_event, .json);
     try std.testing.expectEqualStrings("event", got_unknown.msg_type);
     try std.testing.expectEqualStrings("user_enter_tempsession", got_unknown.event);
-    try std.testing.expect(std.mem.indexOf(u8, got_unknown.data.raw, "user_enter_tempsession") != null);
+    try std.testing.expect(std.mem.find(u8, got_unknown.data.raw, "user_enter_tempsession") != null);
 
     try std.testing.expectError(util_error.WechatError.DecodeError, r.getMsgData(alloc, "not-json", .json));
 }
@@ -1938,7 +1937,7 @@ test "PushReceiver XML 未知事件返回 raw 明文" {
     const got = try r.getMsgData(alloc, data, .xml);
     try std.testing.expectEqualStrings("event", got.msg_type);
     try std.testing.expectEqualStrings("user_enter_tempsession", got.event);
-    try std.testing.expect(std.mem.indexOf(u8, got.data.raw, "<![CDATA[session-from]]>") != null);
+    try std.testing.expect(std.mem.find(u8, got.data.raw, "<![CDATA[session-from]]>") != null);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2761,8 +2760,7 @@ test "PushReceiver 12 类新增事件 JSON / XML 均命中对应 union 分支" {
     try std.testing.expectEqual(events.len, tags.len);
 
     for (events, tags) |ev, want| {
-        const json = try std.fmt.allocPrint(
-            alloc,
+        const json = try alloc.print(
             "{{\"ToUserName\":\"gh_x\",\"FromUserName\":\"oX\",\"CreateTime\":1,\"MsgType\":\"event\",\"Event\":\"{s}\"}}",
             .{ev},
         );
@@ -2770,8 +2768,7 @@ test "PushReceiver 12 类新增事件 JSON / XML 均命中对应 union 分支" {
         try std.testing.expectEqualStrings(ev, got_json.event);
         try std.testing.expectEqual(want, std.meta.activeTag(got_json.data));
 
-        const xml = try std.fmt.allocPrint(
-            alloc,
+        const xml = try alloc.print(
             "<xml><ToUserName><![CDATA[gh_x]]></ToUserName><CreateTime>1</CreateTime>" ++
                 "<MsgType><![CDATA[event]]></MsgType><Event><![CDATA[{s}]]></Event></xml>",
             .{ev},

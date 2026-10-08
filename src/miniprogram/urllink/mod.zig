@@ -90,8 +90,7 @@ pub const URLLink = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/generate_urllink?access_token={s}",
                     .{token},
                 );
@@ -134,8 +133,7 @@ pub const URLLink = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/query_urllink?access_token={s}",
                     .{token},
                 );
@@ -208,8 +206,8 @@ test "ULParams 序列化包含 path 与 is_expire" {
     const allocator = std.testing.allocator;
     const body = try jsonStringifyULParams(allocator, .{ .path = "pages/index" });
     defer allocator.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"path\":\"pages/index\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"is_expire\":false") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"path\":\"pages/index\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"is_expire\":false") != null);
 }
 
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────

@@ -44,8 +44,7 @@ pub const Security = struct {
             body: []const u8,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const url = try std.fmt.allocPrint(
-                    a,
+                const url = try a.print(
                     "https://api.weixin.qq.com/wxa/msg_sec_check?access_token={s}",
                     .{token},
                 );
@@ -85,8 +84,7 @@ pub const Security = struct {
             body: []const u8,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const url = try std.fmt.allocPrint(
-                    a,
+                const url = try a.print(
                     "https://api.weixin.qq.com/wxa/media_check_async?access_token={s}",
                     .{token},
                 );

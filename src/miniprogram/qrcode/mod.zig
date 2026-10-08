@@ -54,8 +54,7 @@ pub const QRCode = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token={s}",
                     .{token},
                 );
@@ -136,7 +135,7 @@ test "encodeGetUnlimitedBody 无 page 时省略该字段" {
     defer parsed.deinit();
     try std.testing.expectEqualStrings("scene-1", parsed.value.scene);
     try std.testing.expectEqual(@as(u32, 200), parsed.value.width);
-    try std.testing.expect(std.mem.indexOf(u8, body, "page") == null);
+    try std.testing.expect(std.mem.find(u8, body, "page") == null);
 }
 
 // —— mock 测试 ——

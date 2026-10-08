@@ -220,8 +220,7 @@ pub const Analysis = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/business/performance/boot?access_token={s}",
                     .{token},
                 );
@@ -246,8 +245,7 @@ pub const Analysis = struct {
 
     /// datacube 日期区间查询公共路径；`comptime T` 为响应类型。
     fn fetchDateRange(self: *Self, endpoint: []const u8, begin_date: []const u8, end_date: []const u8, comptime T: type) !std.json.Parsed(T) {
-        const body = try std.fmt.allocPrint(
-            self.allocator,
+        const body = try self.allocator.print(
             "{{\"begin_date\":\"{s}\",\"end_date\":\"{s}\"}}",
             .{ begin_date, end_date },
         );
@@ -259,8 +257,7 @@ pub const Analysis = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/datacube/{s}?access_token={s}",
                     .{ c.endpoint, token },
                 );

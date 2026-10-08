@@ -55,8 +55,7 @@ pub const ShortLink = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/genwxashortlink?access_token={s}",
                     .{token},
                 );
@@ -109,8 +108,8 @@ test "shortlink 请求体省略 is_permanent（临时链接语义）" {
     const body = try out.toOwnedSlice();
     defer allocator.free(body);
     // 临时链接不携带 is_permanent 字段，且特殊字符被正确转义。
-    try std.testing.expect(std.mem.indexOf(u8, body, "is_permanent") == null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\\\"1\\\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "is_permanent") == null);
+    try std.testing.expect(std.mem.find(u8, body, "\\\"1\\\"") != null);
 }
 
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────

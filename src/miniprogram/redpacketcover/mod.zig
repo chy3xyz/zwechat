@@ -59,8 +59,7 @@ pub const RedPacketCover = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/redpacketcover/wxapp/cover_url/get_by_token?access_token={s}",
                     .{token},
                 );

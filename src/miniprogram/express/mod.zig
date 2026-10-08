@@ -167,8 +167,7 @@ pub const Express = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/{s}?access_token={s}",
                     .{ c.endpoint, token },
                 );
@@ -199,8 +198,7 @@ pub const Express = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/{s}?access_token={s}",
                     .{ c.endpoint, token },
                 );
@@ -373,8 +371,8 @@ test "traceWaybill POST 传运单并解析 waybill_token（回归：泛型 T 参
 
     try std.testing.expectEqual(std.http.Method.POST, tt.method);
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/express/delivery/open_msg/trace_waybill?access_token=token-abc", tt.uri);
-    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"delivery_id\":\"SF\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"waybill_id\":\"SF123456789\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"delivery_id\":\"SF\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"waybill_id\":\"SF123456789\"") != null);
     try std.testing.expectEqualStrings("wb-token-xyz", parsed.value.waybill_token);
 }
 

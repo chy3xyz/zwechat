@@ -182,8 +182,7 @@ pub const OCR = struct {
             encoded: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/cv/ocr/{s}?img_url={s}&access_token={s}",
                     .{ c.path, c.encoded, token },
                 );

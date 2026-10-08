@@ -201,8 +201,7 @@ pub const Shipping = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/sec/order/{s}?access_token={s}",
                     .{ c.path, token },
                 );
@@ -226,8 +225,7 @@ pub const Shipping = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/sec/order/{s}?access_token={s}",
                     .{ c.path, token },
                 );
@@ -402,8 +400,8 @@ test "UploadShippingInfoRequest 序列化包含 order_key" {
         .order_key = .{ .out_trade_no = "t1", .mchid = "m1" },
     });
     defer allocator.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"order_key\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"out_trade_no\":\"t1\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"order_key\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"out_trade_no\":\"t1\"") != null);
 }
 
 // ── 可注入 transport 测试 ────────────────────────────────────────────────
@@ -458,8 +456,8 @@ test "getShippingOrder POST 查询发货状态并解析（回归：泛型 T 参�
 
     try std.testing.expectEqual(std.http.Method.POST, tt.method);
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/order/get_order?access_token=token-abc", tt.uri);
-    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"transaction_id\":\"tx-1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"merchant_id\":\"m1\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"transaction_id\":\"tx-1\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"merchant_id\":\"m1\"") != null);
     try std.testing.expectEqualStrings("tx-1", parsed.value.order.transaction_id);
     try std.testing.expectEqual(State.shipped, parsed.value.order.order_state);
 }
@@ -480,7 +478,7 @@ test "getShippingOrderList POST 查询订单列表并解析" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/order/get_order_list?access_token=token-abc", tt.uri);
-    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"page_size\":10") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"page_size\":10") != null);
     try std.testing.expectEqual(@as(usize, 1), parsed.value.order_list.len);
     try std.testing.expectEqualStrings("tx-2", parsed.value.order_list[0].transaction_id);
     try std.testing.expectEqual(State.wait_shipment, parsed.value.order_list[0].order_state);

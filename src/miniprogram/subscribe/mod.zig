@@ -56,6 +56,17 @@ pub const Category = struct {
     name: []const u8 = "",
 };
 
+/// 类目列表响应（`getcategory`）。
+///
+/// 说明：原实现把该结构体**内联写在返回类型与 `parseFromSlice` 两处**，Zig 视两者为
+/// 不同类型，导致该函数一旦被实例化就编译失败（懒分析陷阱，见 AGENTS.md）。现提取为
+/// 具名类型，公开以便调用方引用。
+pub const CategoryList = struct {
+    errcode: i64 = 0,
+    errmsg: []const u8 = "",
+    data: []const Category = &.{},
+};
+
 /// 统一服务消息数据项（对照 Go `DataItem`）。
 pub const UniformDataItem = struct {
     value: []const u8,
@@ -138,8 +149,7 @@ pub const Subscribe = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token={s}",
                     .{token},
                 );
@@ -179,8 +189,7 @@ pub const Subscribe = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/cgi-bin/message/wxopen/template/uniform_send?access_token={s}",
                     .{token},
                 );
@@ -202,17 +211,12 @@ pub const Subscribe = struct {
     }
 
     /// 获取类目。
-    pub fn getCategory(self: *Self) !std.json.Parsed(struct {
-        errcode: i64 = 0,
-        errmsg: []const u8 = "",
-        data: []const Category = &.{},
-    }) {
+    pub fn getCategory(self: *Self) !std.json.Parsed(CategoryList) {
         const Sender = struct {
             sub: *Self,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxaapi/newtmpl/getcategory?access_token={s}",
                     .{token},
                 );
@@ -224,11 +228,7 @@ pub const Subscribe = struct {
         const resp = try util_retry.callApi(self.ctx, self.allocator, "GetCategory", Sender{ .sub = self });
         defer self.allocator.free(resp);
 
-        var parsed = std.json.parseFromSlice(struct {
-            errcode: i64 = 0,
-            errmsg: []const u8 = "",
-            data: []const Category = &.{},
-        }, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
+        var parsed = std.json.parseFromSlice(CategoryList, self.allocator, resp, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch {
             return util_error.WechatError.DecodeError;
         };
         errdefer parsed.deinit();
@@ -244,7 +244,7 @@ pub const Subscribe = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}", .{ c.url, token });
+                const uri = try allocator.print("{s}?access_token={s}", .{ c.url, token });
                 defer allocator.free(uri);
                 return c.sub.postJSON(uri, c.body);
             }
@@ -265,7 +265,7 @@ pub const Subscribe = struct {
             url: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(allocator, "{s}?access_token={s}", .{ c.url, token });
+                const uri = try allocator.print("{s}?access_token={s}", .{ c.url, token });
                 defer allocator.free(uri);
                 return c.sub.httpGet(uri);
             }
@@ -430,8 +430,8 @@ test "Message 序列化包含 touser 与 data" {
         .data = &.{.{ .key = "thing1", .value = "hello" }},
     });
     defer allocator.free(body);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"touser\":\"openid-1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"thing1\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"touser\":\"openid-1\"") != null);
+    try std.testing.expect(std.mem.find(u8, body, "\"thing1\"") != null);
 }
 
 // ── 可注入 transport 测试 ────────────────────────────────────────────────
@@ -491,6 +491,28 @@ test "listTemplates GET 模板列表并解析（回归：泛型 T 参数错位�
     try std.testing.expectEqualStrings("下单提醒", parsed.value.data[0].title);
 }
 
+test "getCategory GET 类目列表并解析（回归：内联匿名结构体导致无法编译）" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"data\":[{\"id\":616,\"name\":\"医疗\"}]}" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var s = Subscribe.init(&ctx, allocator);
+    s.setTransport(CapturingTransport.dispatch, &tt);
+
+    // 该函数原先把同一个匿名结构体内联写在返回类型与 parseFromSlice 两处，
+    // Zig 视为不同类型 → 一旦被调用（而非仅被引用）就编译失败；本用例正是"真实调用"。
+    var parsed = try s.getCategory();
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(std.http.Method.GET, tt.method);
+    try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxaapi/newtmpl/getcategory?access_token=token-abc", tt.uri);
+    try std.testing.expectEqual(@as(i64, 0), parsed.value.errcode);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.data.len);
+    try std.testing.expectEqual(@as(i64, 616), parsed.value.data[0].id);
+    try std.testing.expectEqualStrings("医疗", parsed.value.data[0].name);
+}
+
 test "sendGetMsgId POST 订阅消息并解析 msgid" {
     const allocator = std.testing.allocator;
     var tt = CapturingTransport{ .response = "{\"msgid\":12345}" };
@@ -509,7 +531,7 @@ test "sendGetMsgId POST 订阅消息并解析 msgid" {
 
     try std.testing.expectEqual(std.http.Method.POST, tt.method);
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token=token-abc", tt.uri);
-    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"touser\":\"openid-1\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"touser\":\"openid-1\"") != null);
 }
 
 test "uniformSend POST 统一服务消息且 body 字段与 Go 对齐" {
@@ -574,7 +596,7 @@ test "uniformSend POST 统一服务消息且 body 字段与 Go 对齐" {
     try std.testing.expectEqualStrings("tmpl-mp", parsed.value.mp_template_msg.template_id);
     try std.testing.expectEqualStrings("pages/index", parsed.value.mp_template_msg.miniprogram.pagepath);
     // 嵌套 data 中的 value 含引号时必须已被转义（Stringify 保证）。
-    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "值\\\"1") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "值\\\"1") != null);
 }
 
 test "uniformSend errcode 非 0 返回 ApiError" {

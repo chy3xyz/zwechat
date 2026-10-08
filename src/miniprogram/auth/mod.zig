@@ -9,6 +9,7 @@ const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
 const util_json = @import("../../util/json.zig");
+const util_uri = @import("../../util/uri.zig");
 
 /// `jscode2session` 返回。
 pub const ResCode2Session = struct {
@@ -91,16 +92,28 @@ pub const Auth = struct {
 
     /// `jscode2session` — 小程序登录凭证校验。
     /// 返回的 `std.json.Parsed(ResCode2Session)` 由调用方持有并负责 `deinit`。
+    ///
+    /// 本接口用 `appid` + `secret` 换 `openid` / `session_key`，**不需要 access_token**，
+    /// 因此不走 `util_retry.callApi`（那条链路服务的是需要 token 的接口）。
+    /// `app_secret` 只出现在请求 URL 里，绝不进入错误值 / 错误详情 / 日志——
+    /// 失败一律返回无载荷的 `WechatError.ApiError`，具体 errcode 见
+    /// `util_error.lastErrorDetail()`。
     pub fn code2Session(self: *Self, js_code: []const u8) !std.json.Parsed(ResCode2Session) {
-        const uri = try std.fmt.allocPrint(
-            self.allocator,
+        // `js_code` 来自客户端 `wx.login`，属外部输入：进 query 前必须按 Go
+        // `url.QueryEscape` 语义转义，否则其中的 `&` / `=` / `#` 会把 query 截断
+        // 甚至凭空注入参数（`js_code=a&appid=别的app`）。
+        const encoded_code = try util_uri.queryEscape(self.allocator, js_code);
+        defer self.allocator.free(encoded_code);
+
+        const uri = try self.allocator.print(
             "https://api.weixin.qq.com/sns/jscode2session?appid={s}&secret={s}&js_code={s}&grant_type=authorization_code",
-            .{ self.ctx.config.app_id, self.ctx.config.app_secret, js_code },
+            .{ self.ctx.config.app_id, self.ctx.config.app_secret, encoded_code },
         );
         defer self.allocator.free(uri);
 
-        const client = util_http.getDefaultClient(self.allocator);
-        const body = try client.get(uri);
+        // 走 `httpGet` 而非直接取默认客户端：前者在注入了 transport 时使用注入实现，
+        // 否则回落默认客户端——生产和测试都只有这一条路径。
+        const body = try self.httpGet(uri);
         defer self.allocator.free(body);
 
         var parsed = std.json.parseFromSlice(ResCode2Session, self.allocator, body, .{ .allocate = .alloc_always, .ignore_unknown_fields = true }) catch {
@@ -108,7 +121,13 @@ pub const Auth = struct {
         };
         errdefer parsed.deinit();
 
-        if (parsed.value.errcode != 0) return util_error.WechatError.ApiError;
+        if (parsed.value.errcode != 0) {
+            // 40029 invalid code / 40125 invalid appsecret / 45011 频率限制 这些码只有
+            // 线程局部详情通道里才看得到；错误集保持粗粒度不变（调用方读
+            // `lastErrorDetail()`）。`errmsg` 是微信原文，不含我们传入的 secret。
+            if (try util_error.parseCommonError(self.allocator, body, "Code2Session")) |ce| ce.deinit();
+            return util_error.WechatError.ApiError;
+        }
         return parsed;
     }
 
@@ -125,8 +144,7 @@ pub const Auth = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token={s}",
                     .{token},
                 );
@@ -163,8 +181,7 @@ pub const Auth = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/business/checkencryptedmsg?access_token={s}",
                     .{token},
                 );
@@ -192,14 +209,20 @@ pub const Auth = struct {
     ///
     /// 请求走 `util_retry.callApi`：errcode 为 token 失效码时作废缓存并重试一次。
     pub fn checkSession(self: *Self, signature: []const u8, open_id: []const u8) !void {
+        // `signature`（客户端 `wx.checkSession` 算出的 hmac）与 `open_id` 都来自客户端，
+        // 属外部输入 → 进 query 前按 Go `url.QueryEscape` 语义转义。
+        const encoded_signature = try util_uri.queryEscape(self.allocator, signature);
+        defer self.allocator.free(encoded_signature);
+        const encoded_open_id = try util_uri.queryEscape(self.allocator, open_id);
+        defer self.allocator.free(encoded_open_id);
+
         const Sender = struct {
             auth: *Self,
             signature: []const u8,
             open_id: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/checksession?access_token={s}&signature={s}&openid={s}&sig_method=hmac_sha256",
                     .{ token, c.signature, c.open_id },
                 );
@@ -210,8 +233,8 @@ pub const Auth = struct {
 
         const resp = try util_retry.callApi(self.ctx, self.allocator, "CheckSession", Sender{
             .auth = self,
-            .signature = signature,
-            .open_id = open_id,
+            .signature = encoded_signature,
+            .open_id = encoded_open_id,
         });
         self.allocator.free(resp);
     }
@@ -222,20 +245,30 @@ pub const Auth = struct {
     /// 返回的 unionid 字符串由本结构体的 allocator 分配，调用方负责 `free`；
     /// 请求走 `util_retry.callApi`：errcode 为 token 失效码时作废缓存并重试一次。
     pub fn getPaidUnionID(self: *Self, req: GetPaidUnionIDRequest) ![]u8 {
+        // `openid` 来自客户端/落库数据，`transaction_id` / `out_trade_no` 来自支付侧，
+        // 都属业务数据 → 进 query 前按 Go `url.QueryEscape` 语义转义（`mch_id` 是配置，
+        // 但同批处理，多一次恒等转义换统一规则）。
+        const encoded_openid = try util_uri.queryEscape(self.allocator, req.openid);
+        defer self.allocator.free(encoded_openid);
+        const encoded_transaction_id = try util_uri.queryEscape(self.allocator, req.transaction_id);
+        defer self.allocator.free(encoded_transaction_id);
+        const encoded_mch_id = try util_uri.queryEscape(self.allocator, req.mch_id);
+        defer self.allocator.free(encoded_mch_id);
+        const encoded_out_trade_no = try util_uri.queryEscape(self.allocator, req.out_trade_no);
+        defer self.allocator.free(encoded_out_trade_no);
+
         const Sender = struct {
             auth: *Self,
             req: GetPaidUnionIDRequest,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
                 const uri = if (c.req.transaction_id.len > 0)
-                    try std.fmt.allocPrint(
-                        allocator,
+                    try allocator.print(
                         "https://api.weixin.qq.com/wxa/getpaidunionid?access_token={s}&openid={s}&transaction_id={s}",
                         .{ token, c.req.openid, c.req.transaction_id },
                     )
                 else
-                    try std.fmt.allocPrint(
-                        allocator,
+                    try allocator.print(
                         "https://api.weixin.qq.com/wxa/getpaidunionid?access_token={s}&openid={s}&mch_id={s}&out_trade_no={s}",
                         .{ token, c.req.openid, c.req.mch_id, c.req.out_trade_no },
                     );
@@ -246,7 +279,12 @@ pub const Auth = struct {
 
         const resp = try util_retry.callApi(self.ctx, self.allocator, "GetPaidUnionID", Sender{
             .auth = self,
-            .req = req,
+            .req = .{
+                .openid = encoded_openid,
+                .transaction_id = encoded_transaction_id,
+                .mch_id = encoded_mch_id,
+                .out_trade_no = encoded_out_trade_no,
+            },
         });
         defer self.allocator.free(resp);
 
@@ -478,6 +516,177 @@ test "getPaidUnionID errcode 非 0 返回 ApiError" {
 
     const result = a.getPaidUnionID(.{ .openid = "oABC", .transaction_id = "TX_BAD" });
     try std.testing.expectError(util_error.WechatError.ApiError, result);
+}
+
+// ── code2Session（C 端登录最关键路径，不走 access_token）────────────────────
+//
+// 本接口**不需要 access_token**，用 `appid` + `secret` 直接换 `openid` /
+// `session_key`，所以既不走 `util_retry.callApi`、也不会触发 token 自愈；
+// 它唯一的外部输入是客户端 `wx.login` 拿到的 `js_code`。
+
+const code2session_ok_uri =
+    "https://api.weixin.qq.com/sns/jscode2session?appid=wx-mp&secret=sec&js_code=CODE-1&grant_type=authorization_code";
+
+test "code2Session 正常响应解析 openid/session_key/unionid" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute(code2session_ok_uri, .{
+        .body = "{\"openid\":\"oOpen\",\"session_key\":\"skKey\",\"unionid\":\"uUnion\",\"errcode\":0,\"errmsg\":\"ok\"}",
+    });
+
+    var ctx = makeCtx();
+    var a = Auth.init(&ctx, allocator);
+    a.setTransport(util_http.MockTransport.dispatch, &mt);
+    util_error.clearErrorDetail();
+
+    var parsed = try a.code2Session("CODE-1");
+    defer parsed.deinit();
+
+    try std.testing.expectEqualStrings("oOpen", parsed.value.openid);
+    try std.testing.expectEqualStrings("skKey", parsed.value.session_key);
+    try std.testing.expectEqualStrings("uUnion", parsed.value.unionid);
+    try std.testing.expectEqual(@as(i64, 0), parsed.value.errcode);
+    try std.testing.expectEqualStrings("ok", parsed.value.errmsg);
+    // 成功路径既不写详情通道，也不重试：只有一次请求。
+    try std.testing.expect(util_error.lastErrorDetail() == null);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+    // appid / secret 的注入方式：出现在 query（唯一注入通道），顺序固定。
+    try std.testing.expectEqualStrings(code2session_ok_uri, mt.history.items[0]);
+    try std.testing.expect(std.mem.find(u8, mt.history.items[0], "secret=sec") != null);
+}
+
+test "code2Session js_code 含 & = # 空格与中文时按 Go QueryEscape 转义" {
+    const allocator = std.testing.allocator;
+    // 未转义的话 uri 会变成 `...&js_code=a&b=c#d e中&grant_type=...`：
+    // `&` 截断 js_code 并注入新参数、`#` 之后整段被当 fragment 丢弃。
+    const escaped_uri =
+        "https://api.weixin.qq.com/sns/jscode2session?appid=wx-mp&secret=sec&js_code=a%26b%3Dc%23d+e%E4%B8%AD&grant_type=authorization_code";
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    // 路由按**精确 URI** 匹配：没转义就匹配不上 → error.MockNoRoute，用例失败。
+    try mt.addRoute(escaped_uri, .{
+        .body = "{\"openid\":\"o2\",\"session_key\":\"k2\",\"errcode\":0,\"errmsg\":\"ok\"}",
+    });
+
+    var ctx = makeCtx();
+    var a = Auth.init(&ctx, allocator);
+    a.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try a.code2Session("a&b=c#d e中");
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("o2", parsed.value.openid);
+    try std.testing.expectEqualStrings(escaped_uri, mt.history.items[0]);
+}
+
+test "code2Session errcode 40029 invalid code → ApiError 且 errcode 落到详情通道" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.weixin.qq.com/sns/jscode2session?appid=wx-mp&secret=sec&js_code=BADCODE&grant_type=authorization_code", .{
+        .body = "{\"errcode\":40029,\"errmsg\":\"invalid code\"}",
+    });
+
+    var ctx = makeCtx();
+    var a = Auth.init(&ctx, allocator);
+    a.setTransport(util_http.MockTransport.dispatch, &mt);
+    util_error.clearErrorDetail();
+
+    try std.testing.expectError(util_error.WechatError.ApiError, a.code2Session("BADCODE"));
+
+    // 错误集保持粗粒度（无载荷 `ApiError`），具体码从线程局部详情通道取。
+    const detail = util_error.lastErrorDetail().?;
+    try std.testing.expectEqual(@as(i64, 40029), detail.errcode);
+    try std.testing.expectEqualStrings("invalid code", detail.errmsg);
+    try std.testing.expectEqualStrings("Code2Session", detail.api_name);
+}
+
+test "code2Session 非 JSON 响应 → DecodeError（且不写详情通道）" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute(code2session_ok_uri, .{ .body = "<html>500</html>" });
+
+    var ctx = makeCtx();
+    var a = Auth.init(&ctx, allocator);
+    a.setTransport(util_http.MockTransport.dispatch, &mt);
+    util_error.clearErrorDetail();
+
+    try std.testing.expectError(util_error.WechatError.DecodeError, a.code2Session("CODE-1"));
+    try std.testing.expect(util_error.lastErrorDetail() == null);
+}
+
+test "code2Session 错误路径不泄漏 app_secret" {
+    const allocator = std.testing.allocator;
+    // 用一个足够独特、绝不可能被微信 errmsg 回显的 secret。
+    const secret = "SUPER-SECRET-abc123XYZ";
+    const uri = "https://api.weixin.qq.com/sns/jscode2session?appid=wx-mp&secret=SUPER-SECRET-abc123XYZ&js_code=CODE-1&grant_type=authorization_code";
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute(uri, .{ .body = "{\"errcode\":40125,\"errmsg\":\"invalid appsecret\"}" });
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-mp", .app_secret = secret },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &token_vtable },
+    };
+    var a = Auth.init(&ctx, allocator);
+    a.setTransport(util_http.MockTransport.dispatch, &mt);
+    util_error.clearErrorDetail();
+
+    if (a.code2Session("CODE-1")) |_| {
+        return error.TestUnexpectedResult;
+    } else |err| {
+        // 错误值是**无载荷枚举**：没有任何字段可以承载 secret，`@errorName` 也不含它。
+        try std.testing.expectEqual(util_error.WechatError.ApiError, err);
+        try std.testing.expect(std.mem.find(u8, @errorName(err), secret) == null);
+    }
+
+    // secret 的唯一去向是请求 URI（微信要求的 query 参数，无法避免）；错误面只多出
+    // errcode / errmsg / api_name 三项，都不含 secret。
+    try std.testing.expectEqualStrings(uri, mt.history.items[0]);
+    const detail = util_error.lastErrorDetail().?;
+    try std.testing.expect(std.mem.find(u8, detail.errmsg, secret) == null);
+    try std.testing.expect(std.mem.find(u8, detail.api_name, secret) == null);
+}
+
+test "checkSession 客户端签名与 openid 进 query 前转义" {
+    const allocator = std.testing.allocator;
+    const escaped_uri =
+        "https://api.weixin.qq.com/wxa/checksession?access_token=token-abc&signature=sig%26x%3D1&openid=o+AB&sig_method=hmac_sha256";
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute(escaped_uri, .{ .body = "{\"errcode\":0,\"errmsg\":\"ok\"}" });
+
+    var ctx = makeCtx();
+    var a = Auth.init(&ctx, allocator);
+    a.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    try a.checkSession("sig&x=1", "o AB");
+    try std.testing.expectEqualStrings(escaped_uri, mt.history.items[0]);
+}
+
+test "getPaidUnionID 单号含 & 时转义（正常输入下 URI 与改造前逐字节一致）" {
+    const allocator = std.testing.allocator;
+    const escaped_uri =
+        "https://api.weixin.qq.com/wxa/getpaidunionid?access_token=token-abc&openid=o%261&transaction_id=TX%3D2";
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute(escaped_uri, .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"unionid\":\"U1\"}",
+    });
+
+    var ctx = makeCtx();
+    var a = Auth.init(&ctx, allocator);
+    a.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    const unionid = try a.getPaidUnionID(.{ .openid = "o&1", .transaction_id = "TX=2" });
+    defer allocator.free(unionid);
+    try std.testing.expectEqualStrings("U1", unionid);
+    try std.testing.expectEqualStrings(escaped_uri, mt.history.items[0]);
 }
 
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────

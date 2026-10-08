@@ -9,6 +9,7 @@ const Context = @import("../context/mod.zig").Context;
 const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
+const util_uri = @import("../../util/uri.zig");
 
 pub const ConflictMode = enum(i64) {
     insert = 1,
@@ -200,6 +201,14 @@ pub const Tcb = struct {
     ///
     /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次。
     pub fn invokeCloudFunction(self: *Self, env: []const u8, name: []const u8, args: []const u8) !std.json.Parsed(InvokeCloudFunctionRes) {
+        // `env` / `name` 是调用方在运行期传入的不透明字符串（非编译期常量）→ 进 query
+        // 前按 Go `url.QueryEscape` 语义转义；合法字符集下转义是恒等变换，因此线上
+        // 正常调用的 URL 逐字节不变。JSON 请求体 `args` 走 body，与 query 无关。
+        const encoded_env = try util_uri.queryEscape(self.allocator, env);
+        defer self.allocator.free(encoded_env);
+        const encoded_name = try util_uri.queryEscape(self.allocator, name);
+        defer self.allocator.free(encoded_name);
+
         const Sender = struct {
             allocator: std.mem.Allocator,
             env: []const u8,
@@ -207,8 +216,7 @@ pub const Tcb = struct {
             args: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/tcb/invokecloudfunction?access_token={s}&env={s}&name={s}",
                     .{ token, c.env, c.name },
                 );
@@ -220,8 +228,8 @@ pub const Tcb = struct {
 
         const resp = try util_retry.callApi(self.ctx, self.allocator, "InvokeCloudFunction", Sender{
             .allocator = self.allocator,
-            .env = env,
-            .name = name,
+            .env = encoded_env,
+            .name = encoded_name,
             .args = args,
         });
         defer self.allocator.free(resp);
@@ -336,7 +344,7 @@ pub const Tcb = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ c.endpoint, token });
+                const uri = try allocator.print("https://api.weixin.qq.com/{s}?access_token={s}", .{ c.endpoint, token });
                 defer allocator.free(uri);
                 const client = util_http.getDefaultClient(c.allocator);
                 return client.postJSON(uri, c.body);
@@ -359,7 +367,7 @@ pub const Tcb = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ c.endpoint, token });
+                const uri = try allocator.print("https://api.weixin.qq.com/{s}?access_token={s}", .{ c.endpoint, token });
                 defer allocator.free(uri);
                 const client = util_http.getDefaultClient(c.allocator);
                 return client.postJSON(uri, c.body);
@@ -637,6 +645,33 @@ fn releaseTestClient() void {
     // 不依赖「用别的 allocator 再取一次指针」的宽容语义：直接销毁线程局部实例，
     // 注入的 transport 随实例一起消失（下次 getDefaultClient 会重新初始化）。
     util_http.deinitDefaultClient();
+}
+
+test "invokeCloudFunction 的 env/name 进 query 前转义（正常输入逐字节不变）" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{
+        .allocator = alloc,
+        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"resp_data\":\"{}\"}",
+    };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-tcb" },
+        .access_token_handle = .{ .ptr = undefined, .vtable = &test_token_vtable },
+    };
+    var t = Tcb.init(&ctx, alloc);
+    var parsed = try t.invokeCloudFunction("prod&x=1", "fn name", "{}");
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("{}", parsed.value.resp_data);
+
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/tcb/invokecloudfunction?access_token=stub-ak&env=prod%26x%3D1&name=fn+name",
+        cap.uri,
+    );
 }
 
 test "databaseQuery 请求体为合法 JSON 且 query 含双引号可完整还原" {

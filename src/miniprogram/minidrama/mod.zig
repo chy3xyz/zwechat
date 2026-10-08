@@ -330,8 +330,7 @@ pub const MiniDrama = struct {
             req: SingleFileUploadRequest,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/sec/vod/singlefileupload?access_token={s}",
                     .{token},
                 );
@@ -370,7 +369,7 @@ pub const MiniDrama = struct {
 
     /// 查询任务状态。
     pub fn getTask(self: *Self, req: GetTaskRequest) !std.json.Parsed(GetTaskResponse) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"task_id\":{d}}}", .{req.task_id});
+        const body = try self.allocator.print("{{\"task_id\":{d}}}", .{req.task_id});
         defer self.allocator.free(body);
         return self.postBody("wxa/sec/vod/gettask", body, GetTaskResponse);
     }
@@ -389,8 +388,7 @@ pub const MiniDrama = struct {
             req: UploadPartRequest,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/sec/vod/uploadpart?access_token={s}",
                     .{token},
                 );
@@ -400,8 +398,8 @@ pub const MiniDrama = struct {
                 defer fields.deinit(c.allocator);
                 var part_buf: [32]u8 = undefined;
                 var res_buf: [32]u8 = undefined;
-                const part_str = try std.fmt.bufPrint(&part_buf, "{d}", .{c.req.part_number});
-                const res_str = try std.fmt.bufPrint(&res_buf, "{d}", .{c.req.resource_type});
+                const part_str = try std.mem.print(&part_buf, "{d}", .{c.req.part_number});
+                const res_str = try std.mem.print(&res_buf, "{d}", .{c.req.resource_type});
                 try fields.append(c.allocator, .{ .is_file = false, .field_name = "upload_id", .filename = "", .value = c.req.upload_id });
                 try fields.append(c.allocator, .{ .is_file = false, .field_name = "part_number", .filename = "", .value = part_str });
                 try fields.append(c.allocator, .{ .is_file = false, .field_name = "resource_type", .filename = "", .value = res_str });
@@ -434,7 +432,7 @@ pub const MiniDrama = struct {
 
     /// 获取媒资详情。
     pub fn getMedia(self: *Self, req: GetMediaRequest) !std.json.Parsed(GetMediaResponse) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"media_id\":{d}}}", .{req.media_id});
+        const body = try self.allocator.print("{{\"media_id\":{d}}}", .{req.media_id});
         defer self.allocator.free(body);
         return self.postBody("wxa/sec/vod/getmedia", body, GetMediaResponse);
     }
@@ -446,7 +444,7 @@ pub const MiniDrama = struct {
 
     /// 删除媒体。
     pub fn deleteMedia(self: *Self, req: DeleteMediaRequest) !std.json.Parsed(DeleteMediaResponse) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"media_id\":{d}}}", .{req.media_id});
+        const body = try self.allocator.print("{{\"media_id\":{d}}}", .{req.media_id});
         defer self.allocator.free(body);
         return self.postBody("wxa/sec/vod/deletemedia", body, DeleteMediaResponse);
     }
@@ -460,28 +458,28 @@ pub const MiniDrama = struct {
 
     /// 获取剧目列表。
     pub fn listDramas(self: *Self, req: ListDramasRequest) !std.json.Parsed(ListDramasResponse) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"limit\":{d},\"offset\":{d}}}", .{ req.limit, req.offset });
+        const body = try self.allocator.print("{{\"limit\":{d},\"offset\":{d}}}", .{ req.limit, req.offset });
         defer self.allocator.free(body);
         return self.postBody("wxa/sec/vod/listdramas", body, ListDramasResponse);
     }
 
     /// 获取剧目信息。
     pub fn getDrama(self: *Self, req: GetDramaRequest) !std.json.Parsed(GetDramaResponse) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"drama_id\":{d}}}", .{req.drama_id});
+        const body = try self.allocator.print("{{\"drama_id\":{d}}}", .{req.drama_id});
         defer self.allocator.free(body);
         return self.postBody("wxa/sec/vod/getdrama", body, GetDramaResponse);
     }
 
     /// 查询 CDN 用量数据。
     pub fn getCdnUsageData(self: *Self, req: GetCdnUsageDataRequest) !std.json.Parsed(GetCdnUsageDataResponse) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"start_time\":{d},\"end_time\":{d},\"data_interval\":{d}}}", .{ req.start_time, req.end_time, req.data_interval });
+        const body = try self.allocator.print("{{\"start_time\":{d},\"end_time\":{d},\"data_interval\":{d}}}", .{ req.start_time, req.end_time, req.data_interval });
         defer self.allocator.free(body);
         return self.postBody("wxa/sec/vod/getcdnusagedata", body, GetCdnUsageDataResponse);
     }
 
     /// 查询 CDN 日志。
     pub fn getCdnLogs(self: *Self, req: GetCdnLogsRequest) !std.json.Parsed(GetCdnLogsResponse) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"start_time\":{d},\"end_time\":{d},\"limit\":{d},\"offset\":{d}}}", .{ req.start_time, req.end_time, req.limit, req.offset });
+        const body = try self.allocator.print("{{\"start_time\":{d},\"end_time\":{d},\"limit\":{d},\"offset\":{d}}}", .{ req.start_time, req.end_time, req.limit, req.offset });
         defer self.allocator.free(body);
         return self.postBody("wxa/sec/vod/getcdnlogs", body, GetCdnLogsResponse);
     }
@@ -493,7 +491,7 @@ pub const MiniDrama = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(allocator, "https://api.weixin.qq.com/{s}?access_token={s}", .{ c.endpoint, token });
+                const uri = try allocator.print("https://api.weixin.qq.com/{s}?access_token={s}", .{ c.endpoint, token });
                 defer allocator.free(uri);
                 return c.drama.postJSON(uri, c.body);
             }
@@ -788,8 +786,8 @@ test "pullUpload POST 拉取上传并解析（回归：postJson→postBody 泛�
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxa/sec/vod/pullupload?access_token=token-abc", tt.uri);
-    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"media_name\":\"drama-ep1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, tt.payload, "\"media_url\":\"https://cdn.example.com/ep1.mp4\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"media_name\":\"drama-ep1\"") != null);
+    try std.testing.expect(std.mem.find(u8, tt.payload, "\"media_url\":\"https://cdn.example.com/ep1.mp4\"") != null);
     try std.testing.expectEqual(@as(i64, 789), parsed.value.task_id);
 }
 

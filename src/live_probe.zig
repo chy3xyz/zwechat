@@ -44,10 +44,11 @@
 //! ZWECHAT_LIVE_PROBE=1 ... zig build live-probe -Dstrict
 //! ```
 //!
-//! ⚠️ 本工具链（0.17.0-dev.2151）的 `zig build <step> -- <args>` **不会**把 `--`
-//! 之后的参数转发给被运行的进程（`std.Build` 已无 `args` 字段，实测被静默忽略），
-//! 因此 strict 用构建选项 `-Dstrict` 传递，由 `build.zig` 补上 `--strict`。
-//! 直接运行二进制时仍可用 `./live-probe --strict`，或用 `ZWECHAT_LIVE_PROBE_STRICT=1`。
+//! `--` 之后的参数**会**转发（`build.zig` 给该 step 用了 `Run.addPassthruArgs`），因此
+//! `zig build live-probe -- --strict` 等价于直接运行 `./live-probe --strict`；
+//! 构建选项 `-Dstrict`（由 `build.zig` 补上 `--strict`）与
+//! `ZWECHAT_LIVE_PROBE_STRICT=1` 同样可用。
+//! 注：0.17.0 之前 `std.Build` 无 `args` 字段、`--` 会被静默忽略，本仓已随 0.17.0 适配。
 //!
 //! ## 退出码
 //!
@@ -565,6 +566,86 @@ fn probeMpSceneList(p: ProbeCtx) anyerror!Attempt {
     };
 }
 
+/// `/wxaapi/newtmpl/gettemplate` — 当前账号下的订阅消息个人模板列表（只读）。
+///
+/// 只需 access_token（接口未授权时微信回 48001，`isNotApplicableErrCode` 会判 SKIP）。
+/// 响应外层是 `data` 数组，键固定存在，因此 `empty_ok = true` 让
+/// 「键在、值为空」（账号还没选用任何模板）判 SKIP，「键不在」判 FAIL（上游改名）。
+///
+/// 为什么不用同一族的 `/wxaapi/newtmpl/getcategory`（账号类目）：SDK 侧
+/// `Subscribe.getCategory` 目前**无法编译**（返回类型把同一个匿名结构体写了两遍，
+/// 签名里一个、函数体 `parseFromSlice` 里一个，Zig 视其为两个不同类型 ——
+/// 典型的「非泛型函数体没被实例化就发现不了」问题，详见交付说明），
+/// 在它修好之前探针不能依赖它。
+fn probeMpSubscribeTemplates(p: ProbeCtx) anyerror!Attempt {
+    const mp: *miniprogram.MiniProgram = @ptrCast(@alignCast(p.handle));
+    var sub = mp.getSubscribe();
+    var parsed = try sub.listTemplates();
+    defer parsed.deinit();
+
+    const tmpls = parsed.value.data;
+    var untitled: usize = 0;
+    for (tmpls) |t| {
+        if (t.pri_tmpl_id.len == 0 or t.title.len == 0) untitled += 1;
+    }
+    const note = std.fmt.allocPrint(
+        p.alloc,
+        "data={d} 条（pri_tmpl_id/title 任一为空 {d} 条）",
+        .{ tmpls.len, untitled },
+    ) catch "";
+    return .{
+        .non_empty = tmpls.len > 0 and untitled == 0,
+        // 刻意不设 `no_data_available`：它为真会在 `key_present` 之前短路成 SKIP，
+        // 让「上游把外层 `data` 改名」这类漂移在没选用模板的账号上永远测不出来。
+        .note = note,
+    };
+}
+
+/// `/wxa/getwxadevinfo` — 查询小程序服务器域名配置（只读）。
+///
+/// 只需 access_token（第三方代调用时才需要权限集 18）。响应固定带
+/// `requestdomain` / `wsrequestdomain` / `uploaddomain` / `downloaddomain` /
+/// `udpdomain` 五个数组键（允许为空数组），因此 `empty_ok = true` 让
+/// 「键在、值为空」（账号没配域名）判 SKIP，「键不在」判 FAIL（上游改名）。
+///
+/// `action` 取文档列出的 `getserverdomain`（服务器域名族）；不传 action 的语义
+/// 在不同版本文档间不一致（"不指明返回全部"），不依赖它。
+fn probeMpDomainInfo(p: ProbeCtx) anyerror!Attempt {
+    const mp: *miniprogram.MiniProgram = @ptrCast(@alignCast(p.handle));
+    var op = mp.getOperation();
+    var parsed = try op.getDomainInfo(.{ .action = "getserverdomain" });
+    defer parsed.deinit();
+
+    const v = parsed.value;
+    const total = v.requestdomain.len + v.wsrequestdomain.len + v.uploaddomain.len + v.downloaddomain.len + v.udpdomain.len;
+    const note = std.fmt.allocPrint(
+        p.alloc,
+        "requestdomain={d} ws={d} upload={d} download={d} udp={d} biz={d}",
+        .{
+            v.requestdomain.len,
+            v.wsrequestdomain.len,
+            v.uploaddomain.len,
+            v.downloaddomain.len,
+            v.udpdomain.len,
+            v.bizdomain.len,
+        },
+    ) catch "";
+    return .{
+        .non_empty = total > 0,
+        // 同 `probeMpSubscribeTemplates`：不用 `no_data_available`，否则空域名账号上
+        // 「`requestdomain` 被改名」会被静默判成 SKIP。
+        .note = note,
+    };
+}
+
+// 为什么**没有**小程序侧的 `code2session` 探针：该接口必须传真实的 `js_code`，
+// 而 `js_code` 只能由小程序端 `wx.login` 现取现用（5 分钟有效、一次性），
+// 探针进程没有用户输入通道也拿不到它；用假 code 只会稳定拿到 40029，测不出契约。
+// 同理被否掉的候选：`/wxa/getwxasearchstatus`（搜索状态）——它属于**第三方平台**
+// 接口，需要 `authorizer_access_token` + 权限集 18（见
+// `_ref/wechat/openplatform/miniprogram/basic/basic.go` 与微信开放平台文档），
+// 普通 appid+secret 调不动，不符合「只用 appid + secret 就能跑」的约束。
+
 const mp_specs = [_]ProbeSpec{
     .{
         .name = "mp.gettoken",
@@ -579,6 +660,20 @@ const mp_specs = [_]ProbeSpec{
         .expected_key = "scene",
         .empty_ok = true,
         .run_fn = probeMpSceneList,
+    },
+    .{
+        .name = "mp.operation.domain",
+        .endpoint = "/wxa/getwxadevinfo",
+        .expected_key = "requestdomain",
+        .empty_ok = true,
+        .run_fn = probeMpDomainInfo,
+    },
+    .{
+        .name = "mp.subscribe.templates",
+        .endpoint = "/wxaapi/newtmpl/gettemplate",
+        .expected_key = "data",
+        .empty_ok = true,
+        .run_fn = probeMpSubscribeTemplates,
     },
 };
 const mp_skip_reason = "缺少 " ++ MpAppIdEnv ++ " / " ++ MpSecretEnv;
@@ -1092,6 +1187,16 @@ test "bodyHasKey 精确匹配带引号的键，不误命中子串" {
     try std.testing.expect(!bodyHasKey(body, ""));
     var long_key: [70]u8 = @splat('x');
     try std.testing.expect(!bodyHasKey(body, &long_key));
+}
+
+test "bodyHasKey：`requestdomain` 不会被 `wsrequestdomain` 子串误命中" {
+    // 小程序域名配置探针（`mp.operation.domain`）以 `requestdomain` 作为改名判据，
+    // 而响应里同时有 `wsrequestdomain`——它包含 `requestdomain` 这串字符，但不含
+    // **带引号的** `"requestdomain"`：前一个字符是 `s`，不是 `"`。
+    const body = "{\"errcode\":0,\"errmsg\":\"ok\",\"wsrequestdomain\":[\"wss://a\"],\"uploaddomain\":[]}";
+    try std.testing.expect(bodyHasKey(body, "wsrequestdomain"));
+    try std.testing.expect(bodyHasKey(body, "uploaddomain"));
+    try std.testing.expect(!bodyHasKey(body, "requestdomain"));
 }
 
 test "preview 按 UTF-8 边界截断且不越界" {

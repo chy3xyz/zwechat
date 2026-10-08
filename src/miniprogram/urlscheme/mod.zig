@@ -84,8 +84,7 @@ pub const URLScheme = struct {
     /// 返回的 `std.json.Parsed(GenerateResponse)` 由调用方持有并负责 `deinit`。
     /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次。
     pub fn generate(self: *Self, jump_wxa_json: []const u8) !std.json.Parsed(GenerateResponse) {
-        const body_json = try std.fmt.allocPrint(
-            self.allocator,
+        const body_json = try self.allocator.print(
             "{{\"jump_wxa\":{s}}}",
             .{jump_wxa_json},
         );
@@ -96,8 +95,7 @@ pub const URLScheme = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/generatescheme?access_token={s}",
                     .{token},
                 );
@@ -134,8 +132,7 @@ pub const URLScheme = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/queryscheme?access_token={s}",
                     .{token},
                 );

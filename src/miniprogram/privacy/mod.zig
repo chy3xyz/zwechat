@@ -87,7 +87,7 @@ pub const Privacy = struct {
     ///
     /// 请求走 `util_retry.callApi`：token 失效码时作废缓存并重试一次。
     pub fn getPrivacySetting(self: *Self, privacy_ver: i64) !std.json.Parsed(GetPrivacySettingResponse) {
-        const body = try std.fmt.allocPrint(self.allocator, "{{\"privacy_ver\":{d}}}", .{privacy_ver});
+        const body = try self.allocator.print("{{\"privacy_ver\":{d}}}", .{privacy_ver});
         defer self.allocator.free(body);
 
         const Sender = struct {
@@ -95,8 +95,7 @@ pub const Privacy = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/cgi-bin/component/getprivacysetting?access_token={s}",
                     .{token},
                 );
@@ -136,8 +135,7 @@ pub const Privacy = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/cgi-bin/component/setprivacysetting?access_token={s}",
                     .{token},
                 );
@@ -173,8 +171,7 @@ pub const Privacy = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/cgi-bin/component/uploadprivacyextfile?access_token={s}",
                     .{token},
                 );

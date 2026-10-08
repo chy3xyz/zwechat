@@ -11,6 +11,7 @@ const util_http = @import("../../util/http.zig");
 const util_error = @import("../../util/error.zig");
 const util_retry = @import("../../util/retry.zig");
 const util_json = @import("../../util/json.zig");
+const util_uri = @import("../../util/uri.zig");
 
 pub const GetDomainInfoRequest = struct {
     action: []const u8 = "",
@@ -274,15 +275,29 @@ pub const Operation = struct {
     /// 查询实时日志。
     pub fn realTimeLogSearch(self: *Self, req: RealTimeLogSearchRequest) !std.json.Parsed(RealTimeLogSearchResponse) {
         // 只拼 access_token 之后的查询串，token 由 `util_retry.callApi` 注入。
-        var query: std.ArrayListUnmanaged(u8) = .empty;
+        // 其中的字符串字段都是调用方运行期传入的检索条件（页面路径 / traceId / 日志 id /
+        // 关键字），属外部输入 → 按 Go `url.QueryEscape` 语义转义后再拼；合法字符集下
+        // 是恒等变换，正常调用 URL 逐字节不变。数字字段无需转义。
+        const date = try util_uri.queryEscape(self.allocator, req.date);
+        defer self.allocator.free(date);
+        const trace_id = try util_uri.queryEscape(self.allocator, req.trace_id);
+        defer self.allocator.free(trace_id);
+        const url = try util_uri.queryEscape(self.allocator, req.url);
+        defer self.allocator.free(url);
+        const id = try util_uri.queryEscape(self.allocator, req.id);
+        defer self.allocator.free(id);
+        const filter_msg = try util_uri.queryEscape(self.allocator, req.filter_msg);
+        defer self.allocator.free(filter_msg);
+
+        var query: std.ArrayList(u8) = .empty;
         defer query.deinit(self.allocator);
-        try query.print(self.allocator, "&date={s}&begintime={d}&endtime={d}", .{ req.date, req.begin_time, req.end_time });
+        try query.print(self.allocator, "&date={s}&begintime={d}&endtime={d}", .{ date, req.begin_time, req.end_time });
         if (req.start > 0) try query.print(self.allocator, "&start={d}", .{req.start});
         if (req.limit > 0) try query.print(self.allocator, "&limit={d}", .{req.limit});
-        if (req.trace_id.len > 0) try query.print(self.allocator, "&traceId={s}", .{req.trace_id});
-        if (req.url.len > 0) try query.print(self.allocator, "&url={s}", .{req.url});
-        if (req.id.len > 0) try query.print(self.allocator, "&id={s}", .{req.id});
-        if (req.filter_msg.len > 0) try query.print(self.allocator, "&filterMsg={s}", .{req.filter_msg});
+        if (req.trace_id.len > 0) try query.print(self.allocator, "&traceId={s}", .{trace_id});
+        if (req.url.len > 0) try query.print(self.allocator, "&url={s}", .{url});
+        if (req.id.len > 0) try query.print(self.allocator, "&id={s}", .{id});
+        if (req.filter_msg.len > 0) try query.print(self.allocator, "&filterMsg={s}", .{filter_msg});
         if (req.level > 0) try query.print(self.allocator, "&level={d}", .{req.level});
 
         return self.getParsedQuery("wxaapi/userlog/userlog_search", query.items, RealTimeLogSearchResponse);
@@ -291,7 +306,7 @@ pub const Operation = struct {
     /// 获取用户反馈列表。
     pub fn getFeedbackList(self: *Self, req: GetFeedbackListRequest) !std.json.Parsed(GetFeedbackListResponse) {
         // 只拼 access_token 之后的查询串，token 由 `util_retry.callApi` 注入。
-        var query: std.ArrayListUnmanaged(u8) = .empty;
+        var query: std.ArrayList(u8) = .empty;
         defer query.deinit(self.allocator);
         try query.print(self.allocator, "&page={d}&num={d}", .{ req.page, req.num });
         if (req.type > 0) try query.print(self.allocator, "&type={d}", .{req.type});
@@ -325,8 +340,7 @@ pub const Operation = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/{s}?access_token={s}",
                     .{ c.endpoint, token },
                 );
@@ -358,8 +372,7 @@ pub const Operation = struct {
             query: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/{s}?access_token={s}{s}",
                     .{ c.endpoint, token, c.query },
                 );
@@ -577,6 +590,33 @@ test "getSceneList GET 访问来源并解析（回归：getParsed 泛型 T 参�
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxaapi/log/get_scene?access_token=token-abc", tt.uri);
     try std.testing.expectEqual(@as(usize, 1), parsed.value.scene.len);
     try std.testing.expectEqualStrings("扫码", parsed.value.scene[0].name);
+}
+
+test "realTimeLogSearch 字符串检索条件进 query 前转义（正常输入逐字节不变）" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    // 正常输入（日期 / 十六进制 traceId / 页面路径）转义后是恒等变换。
+    try mt.addRoute(
+        "https://api.weixin.qq.com/wxaapi/userlog/userlog_search?access_token=token-abc&date=2024-09-01&begintime=1&endtime=2&traceId=ab12&url=pages%2Fa%2Findex%3Fid%3D1&id=evt%2B1&filterMsg=a%26b",
+        .{ .body = "{\"data\":{\"list\":[],\"total\":0}}" },
+    );
+
+    var ctx = makeCtx();
+    var o = Operation.init(&ctx, allocator);
+    o.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    var parsed = try o.realTimeLogSearch(.{
+        .date = "2024-09-01",
+        .begin_time = 1,
+        .end_time = 2,
+        .trace_id = "ab12",
+        .url = "pages/a/index?id=1",
+        .id = "evt+1",
+        .filter_msg = "a&b",
+    });
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
 }
 
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────

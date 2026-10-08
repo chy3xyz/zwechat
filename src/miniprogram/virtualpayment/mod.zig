@@ -760,14 +760,12 @@ pub const VirtualPayment = struct {
         if (with_signature) {
             const sig = try self.signature(content);
             defer self.allocator.free(sig);
-            return std.fmt.allocPrint(
-                allocator,
+            return allocator.print(
                 "https://api.weixin.qq.com{s}?access_token={s}&pay_sig={s}&signature={s}",
                 .{ path, access_token, pay_sig, sig },
             );
         }
-        return std.fmt.allocPrint(
-            allocator,
+        return allocator.print(
             "https://api.weixin.qq.com{s}?access_token={s}&pay_sig={s}",
             .{ path, access_token, pay_sig },
         );
@@ -988,12 +986,12 @@ test "jsonStringify env=.sandbox 输出数字 1 且 production 省略 env 字段
 
     const sandbox_body = try jsonStringify(allocator, QueryBizBalanceRequest{ .env = .sandbox });
     defer allocator.free(sandbox_body);
-    try std.testing.expect(std.mem.indexOf(u8, sandbox_body, "\"env\":1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, sandbox_body, "\"sandbox\"") == null);
+    try std.testing.expect(std.mem.find(u8, sandbox_body, "\"env\":1") != null);
+    try std.testing.expect(std.mem.find(u8, sandbox_body, "\"sandbox\"") == null);
 
     const prod_body = try jsonStringify(allocator, QueryBizBalanceRequest{ .env = .production });
     defer allocator.free(prod_body);
-    try std.testing.expect(std.mem.indexOf(u8, prod_body, "\"env\"") == null);
+    try std.testing.expect(std.mem.find(u8, prod_body, "\"env\"") == null);
 }
 
 test "queryOrder env=.sandbox 请求体 env 为数字且 pay_sig 与发送体一致" {
@@ -1017,8 +1015,8 @@ test "queryOrder env=.sandbox 请求体 env 为数字且 pay_sig 与发送体一
     defer parsed.deinit();
 
     // 微信 xpay 契约要求 env 为数字（1 沙箱），不得序列化为 "sandbox" 字符串。
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "\"env\":1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "\"env\":\"sandbox\"") == null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "\"env\":1") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "\"env\":\"sandbox\"") == null);
 
     // pay_sig = HMAC-SHA256(app_key, path + "&" + body)，签名体与发送体是同一份序列化结果。
     var data = std.ArrayList(u8).empty;
@@ -1027,7 +1025,7 @@ test "queryOrder env=.sandbox 请求体 env 为数字且 pay_sig 与发送体一
     try data.appendSlice(alloc, "&");
     try data.appendSlice(alloc, cap.payload);
     const expected = try hmacSha256Hex(alloc, "appkey-123", data.items);
-    try std.testing.expect(std.mem.indexOf(u8, cap.uri, expected) != null);
+    try std.testing.expect(std.mem.find(u8, cap.uri, expected) != null);
 }
 
 test "queryUserBalance 用户态签名与支付签名共用同一份序列化结果" {
@@ -1051,11 +1049,11 @@ test "queryUserBalance 用户态签名与支付签名共用同一份序列化结
     var parsed = try v.queryUserBalance(.{ .openid = "ou-1", .env = .sandbox, .user_ip = "1.2.3.4" });
     defer parsed.deinit();
 
-    try std.testing.expect(std.mem.indexOf(u8, cap.payload, "\"env\":1") != null);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "\"env\":1") != null);
 
     // signature = HMAC-SHA256(session_key, body)。
     const expected_sig = try hmacSha256Hex(alloc, "sk-1", cap.payload);
-    try std.testing.expect(std.mem.indexOf(u8, cap.uri, expected_sig) != null);
+    try std.testing.expect(std.mem.find(u8, cap.uri, expected_sig) != null);
 
     // pay_sig = HMAC-SHA256(app_key, path + "&" + body)。
     var data = std.ArrayList(u8).empty;
@@ -1064,7 +1062,7 @@ test "queryUserBalance 用户态签名与支付签名共用同一份序列化结
     try data.appendSlice(alloc, "&");
     try data.appendSlice(alloc, cap.payload);
     const expected_pay = try hmacSha256Hex(alloc, "appkey-123", data.items);
-    try std.testing.expect(std.mem.indexOf(u8, cap.uri, expected_pay) != null);
+    try std.testing.expect(std.mem.find(u8, cap.uri, expected_pay) != null);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1139,8 +1137,8 @@ test "queryOrder token 失效自愈：40001 → 作废缓存 → 换新 token �
     try sig_input.appendSlice(alloc, "&");
     try sig_input.appendSlice(alloc, cap.payloadAt(1));
     const expected_pay_sig = try hmacSha256Hex(alloc, "appkey-123", sig_input.items);
-    try std.testing.expect(std.mem.indexOf(u8, cap.uriAt(0), expected_pay_sig) != null);
-    try std.testing.expect(std.mem.indexOf(u8, cap.uriAt(1), expected_pay_sig) != null);
+    try std.testing.expect(std.mem.find(u8, cap.uriAt(0), expected_pay_sig) != null);
+    try std.testing.expect(std.mem.find(u8, cap.uriAt(1), expected_pay_sig) != null);
 }
 
 test "queryUserBalance 非 token 错误（45009）不重试也不作废" {
@@ -1201,8 +1199,7 @@ test "requestAddress 逐字回归：callUser / callPay 两种 URI 拼装与改�
     try user_sig_input.appendSlice(alloc, cap.payloadAt(0));
     const user_pay_sig = try hmacSha256Hex(alloc, "appkey-123", user_sig_input.items);
     const user_signature = try hmacSha256Hex(alloc, "sk-1", cap.payloadAt(0));
-    const expected_user_uri = try std.fmt.allocPrint(
-        alloc,
+    const expected_user_uri = try alloc.print(
         "https://api.weixin.qq.com/xpay/query_user_balance?access_token=stub-ak&pay_sig={s}&signature={s}",
         .{ user_pay_sig, user_signature },
     );
@@ -1218,8 +1215,7 @@ test "requestAddress 逐字回归：callUser / callPay 两种 URI 拼装与改�
     try pay_sig_input.appendSlice(alloc, "&");
     try pay_sig_input.appendSlice(alloc, cap.payloadAt(1));
     const pay_pay_sig = try hmacSha256Hex(alloc, "appkey-123", pay_sig_input.items);
-    const expected_pay_uri = try std.fmt.allocPrint(
-        alloc,
+    const expected_pay_uri = try alloc.print(
         "https://api.weixin.qq.com/xpay/query_order?access_token=stub-ak&pay_sig={s}",
         .{pay_pay_sig},
     );
@@ -1229,8 +1225,8 @@ test "requestAddress 逐字回归：callUser / callPay 两种 URI 拼装与改�
 /// 从 `...?access_token=X&pay_sig=...` 中取出 access_token 的值。
 fn tokenOf(uri: []const u8) []const u8 {
     const key = "access_token=";
-    const start = (std.mem.indexOf(u8, uri, key) orelse return "") + key.len;
+    const start = (std.mem.find(u8, uri, key) orelse return "") + key.len;
     const rest = uri[start..];
-    const end = std.mem.indexOfScalar(u8, rest, '&') orelse rest.len;
+    const end = std.mem.findScalar(u8, rest, '&') orelse rest.len;
     return rest[0..end];
 }

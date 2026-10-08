@@ -60,8 +60,7 @@ pub const Content = struct {
             body: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/msg_sec_check?access_token={s}",
                     .{token},
                 );
@@ -85,8 +84,7 @@ pub const Content = struct {
             media: []const u8,
 
             pub fn send(c: @This(), allocator: std.mem.Allocator, token: []const u8) anyerror![]u8 {
-                const uri = try std.fmt.allocPrint(
-                    allocator,
+                const uri = try allocator.print(
                     "https://api.weixin.qq.com/wxa/img_sec_check?access_token={s}",
                     .{token},
                 );
