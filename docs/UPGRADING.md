@@ -41,6 +41,50 @@ Zig 是编译期检查语言，**签名变更全部会变成编译错误**，编
 
 ## 1. 版本升级速查
 
+### 1.0.4 v0.7.0 → v0.8.0（**破坏性**）：`miniprogram/order` 契约与类型修正
+
+只影响小程序**发货信息管理**（`miniprogram/order`）的使用方。
+
+#### ① 需要改的行：3 个字段的类型变了
+
+| 旧 | 新 | 说明 |
+|---|---|---|
+| `GetShippingOrderListRequest.pay_time_range: TimeRange` | `?TimeRange` | `null` = 整个键省略（不按支付时间过滤） |
+| `TimeRange.begin_time: i64` | `?i64` | `null` = 不填（官方语义：从 0 开始） |
+| `TimeRange.end_time: i64` | `?i64` | `null` = 不填（官方语义：32 位无符号整型最大值） |
+
+```zig
+// ❌ 旧（且会把查询区间锁死成 [0, 0]，只想按 openid 查时拿到空列表）
+var req = order.GetShippingOrderListRequest{
+    .pay_time_range = .{}, .page_size = 0,
+};
+```
+```zig
+// ✅ 新：不按时间过滤就整个不给
+var req = order.GetShippingOrderListRequest{ .openid = "o-1" };
+
+// ✅ 新：要过滤就给区间（end_time 可省）
+var req2 = order.GetShippingOrderListRequest{
+    .pay_time_range = .{ .begin_time = 1727000000 },
+    .page_size = 50,
+};
+```
+
+#### ② 行为变化（**不改也能编译过，但会开始报错**）
+
+- `uploadShippingInfo` 现在做**必填校验**：`upload_time` 为空、或 `payer` 为 `null`、或
+  `payer.openid` 为空 → 返回 `error.InvalidArgument`。官方把这两个字段标为必填，此前会静默发出
+  缺字段的请求体（微信侧回 `10060014` / `268485216` / `268485195`）。**请补上**
+  `upload_time`（RFC 3339，如 `2022-12-15T13:29:35.120+08:00`）与 `payer.openid`。
+- `getShippingOrderList` 的 `page_size = 0` 现在表示「未设置」→ 省略该键，由服务端用官方默认值
+  **100**（此前恒发 `page_size: 0`）。想要 0 条以外的行为请显式传值。
+
+#### ③ 纯新增（无需改动）
+
+- `State` 增加 `settled = 6`（资金待结算），并改为**非穷举**枚举 —— 该值此前会让
+  `get_order` / `get_order_list` 直接 `DecodeError`；非穷举后上游再新增状态值也不会让解析失败。
+- `ShippingItem` 增加 `goods_desc` 与 `contact`（原先静默丢弃）。
+
 ### 1.0 v0.6.0 → v0.7.0（**破坏性**）：`virtualpayment` 投诉 / 上传 / 签名三组接口契约修正
 
 这一版只影响 **`virtualpayment`（小程序虚拟支付）** 的使用方。两组接口此前
