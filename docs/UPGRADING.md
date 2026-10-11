@@ -41,6 +41,49 @@ Zig 是编译期检查语言，**签名变更全部会变成编译错误**，编
 
 ## 1. 版本升级速查
 
+### 1.0.5 v0.8.0 → v0.9.0（**纯新增，默认行为不变**）
+
+这一版**没有删除或改名任何公开符号，也没有改变任何默认行为** —— 升级通常**一行都不用改**。
+唯一会让人「编译不过」的地方是**错误集多了一个成员**（见下）。
+
+#### ① 会对 `WechatError` 做穷尽 `switch` 的下游需要补一个分支
+
+```zig
+// WechatError 新增了 TransportMisconfigured（原先这种配置错误是直接 @panic 进程）
+switch (err) {
+    error.ApiError => ...,
+    // ... 其余分支
+    error.TransportMisconfigured => ...,   // ← 新增，必须补上（否则编译失败）
+    // 或直接加 else => ...
+}
+```
+触发条件是「只设了 `HttpClient.transport`（或 `header_transport`）而没设 `transport_ctx`」——
+以前只要有请求就会 abort 整个进程，现在返回这个错误（`setTransport(t, ctx)` 请成对传入）。
+
+#### ② 纯新增能力（想用就用，不用则零影响）
+
+| 新增 | 用途 | 默认行为 |
+|---|---|---|
+| `Cache.getOwned(allocator, key)` + `Cache.VTable.getOwned`（**可选槽位，默认 `null`**） | 拿到**调用方拥有所有权**的缓存副本，拷贝在实现自己的临界区内完成；跨对象共享同一 `Cache` 也安全 | 自定义 `Cache` 实现**无需改动**即可编译（省略该字段即可），`getOwned` 会退化为 `get`+`dupe` |
+| `cache/memcache.Options.max_connections` / `pool_timeout_ms` / `PoolStats` / `poolStats()` | memcache 可选连接池（形状同 redis） | `max_connections = 1`（= 历史单连接实现，池统计恒零） |
+| `pay.PaidNotifyResult` + `pay.verifyPaidNotifyDetail(...)` | v2 支付回调能拿到 `return_code` / `return_msg` / `result_code` / `err_code` / `err_code_des`（此前全被丢掉，**无法区分"验签失败"与"微信说 result_code=FAIL"**） | `verifyPaidNotify` 的签名与语义**逐字不变** |
+| `work/kf.Kf.keep_origin_data` + `setKeepOriginData()` | 关掉"每条消息物化一份 `std.json.Value` 树"，解析开销与内存从约 2× 回到 1× | `true`（= 历史行为） |
+| `officialaccount/freepublish.FreePublish.deleteWithIndex(article_id, index)` | 删除指定篇（官方 `index` 参数，此前完全没发） | 原 `delete` 的签名与请求体**逐字不变** |
+| `util.crypto.timingSafeEqlSlices` | 恒定时间比较签名/摘要（7 处内部调用点已改；只是把它公开出来） | — |
+| `cache/net.findFreePort`（公开出来，测试用） | 让内核原子分配空闲端口 | — |
+
+#### ③ 顺带修掉的**契约**问题（不改也能编译过，但行为更正确了）
+
+- `draft` / `freepublish` 的 `batchget` 请求里 `no_content` 现在发 **`0`/`1`（number）**而非 JSON 布尔——
+  官方文档是 `number`（Go 参考实现同样发 bool，是错的）。
+- `work/invoice` 的 `UserInfo` 增加 `order_id`（官方响应示例有，此前因宽松解析被静默丢弃）。
+
+#### ④ 内部质量（对使用方无感）
+
+- 公开错误集快照门禁（新增 `src/test/error_set_snapshot.zig`，覆盖全部 19 个公开错误集）；
+  fuzz 目标 5 → 8；修掉"笔记本睡过觉的机器上测试稳定变红"的跨时钟源缺陷；
+  测试端口分配的 probe-then-bind 竞争（并发跑测试会假红）。
+
 ### 1.0.4 v0.7.0 → v0.8.0（**破坏性**）：`miniprogram/order` 契约与类型修正
 
 只影响小程序**发货信息管理**（`miniprogram/order`）的使用方。
