@@ -163,7 +163,12 @@ pub const Draft = struct {
     /// 获取草稿列表。
     ///
     /// `count_n` 为返回数量，`no_content` 为 true 时不返回图文消息正文内容。
-    /// 微信侧字段为布尔值，这里直接透传为 JSON 布尔（与 Go 参考 `no_content` 一致）。
+    ///
+    /// 官方契约（`draft_batchget`）里 `no_content` 是 **number** 而不是布尔：
+    /// `1` = 不返回 content 字段，`0` = 正常返回，默认 `0`。对外保留 `bool`
+    /// （调用方语义更直白，既有调用点不受影响），序列化时转成 `0`/`1`
+    /// ——与 virtualpayment `env` 的做法一致：边界用 ergonomic 类型，wire 形态在
+    /// 序列化处对齐官方文档（Go 参考此处发 `true`/`false`，是错的）。
     ///
     /// 返回微信原始响应字节，由本结构体的 allocator 分配，**调用方负责 `free`**。
     pub fn list(self: *Self, offset: i64, count_n: i64, no_content: bool) ![]u8 {
@@ -180,8 +185,8 @@ pub const Draft = struct {
                 defer a.free(uri);
 
                 const body = try a.print(
-                    "{{\"offset\":{d},\"count\":{d},\"no_content\":{}}}",
-                    .{ c.offset, c.count_n, c.no_content },
+                    "{{\"offset\":{d},\"count\":{d},\"no_content\":{d}}}",
+                    .{ c.offset, c.count_n, @intFromBool(c.no_content) },
                 );
                 defer a.free(body);
 
@@ -322,7 +327,7 @@ test "Draft.init 持有 ctx" {
     try std.testing.expectEqualStrings("wx-draft", d.ctx.config.app_id);
 }
 
-test "Draft.list 走 batchget 端点且 no_content 序列化为布尔" {
+test "Draft.list 走 batchget 端点且 no_content=true 序列化为数字 1" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -340,11 +345,11 @@ test "Draft.list 走 batchget 端点且 no_content 序列化为布尔" {
         "https://api.weixin.qq.com/cgi-bin/draft/batchget?access_token=stub-ak",
         cap.uri,
     );
-    try std.testing.expectEqualStrings("{\"offset\":0,\"count\":10,\"no_content\":true}", cap.payload);
+    try std.testing.expectEqualStrings("{\"offset\":0,\"count\":10,\"no_content\":1}", cap.payload);
     try std.testing.expect(std.mem.find(u8, resp, "\"total_count\":1") != null);
 }
 
-test "Draft.list no_content=false 序列化为 false" {
+test "Draft.list no_content=false 序列化为数字 0（不发 JSON 布尔）" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -358,7 +363,7 @@ test "Draft.list no_content=false 序列化为 false" {
     var d = Draft.init(&ctx, alloc);
 
     _ = try d.list(20, 5, false);
-    try std.testing.expectEqualStrings("{\"offset\":20,\"count\":5,\"no_content\":false}", cap.payload);
+    try std.testing.expectEqualStrings("{\"offset\":20,\"count\":5,\"no_content\":0}", cap.payload);
 }
 
 test "Draft.count 解析 total_count" {

@@ -118,6 +118,8 @@ pub const Transfer = struct {
             try client.postXMLWithTLS(url, xml_body, self.cfg.root_ca, self.cfg.mch_id)
         else
             try client.postXML(url, xml_body);
+        // 解析失败时 `body` 的所有权尚未转移给返回值，必须在此释放。
+        errdefer allocator.free(body);
 
         var doc = try util_xml.parse(allocator, body);
         defer doc.deinit();
@@ -339,4 +341,22 @@ test "toWallet 的 nonce_str 取自注入的 io（确定性随机源 → 可复�
     try std.testing.expectEqual(@as(usize, 32), n1.len);
     // 注入的确定性 `io.random` 保证可复现；若改走全局单例（真实熵源）两次结果不会相同。
     try std.testing.expectEqualStrings(n1, n2);
+}
+
+test "toWallet 畸形 XML 响应返回 MalformedXml（错误路径不泄漏响应缓冲）" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://api.mch.weixin.qq.com/mmpaymkttransfers/promotion/transfers", .{ .body = "{" });
+
+    var t = Transfer.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "test_key" });
+    t.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    try std.testing.expectError(error.MalformedXml, t.toWallet(allocator, .{
+        .open_id = "ox",
+        .amount = 100,
+        .desc = "test",
+        .partner_trade_no = "tn-bad-xml",
+    }));
 }

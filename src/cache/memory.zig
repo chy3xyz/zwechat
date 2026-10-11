@@ -92,6 +92,7 @@ pub const Memory = struct {
         .isExist = isExistImpl,
         .delete = deleteImpl,
         .deinit = deinitImpl,
+        .getOwned = getOwnedImpl,
     };
 
     fn getImpl(ctx: *anyopaque, key: []const u8) CacheError!?[]const u8 {
@@ -99,18 +100,18 @@ pub const Memory = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        const gop = self.data.getEntry(key) orelse return null;
+        return self.lookupLocked(key);
+    }
 
-        if (isExpired(gop.value_ptr.expire_at_ns)) {
-            // 先用 fetchRemove 安全地拆下条目，再释放键值内存；
-            // 这样可以避免 `free` 后再让 HashMap 比较已释放字节导致的 UB。
-            if (self.data.fetchRemove(key)) |kv| {
-                self.allocator.free(kv.key);
-                self.allocator.free(kv.value.value);
-            }
-            return null;
-        }
-        return gop.value_ptr.value;
+    /// `getOwned` 的实现：**拷贝在 `mutex` 临界区内完成**，因此返回的切片不受
+    /// 后续任何 `set` / `delete`（无论来自哪个线程或哪个共享本实例的调用方）影响。
+    fn getOwnedImpl(ctx: *anyopaque, allocator: std.mem.Allocator, key: []const u8) CacheError!?[]u8 {
+        const self: *Memory = @ptrCast(@alignCast(ctx));
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+
+        const val = self.lookupLocked(key) orelse return null;
+        return allocator.dupe(u8, val) catch return error.OutOfMemory;
     }
 
     fn setImpl(ctx: *anyopaque, key: []const u8, val: []const u8, ttl_seconds: i64) CacheError!void {
@@ -149,16 +150,7 @@ pub const Memory = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
-        const gop = self.data.getEntry(key) orelse return false;
-        if (isExpired(gop.value_ptr.expire_at_ns)) {
-            // 与 `getImpl` 同样的懒删路径：先 fetchRemove 再释放内存。
-            if (self.data.fetchRemove(key)) |kv| {
-                self.allocator.free(kv.key);
-                self.allocator.free(kv.value.value);
-            }
-            return false;
-        }
-        return true;
+        return self.lookupLocked(key) != null;
     }
 
     fn deleteImpl(ctx: *anyopaque, key: []const u8) CacheError!void {
@@ -178,6 +170,24 @@ pub const Memory = struct {
     }
 
     // ---------------- 内部辅助 ----------------
+
+    /// 在**已持 `mutex`** 的前提下查表：命中且未过期返回借用切片，否则返回 `null`。
+    ///
+    /// 过期条目当场惰性删除 —— 先用 `fetchRemove` 安全地拆下条目，再释放键值内存；
+    /// 这样可以避免 `free` 后再让 HashMap 比较已释放字节导致的 UB。
+    ///
+    /// 调用方若是 `getOwned`，必须在**返回之前、仍在临界区内**完成拷贝。
+    fn lookupLocked(self: *Memory, key: []const u8) ?[]const u8 {
+        const gop = self.data.getEntry(key) orelse return null;
+        if (isExpired(gop.value_ptr.expire_at_ns)) {
+            if (self.data.fetchRemove(key)) |kv| {
+                self.allocator.free(kv.key);
+                self.allocator.free(kv.value.value);
+            }
+            return null;
+        }
+        return gop.value_ptr.value;
+    }
 
     fn isExpired(expire_at_ns: i64) bool {
         if (expire_at_ns == 0) return false;
@@ -289,6 +299,118 @@ test "memory delete 与 deinit 不泄漏" { // 使用 DebugAllocator 风格的 t
     allocator.destroy(mem);
 }
 
+test "memory getOwned：副本在临界区内拷贝，后续 set/delete 不影响其内容" {
+    // 回归（OPEN_ITEMS 第 15 条）：凭据侧原先在「持有自己的锁」的前提下 `cache.get`
+    // 再 `dupe`，而 Cache 的借用切片有效期只到该 Cache 实例的下一次写操作 ——
+    // 另一个凭据对象 / 宿主模块共享同一个 Cache 并在窗口内写同一 key 时，dupe 就是
+    // 读已释放内存。本用例把「getOwned 返回的是真副本」钉死：
+    // 拿到副本后对同一 key 覆盖写 + 删除，副本内容必须完好。
+    const allocator = std.testing.allocator;
+    const mem = try Memory.create(allocator);
+    defer {
+        mem.deinit();
+        allocator.destroy(mem);
+    }
+    const c = mem.asCache();
+
+    try c.set("tok", "original_token_value", 60);
+
+    const copy = (try c.getOwned(allocator, "tok")) orelse return error.TestUnexpectedResult;
+    defer allocator.free(copy);
+    try std.testing.expectEqualStrings("original_token_value", copy);
+
+    // 取证：副本不是缓存内部那块内存（返回借用切片的旧写法在这里就能被抓到 ——
+    // 下面的 set / delete 会 free 掉原缓冲区，副本随即悬垂）。
+    const borrowed = (try c.get("tok")).?;
+    try std.testing.expect(copy.ptr != borrowed.ptr);
+
+    // 覆盖写：旧条目的键值内存被 free，副本必须完好（旧实现读到这里已释放内存）。
+    try c.set("tok", "replaced_token_value_longer_than_the_original", 60);
+    try std.testing.expectEqualStrings("original_token_value", copy);
+
+    // 删除：同样不影响副本。
+    try c.delete("tok");
+    try std.testing.expectEqualStrings("original_token_value", copy);
+
+    // 未命中返回 null（不分配、不泄漏）。
+    try std.testing.expect((try c.getOwned(allocator, "tok")) == null);
+}
+
+test "memory getOwned：并发写同一 key 时读出的副本始终完整" {
+    // 真实缺陷（读已释放内存）只可能出现在并发窗口里。让写线程不停覆盖 / 删除同一
+    // key（每次都会 free 旧值），读线程持续 getOwned 并断言内容属于已知取值集合。
+    // 若 getOwned 退化成「先 get 拿借用、再在锁外 dupe」，这里会读出被 free 的字节。
+    const allocator = std.testing.allocator;
+    const mem = try Memory.create(allocator);
+    defer {
+        mem.deinit();
+        allocator.destroy(mem);
+    }
+
+    const values = [_][]const u8{
+        "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvv-0000",
+        "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvv-1111",
+        "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvv-2222",
+        "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvv-3333",
+    };
+
+    var stop = std.atomic.Value(bool).init(false);
+    var bad = std.atomic.Value(bool).init(false);
+
+    const Writer = struct {
+        fn run(m: *Memory, vals: []const []const u8, stop_flag: *std.atomic.Value(bool), seed: usize) void {
+            const c = m.asCache();
+            var n: usize = seed;
+            while (!stop_flag.load(.acquire)) {
+                const v = vals[n % vals.len];
+                c.set("hot", v, 60) catch {
+                    return;
+                };
+                if (n % 7 == 0) c.delete("hot") catch return;
+                n += 1;
+            }
+        }
+    };
+
+    const Reader = struct {
+        fn run(m: *Memory, vals: []const []const u8, stop_flag: *std.atomic.Value(bool), failed: *std.atomic.Value(bool)) void {
+            const c = m.asCache();
+            var rounds: usize = 0;
+            while (rounds < 2000) : (rounds += 1) {
+                const owned = c.getOwned(std.testing.allocator, "hot") catch {
+                    failed.store(true, .release);
+                    return;
+                };
+                if (owned) |v| {
+                    defer std.testing.allocator.free(v);
+                    var ok = false;
+                    for (vals) |expected| {
+                        if (std.mem.eql(u8, v, expected)) {
+                            ok = true;
+                            break;
+                        }
+                    }
+                    if (!ok) {
+                        failed.store(true, .release);
+                        return;
+                    }
+                }
+            }
+            stop_flag.store(true, .release);
+        }
+    };
+
+    const reader = try std.Thread.spawn(.{}, Reader.run, .{ mem, &values, &stop, &bad });
+    const w1 = try std.Thread.spawn(.{}, Writer.run, .{ mem, &values, &stop, 0 });
+    const w2 = try std.Thread.spawn(.{}, Writer.run, .{ mem, &values, &stop, 1 });
+    reader.join();
+    stop.store(true, .release);
+    w1.join();
+    w2.join();
+
+    try std.testing.expect(!bad.load(.acquire));
+}
+
 test "memory 超大 TTL 不触发整数溢出 panic" {
     // 回归：ttl_seconds 来自外部输入（如微信响应的 expires_in），极大值
     // （i64 max）在 Debug 模式下会让 `ttl_seconds * ns_per_s` 溢出 panic。
@@ -390,4 +512,14 @@ test "memory TTL 取时来源为 Clock.boot（计入休眠）" {
     // 若写入侧换了别的时钟源（例如 awake），两者在这台机器上会差出休眠时长。
     try std.testing.expect(@abs(expire_at_ns - expected) < std.time.ns_per_s);
     try std.testing.expect(@abs(expire_at_ns - (after + ttl_seconds * std.time.ns_per_s)) < std.time.ns_per_s);
+}
+
+// 守卫：`ttlClock()` 的取值被 `src/credential/default_access_token.zig` 的 TTL 钳制测试
+// **硬编码依赖**（那条测试用 `Clock.boot` 取时来对比 `expire_at_ns`）。
+//
+// 若这里换成别的时钟源（例如 `.awake`），那条断言会退化成"饱和减法 → 0 → 必过"的
+// **假绿**；反向若把测试侧改成 `.awake` 而这里保持 `.boot`，在"睡过觉"的机器上差值
+// 等于累计休眠时长（小时级）→ **假红**。所以在此显式钉住，让漂移变成一条明确的失败。
+test "cache.Memory 的 TTL 时钟源必须是 Clock.boot（被凭据 TTL 测试依赖）" {
+    try std.testing.expectEqual(std.Io.Clock.boot, Memory.ttlClock());
 }

@@ -763,6 +763,22 @@ test "TransferV3.transfer 错误应答返回 ApiError" {
     try std.testing.expectError(util_error.WechatError.ApiError, result);
 }
 
+test "TransferV3.transfer / queryTransfer 畸形 JSON 返回 DecodeError" {
+    const allocator = std.testing.allocator;
+    // 截断 JSON：`checkV3Error` 吞掉自己的解析失败，200 通过后由业务解析抛 DecodeError。
+    var stub = CaptureResp{ .response = "{" };
+    var t = newCaptureTransfer(&stub);
+
+    try std.testing.expectError(
+        util_error.WechatError.DecodeError,
+        t.transfer(allocator, baseParams()),
+    );
+    try std.testing.expectError(
+        util_error.WechatError.DecodeError,
+        t.queryTransfer(allocator, "plfk-bad"),
+    );
+}
+
 test "TransferV3.queryTransfer 路径与应答解析（对照官方文档示例）" {
     const allocator = std.testing.allocator;
     var stub = CaptureResp{

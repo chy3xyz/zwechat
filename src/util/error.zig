@@ -77,6 +77,13 @@ pub const WechatError = error{
     ConfigMissing,
     /// 参数非法。
     InvalidArgument,
+    /// 注入的自定义 transport 配置不完整（`transport` 已设置但 `transport_ctx` 为空）。
+    ///
+    /// `HttpClient.transport` / `transport_ctx` 是**公开字段**，调用方可能只设其一；
+    /// 历史上这种半配置会在任意一次请求时 `@panic` 直接 abort 进程，现改为返回本错误。
+    /// 请改用 `setTransport(t, ctx)` / `setHeaderTransport(t, ctx)` 成对传入，或把两者
+    /// 一起置 `null`。
+    TransportMisconfigured,
 };
 
 /// 微信接口返回的通用错误响应。

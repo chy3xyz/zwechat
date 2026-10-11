@@ -599,7 +599,7 @@ test "realTimeLogSearch 字符串检索条件进 query 前转义（正常输入�
     // 正常输入（日期 / 十六进制 traceId / 页面路径）转义后是恒等变换。
     try mt.addRoute(
         "https://api.weixin.qq.com/wxaapi/userlog/userlog_search?access_token=token-abc&date=2024-09-01&begintime=1&endtime=2&traceId=ab12&url=pages%2Fa%2Findex%3Fid%3D1&id=evt%2B1&filterMsg=a%26b",
-        .{ .body = "{\"data\":{\"list\":[],\"total\":0}}" },
+        .{ .body = "{\"data\":{\"list\":[{\"level\":3,\"libraryVersion\":\"2.1.0\",\"clientVersion\":\"8.0.5\",\"id\":\"evt-1\",\"timestamp\":1725000000,\"platform\":2,\"url\":\"pages/a/index\",\"traceid\":\"ab12\",\"filterMsg\":\"a&b\",\"msg\":[{\"time\":1725000000,\"level\":2,\"msg\":[\"line1\",\"line2\"]}]}],\"total\":1}}" },
     );
 
     var ctx = makeCtx();
@@ -617,6 +617,29 @@ test "realTimeLogSearch 字符串检索条件进 query 前转义（正常输入�
     });
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+
+    // 整体比较：一次覆盖 RealTimeLogSearchDataList 全部字段（含嵌套 msg 列表）。
+    try std.testing.expectEqualDeep(RealTimeLogSearchResponse{
+        .data = .{
+            .list = &.{.{
+                .level = 3,
+                .libraryVersion = "2.1.0",
+                .clientVersion = "8.0.5",
+                .id = "evt-1",
+                .timestamp = 1725000000,
+                .platform = 2,
+                .url = "pages/a/index",
+                .traceid = "ab12",
+                .filterMsg = "a&b",
+                .msg = &.{.{
+                    .time = 1725000000,
+                    .level = 2,
+                    .msg = &.{ "line1", "line2" },
+                }},
+            }},
+            .total = 1,
+        },
+    }, parsed.value);
 }
 
 test "getPerformance POST 性能数据并解析" {
@@ -662,7 +685,7 @@ test "getVersionList GET 客户端版本并解析" {
 
 test "getFeedbackList GET 用户反馈列表并解析" {
     const allocator = std.testing.allocator;
-    var tt = CapturingTransport{ .response = "{\"total_num\":1,\"list\":[{\"record_id\":5,\"content\":\"卡顿\",\"type\":2}]}" };
+    var tt = CapturingTransport{ .response = "{\"total_num\":1,\"list\":[{\"record_id\":5,\"create_time\":1725000000,\"content\":\"卡顿\",\"phone\":\"13800000000\",\"openid\":\"oA\",\"nickname\":\"小明\",\"head_url\":\"https://a/head.png\",\"type\":2,\"mediaIds\":[\"m1\",\"m2\"],\"systemInfo\":\"iOS 17\"}]}" };
     defer tt.deinit(allocator);
 
     var ctx = makeCtx();
@@ -674,14 +697,27 @@ test "getFeedbackList GET 用户反馈列表并解析" {
 
     try std.testing.expectEqual(std.http.Method.GET, tt.method);
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/wxaapi/feedback/list?access_token=token-abc&page=1&num=10&type=2", tt.uri);
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.total_num);
-    try std.testing.expectEqualStrings("卡顿", parsed.value.list[0].content);
-    try std.testing.expectEqual(@as(i64, 5), parsed.value.list[0].record_id);
+    // 整体比较：一次覆盖 GetFeedbackListResponse / Feedback 全部字段。
+    try std.testing.expectEqualDeep(GetFeedbackListResponse{
+        .total_num = 1,
+        .list = &.{.{
+            .record_id = 5,
+            .create_time = 1725000000,
+            .content = "卡顿",
+            .phone = "13800000000",
+            .openid = "oA",
+            .nickname = "小明",
+            .head_url = "https://a/head.png",
+            .type = 2,
+            .mediaIds = &.{ "m1", "m2" },
+            .systemInfo = "iOS 17",
+        }},
+    }, parsed.value);
 }
 
 test "getJsErrDetail POST js 错误详情并解析" {
     const allocator = std.testing.allocator;
-    var tt = CapturingTransport{ .response = "{\"totalCount\":1,\"openid\":\"oA\",\"data\":[{\"Count\":\"3\",\"errorMsg\":\"TypeError\",\"errorMsgMd5\":\"md5-1\",\"openId\":\"oA\"}]}" };
+    var tt = CapturingTransport{ .response = "{\"totalCount\":1,\"openid\":\"oA\",\"data\":[{\"Count\":\"3\",\"sdkVersion\":\"2.1.0\",\"ClientVersion\":\"8.0.5\",\"errorStackMd5\":\"stack-md5\",\"TimeStamp\":\"1725000000\",\"appVersion\":\"1.2.3\",\"errorMsgMd5\":\"md5-1\",\"errorMsg\":\"TypeError\",\"errorStack\":\"at a\",\"Ds\":\"100\",\"OsName\":\"iOS\",\"openId\":\"oA\",\"pluginversion\":\"1.0\",\"appId\":\"wx1\",\"DeviceModel\":\"iPhone15\",\"source\":\"app\",\"route\":\"pages/a\",\"Uin\":\"123\",\"nickname\":\"小明\"}]}" };
     defer tt.deinit(allocator);
 
     var ctx = makeCtx();
@@ -700,8 +736,32 @@ test "getJsErrDetail POST js 错误详情并解析" {
     try std.testing.expect(std.mem.find(u8, tt.payload, "\"startTime\":\"20240901\"") != null);
     try std.testing.expect(std.mem.find(u8, tt.payload, "\"errorMsgMd5\":\"md5-1\"") != null);
     try std.testing.expect(std.mem.find(u8, tt.payload, "\"limit\":10") != null);
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.totalCount);
-    try std.testing.expectEqualStrings("TypeError", parsed.value.data[0].errorMsg);
+    // 整体比较：一次覆盖 GetJsErrDetailResponse / JsErrDetailData 全部字段。
+    try std.testing.expectEqualDeep(GetJsErrDetailResponse{
+        .totalCount = 1,
+        .openid = "oA",
+        .data = &.{.{
+            .Count = "3",
+            .sdkVersion = "2.1.0",
+            .ClientVersion = "8.0.5",
+            .errorStackMd5 = "stack-md5",
+            .TimeStamp = "1725000000",
+            .appVersion = "1.2.3",
+            .errorMsgMd5 = "md5-1",
+            .errorMsg = "TypeError",
+            .errorStack = "at a",
+            .Ds = "100",
+            .OsName = "iOS",
+            .openId = "oA",
+            .pluginversion = "1.0",
+            .appId = "wx1",
+            .DeviceModel = "iPhone15",
+            .source = "app",
+            .route = "pages/a",
+            .Uin = "123",
+            .nickname = "小明",
+        }},
+    }, parsed.value);
 }
 
 test "getJsErrList POST js 错误列表并解析" {
@@ -817,4 +877,17 @@ test "realTimeLogSearch token 失效自愈后 URI 逐字保持原拼装顺序" {
         "https://api.weixin.qq.com/wxaapi/userlog/userlog_search?access_token=token-new&date=20240901&begintime=1&endtime=2&level=2",
         mt.history.items[1],
     );
+}
+
+test "getJsErrList 上游返回畸形 JSON → DecodeError" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{\"data\":[" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var o = Operation.init(&ctx, allocator);
+    o.setTransport(CapturingTransport.dispatch, &tt);
+
+    // `parseCommon` 在 `std.json.parseFromSlice` 失败时映射为 WechatError.DecodeError。
+    try std.testing.expectError(error.DecodeError, o.getJsErrList(.{ .limit = 10 }));
 }

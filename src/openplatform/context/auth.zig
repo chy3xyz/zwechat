@@ -178,7 +178,7 @@ fn postJSON(
 ) Error![]u8 {
     if (ctx.transport) |t| {
         const tctx = ctx.transport_ctx orelse
-            @panic("Context.transport 已设置但 transport_ctx 为空：请同时传入两者");
+            return util_error.WechatError.TransportMisconfigured;
         var client = util_http.HttpClient.init(allocator);
         defer client.deinit();
         client.setTransport(t, tctx);
@@ -503,6 +503,23 @@ fn testCtx(allocator: std.mem.Allocator, memory: *@import("../../cache/memory.zi
     defer allocator.free(ckey);
     try memory.asCache().set(ckey, "comp-tok", 7000);
     return .{ .config = .{ .app_id = "wx-op", .app_secret = "sec", .cache = memory.asCache() } };
+}
+
+test "只设 transport 不设 transport_ctx 时返回 TransportMisconfigured（不再 abort 进程）" {
+    const allocator = std.testing.allocator;
+
+    const memory = try @import("../../cache/memory.zig").Memory.create(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+
+    // testCtx 预置了 component token：确保失败只可能来自 transport 半配置。
+    var ctx = try testCtx(allocator, memory);
+    ctx.transport = RecordingTransport.dispatch;
+    ctx.transport_ctx = null;
+
+    try std.testing.expectError(error.TransportMisconfigured, getPreCode(&ctx, allocator));
 }
 
 test "getPreCode mock：POST 正确 URL/body 并解析 pre_auth_code" {

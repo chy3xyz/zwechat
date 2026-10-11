@@ -592,6 +592,20 @@ test "RefundV3.refund 错误应答返回 ApiError" {
     try std.testing.expectError(util_error.WechatError.ApiError, result);
 }
 
+test "RefundV3.refund / queryRefund 畸形 JSON 返回 DecodeError" {
+    const allocator = std.testing.allocator;
+    // 截断 JSON：`checkV3Error` 吞掉自己的解析失败，状态码 200 通过后由业务解析抛 DecodeError。
+    var stub = CaptureResp{ .response = "{" };
+    var r = newCaptureRefund(&stub);
+
+    try std.testing.expectError(util_error.WechatError.DecodeError, r.refund(allocator, .{
+        .out_trade_no = "O-bad",
+        .out_refund_no = "R-bad",
+        .amount = .{ .refund = 100, .total = 100 },
+    }));
+    try std.testing.expectError(util_error.WechatError.DecodeError, r.queryRefund(allocator, "R-bad"));
+}
+
 test "RefundV3.queryRefund 路径含 mchid 且应答解析" {
     const allocator = std.testing.allocator;
     var stub = CaptureResp{

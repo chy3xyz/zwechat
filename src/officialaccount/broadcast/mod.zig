@@ -820,7 +820,7 @@ test "Broadcast.getMassStatus 返回 msg_status" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var cap = TestCapture{ .allocator = alloc, .response = "{\"msg_id\":100,\"msg_status\":\"SEND_SUCCESS\"}" };
+    var cap = TestCapture{ .allocator = alloc, .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"msg_id\":100,\"msg_data_id\":200,\"msg_status\":\"SEND_SUCCESS\"}" };
     setupTestClient(alloc, &cap);
     defer releaseTestClient();
 
@@ -836,6 +836,24 @@ test "Broadcast.getMassStatus 返回 msg_status" {
         cap.uri,
     );
     try std.testing.expectEqualStrings("{\"msg_id\":\"100\"}", cap.payload);
+
+    // getMassStatus 只返回 msg_status —— 响应的其余字段（对照 Go `Result`）用整体解析逐字段断言。
+    // 不加 `ignore_unknown_fields`：JSON 里出现未声明字段即判失败，保证「字段全列上」。
+    const MassStatusResp = struct {
+        errcode: i64 = 0,
+        errmsg: []const u8 = "",
+        msg_id: i64 = 0,
+        msg_data_id: i64 = 0,
+        msg_status: []const u8 = "",
+    };
+    var parsed = try std.json.parseFromSlice(MassStatusResp, std.testing.allocator, cap.response, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualDeep(MassStatusResp{
+        .errmsg = "ok",
+        .msg_id = 100,
+        .msg_data_id = 200,
+        .msg_status = "SEND_SUCCESS",
+    }, parsed.value);
 
     cap.response = "{\"errcode\":45009,\"errmsg\":\"quota\"}";
     try std.testing.expectError(util_error.WechatError.ApiError, b.getMassStatus("100"));

@@ -2,7 +2,7 @@
 
 `zwechat` 是使用 Zig 语言重写/移植 [`silenceper/wechat`](https://github.com/silenceper/wechat) v2 这套 Go 微信开放接口 SDK，提供微信公众号、小程序、小游戏、微信支付、开放平台、企业微信、智能对话等能力。
 
-> ✅ **当前状态**：`zig 0.17.0`（正式版）。`zig build` / `zig build test` / `zig build run` 全部通过，**1331 个内联单元测试全部通过且零内存泄漏**。
+> ✅ **当前状态**：`zig 0.17.0`（正式版）。`zig build` / `zig build test` / `zig build run` 全部通过，**1408 个内联单元测试全部通过且零内存泄漏**。
 >
 > 目录包括：
 > - `_ref/wechat/` — 完整克隆的 Go 参考实现（`silenceper/wechat/v2`，Apache-2.0），作为移植依据（**只读**）。
@@ -39,7 +39,7 @@
 | 构建系统 | 原生 `zig build`（`build.zig` + `build.zig.zon`） |
 | 许可证 | Apache License 2.0（与上游参考保持一致，保留 `_ref/wechat/LICENSE`） |
 | 运行目标 | 静态库 + 可执行示例 |
-| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **1331 个测试（含 5 个 fuzz 测试），0 泄漏** |
+| 单元测试 | `zig build test`，测试以内联 `test "..."` 形式写在源文件中，共 **1408 个测试（含 8 个 fuzz 测试），0 泄漏** |
 
 外部依赖按需声明在 `build.zig.zon`，尽量减少三方依赖；优先使用 Zig 标准库。**当前为零三方依赖**：`build.zig.zon` 的 `.dependencies` 为空（原唯一依赖 `httpz`（`chy3xyz/zhttp`）已移除——它只为微信支付 v2 的 mTLS 服务，却把 OpenSSL + libc 链到所有构建目标）。mTLS 改为仓库内自建 + 构建选项 `-Dmtls`（默认 `false`）门控，详见「移植备注」。
 
@@ -109,7 +109,8 @@ src/
 ├── openplatform/          # 开放平台：account / context（含授权链路）/ miniprogram（代运营）/ officialaccount
 ├── work/                  # 企业微信：addresslist/appchat/checkin/externalcontact/invoice/jsapi/kf/material/message/msgaudit/oauth/robot/server/smartbot
 ├── aispeech/              # 智能对话（占位）
-└── test_runner.zig        # ✅ 编译门（强制 @import 每个模块），1331 个测试全部发现
+├── test/                  # 非内联的独立测试门禁（error_set_snapshot.zig：公开错误集成员快照）
+└── test_runner.zig        # ✅ 编译门（强制 @import 每个模块），1408 个测试全部发现
 ```
 
 ---
@@ -368,11 +369,12 @@ const oa = wc.getOfficialAccount(cfg);
 - **`getDefaultClient` 分配器契约**：启动期用 `initDefaultClient(allocator)` 进入严格模式（幂等；allocator 不一致 → `error.AllocatorMismatch`，其后 `getDefaultClient` 传错 allocator 会 `@panic`）；**懒初始化路径仍保持历史宽容语义**（首个 allocator 生效），可用 `defaultClientAllocatorMatches(allocator)` 自查。测试辅助一律走 `deinitDefaultClient()` 而非依赖宽容语义。
 - **Redis 连接池**：`cache/redis.zig` 的 `Options.max_connections`（默认 1 = 历史单连接语义）与 `pool_timeout_ms`（默认 30s）；池锁**只护空闲表**，网络 I/O 全在锁外；坏连接（协议/IO 错）丢弃不进池；等待有界，超时返回 `error.PoolTimeout`（vtable 边界映射为 `StorageError`）并可用 `redis.poolStats()` 观测（live/idle/in_use/peak_in_use/created/discarded/timeouts）。
 - **手写编码收敛**：`util/json.zig`（`appendEscapedString`：`"`、`\`、`\b`、`\f`、`\n`、`\r`、`\t`、其余 <0x20 → `\u00xx` 小写 hex）与 `util/uri.zig`（`queryEscape`：保留 Go 的 unreserved 集、空格→`+`）分别是全仓唯一实现——原先 11 份手写 JSON escaper 与 3 份手写 QueryEscape 已收敛。**多字段对象用 `util_json.stringFieldsObject`（`pub fn stringFieldsObject` / `pub const StringField`），单字段用 `stringFieldObject`，只要转义后的串用 `appendEscapedString` / `stringLiteral`；不要再手写 `allocPrint("{{...\"{s}\"...}}")`**（`"key":"{s}"` 形态现已在全仓请求体清零，详见 `docs/OPEN_ITEMS.md` 第 9 条）。注意 `std.Uri.Component.formatQuery` **不**转义 `&=?/:`，与 Go `url.QueryEscape` 不兼容，拼 query 一律用 `util_uri.queryEscape`。有意保留的 raw 注入点（`draft.add` 的 `articles_json`、`subscribe` 的 `data`、`message.sendSubscribeMessage` 的 `data`、`urlscheme.generate` 的 `jump_wxa`）是调用方自带 JSON 对象的契约，勿"顺手"转义（转了会把对象变成字符串、直接破坏契约）。
-- **API 面门禁与真实探针**：`tools/api_surface_check.sh`（快照生成器是 `tools/api_surface.zig`，基于 `std.zig.Ast`；`tools/api_surface.awk` 保留作交叉校验参考；快照 `api/surface.txt`，CI 已在 test job 中调用）——删除/改名公开符号必须在 CHANGELOG 最新段落或 [Unreleased] 里写明（`容器.旧名` 或 `容器.字段.子字段`，**只写裸叶名不认**），否则 CI 失败；`--update` 刷新快照。快照为每个 pub fn 额外生成一行 `sig`（参数类型 + 返回类型），因此**改参数/返回类型也会触发门禁**（这是 AST 版相对 awk 版补上的漏报面）。`zig build live-probe`（env `ZWECHAT_LIVE_PROBE=1` + 各域凭据，默认不联网、`-Dstrict` 才以 FAIL 退非零）用于发现"上游改了字段名"这类 mock 测不出的漂移。
+- **API 面门禁与真实探针**：`tools/api_surface_check.sh`（快照生成器是 `tools/api_surface.zig`，基于 `std.zig.Ast`；`tools/api_surface.awk` 保留作交叉校验参考；快照 `api/surface.txt`，CI 已在 test job 中调用）——**公开错误集成员另有一道门禁**：`src/test/error_set_snapshot.zig`（已接进 `src/test_runner.zig` 的编译门）把 `WechatError` / `CredentialError` / `pay/v3.NotifyError` / `rsa_impl.Error` 的成员名快照成常量数组，用 `@typeInfo(E).error_set` 逐项对账（集合语义、顺序无关）；**增删错误集成员会让下游对 error 做穷尽 `switch` 时编译失败**，所以必须同步更新快照，否则测试红（`api_surface_check.sh` 只看类型与签名、看不到这一面）。**新增公开错误集时请一并补进该文件的快照与测试。**删除/改名公开符号必须在 CHANGELOG 最新段落或 [Unreleased] 里写明（`容器.旧名` 或 `容器.字段.子字段`，**只写裸叶名不认**），否则 CI 失败；`--update` 刷新快照。快照为每个 pub fn 额外生成一行 `sig`（参数类型 + 返回类型），因此**改参数/返回类型也会触发门禁**（这是 AST 版相对 awk 版补上的漏报面）。`zig build live-probe`（env `ZWECHAT_LIVE_PROBE=1` + 各域凭据，默认不联网、`-Dstrict` 才以 FAIL 退非零）用于发现"上游改了字段名"这类 mock 测不出的漂移。
 - **文档**：`docs/UPGRADING.md`（面向下游的版本升级速查，含 before/after 与 submodule bump 步骤）、`docs/OPEN_ITEMS.md`（已知取舍与开放项：msgaudit 不做、ignore_unknown_fields 的沉默另一面、redis 吞吐上限、媒体限额、懒初始化宽容语义、OriginData 内存代价、pay v2 错误内联等）。
 - **并发原语：`std.Io.Mutex` 取代自旋锁（本仓不再有自旋锁）**：`std.Io.Mutex` 是 `extern struct`、可**静态初始化并直接内嵌为结构体字段**（`std/Io.zig` 的 `Mutex.init`），只有 `lock`/`unlock` 需要传 `io`；底层走 futex（Linux `futex(2)`、macOS `__ulock_wait2`、Windows `RtlOnAddress`），**长临界区里等待者睡眠而不是空转**。`util/sync.zig` 的 `SpinMutex` 保留为**兼容层**（零参数 `lock()`/`unlock()`/`tryLock()` 语义不变，内部 `lockUncancelable`），新代码一律直接用 `std.Io.Mutex` + 结构体 `io` 字段。约定：结构体持有一个可注入的 `io: std.Io`（默认 `std.Io.Threaded.global_single_threaded.io()`），临界区写法 `self.mutex.lockUncancelable(self.io); defer self.mutex.unlock(self.io);`。**已知的长临界区是刻意的**：memcache get 跨整个 RTT（单连接必须串行化）、credential 在锁内做缓存双检+回写、openplatform 在锁内串行化 authorizer 刷新（防 refresh_token 轮换被并发覆盖）。
 - **测试编译门升级为声明级**：`src/test_runner.zig` 的 `_ = mod;` 已全部换成 `std.testing.refAllDecls(mod)`（`std.testing.refAllDeclsRecursive` 在本工具链**已移除**，别用）。语义从"文件被解析"提升到"每个顶层声明都被语义分析"——首次启用就暴露并修掉了 `util/crypto.pkcs5Pad` 的错误集不一致。**注意**：`refAllDecls` 不实例化泛型，所以「泛型参数位错位」仍必须靠真实调用测试（仓库纪律：每个模块至少一个走 mock transport 的真实调用测试）。
-- **fuzz 测试（`zig build test --fuzz=<N>`）**：`util/{xml,asn1,pkcs12,json,uri}.zig` 各有 1 个 `std.testing.fuzz` 用例；普通 `zig build test` 下只做零输入冒烟（不拖慢 CI），fuzz 模式才真跑。**首次引入即发现 3 个真实缺陷**：① `util/uri.queryEscape` 容量按 1 倍预留却写最多 3 倍（Debug/ReleaseSafe panic、**ReleaseFast 堆溢出**）——已改 `3 *| len` 预留 + 自动扩容 `append`；② `util/xml.parse` 接受空标签名（`<>` 被当成合法文档）；③ `util/json.appendEscapedString` 对非法 UTF-8 产出非法 JSON（现按 Go 语义逐字节替换为 `\ufffd`）。新增解析器/转义器时**优先补一个 fuzz 用例**。
+- **fuzz 测试（`zig build test --fuzz=<N>`，其中 N 是**迭代预算**、不是秒数）**：现有 **8** 个目标 —— `util/{xml,asn1,pkcs12,json,uri,crypto,rsa_impl}.zig` 与 `pay/v3/notify.zig` 各 1 个（后者覆盖攻击者可控的 base64 + AES-GCM 回调密文）。普通 `zig build test` 下只做零输入冒烟 + **语料回归**（不拖慢 CI），fuzz 模式才真跑。**已由 fuzz 发现 3 个真实缺陷**：① `util/uri.queryEscape` 容量按 1 倍预留却写最多 3 倍（Debug/ReleaseSafe panic、**ReleaseFast 堆溢出**）——已改 `3 *| len` 预留 + 自动扩容 `append`；② `util/xml.parse` 接受空标签名（`<>` 被当成合法文档）；③ `util/json.appendEscapedString` 对非法 UTF-8 产出非法 JSON（现按 Go 语义逐字节替换为 `\ufffd`）。新增解析器/转义器/**任何解析网络输入的代码**时优先补一个 fuzz 用例；喂真实语料时**必须**配一条"布局哨兵测试"（Smith 长度权重没覆盖语料长度时种子会被静默复位成 0 字节，`pkcs12` 踩过）。
+- **时钟源纪律（会咬人的隐蔽坑）**：`Clock.awake`（macOS `CLOCK_UPTIME_RAW`/**排除**休眠）与 `Clock.boot`（macOS `CLOCK_MONOTONIC_RAW`/**计入**休眠）**不可混用于同一次比较**——两者差值就是累计休眠时间。`ttlClock` 这类"表达墙钟还剩多久"的判定必须用 `.boot`（`src/cache/memory.zig` 的 `ttlClock()` 是唯一入口，并有一条守卫测试钉住）；而**纯耗时测量**（`elapsed_ms`、退避）必须用 `.awake` 且**首尾同源**。**跨源比较**的后果是"笔记本合盖睡过觉的机器上稳定红、CI 永远绿"（本仓真的发生过一次）。
 - **`cache/net.zig`（网络工具共享）**：两个缓存后端原先各有一份等价的 `SocketReader`（支持 `recv_timeout_ms` 的读取器）与 `resolveHost`（IPv4/IPv6/域名），已收敛到 `src/cache/net.zig`（`SocketReader(comptime backend)` 用 comptime 参数决定日志 scope）。新增缓存后端时**不要**再各自复制这两块。
 - **日志分域**：cache 与 mtls 的告警用 `std.log.scoped(.zwechat_redis / .zwechat_memcache / .zwechat_mtls)`，宿主可用 `std_options.log_scope_levels` 单点静音——**新增告警时用对应 scope 的 `log`，不要直接 `std.log.warn`**。
 - **解析类测试优先用 `std.testing.expectEqualDeep` 做整体比较**：逐字段断言会漏掉"新增字段"（仓库里 15 个用例已改为整体比较，覆盖字段数最高从 24 提升到 373）。注意两点：① 期望值里的**可变切片**字段要用局部 `var` 数组 + `&arr`；② `expectEqualDeep` 对 float 是**精确**比较，只适合"同一字符串解析值 vs 字面量"，SDK 计算出的浮点（求和/平均）仍用 `expectApproxEqAbs`。

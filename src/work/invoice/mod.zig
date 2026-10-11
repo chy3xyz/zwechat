@@ -51,6 +51,11 @@ pub const UserInfo = struct {
     pdf_url: []const u8 = "",
     trip_pdf_url: []const u8 = "",
     reimburse_status: []const u8 = "",
+    /// 发票 order_id。官方批量查询响应示例中出现（`"order_id": "12345678"`，见
+    /// <https://developer.work.weixin.qq.com/document/path/90287>），类型为**字符串**。
+    /// 注意：企业微信文档的 `user_info` 参数表并未列出该字段（示例与参数表不一致），
+    /// 此前因 `ignore_unknown_fields` 被静默丢弃。
+    order_id: []const u8 = "",
     check_code: []const u8 = "",
     buyer_number: []const u8 = "",
     buyer_address_and_phone: []const u8 = "",
@@ -416,7 +421,7 @@ test "getInvoiceInfo token 失效自愈：40001 → 作废缓存 → 新 token �
         .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential\"}",
     });
     try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/card/invoice/reimburse/getinvoiceinfo?access_token=new-token", .{
-        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"card_id\":\"card_1\",\"openid\":\"o1\",\"type\":\"增值税电子普通发票\",\"user_info\":{\"fee\":100,\"title\":\"某某公司\"}}",
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"card_id\":\"card_1\",\"begin_time\":1469084420,\"end_time\":2100236420,\"openid\":\"o1\",\"type\":\"增值税电子普通发票\",\"payee\":\"深圳市XX有限公司\",\"detail\":\"可在公司企业微信内报销使用\",\"user_info\":{\"fee\":4000,\"title\":\"XX有限公司\",\"billing_time\":1478620800,\"billing_no\":\"00000001\",\"billing_code\":\"000000000001\",\"info\":[{\"name\":\"NAME\",\"num\":10,\"unit\":\"吨\",\"fee\":10,\"price\":4}],\"fee_without_tax\":2345,\"tax\":123,\"detail\":\"项目\",\"pdf_url\":\"pdf_url\",\"trip_pdf_url\":\"trip_pdf_url\",\"reimburse_status\":\"INVOICE_REIMBURSE_INIT\",\"order_id\":\"12345678\",\"check_code\":\"CHECKCODE\",\"buyer_number\":\"BUYERNUMBER\",\"buyer_address_and_phone\":\"buyer_addr\",\"buyer_bank_account\":\"buyer_bank\",\"seller_number\":\"SELLERNUMBER\",\"seller_address_and_phone\":\"seller_addr\",\"seller_bank_account\":\"seller_bank\",\"remarks\":\"remarks\",\"cashier\":\"cashier\",\"maker\":\"maker\"}}",
     });
 
     const client = util_http.getDefaultClient(allocator);
@@ -432,8 +437,51 @@ test "getInvoiceInfo token 失效自愈：40001 → 作废缓存 → 新 token �
     var parsed = try inv.getInvoiceInfo(.{ .card_id = "card_1", .encrypt_code = "enc1" });
     defer parsed.deinit();
 
-    try std.testing.expectEqualStrings("card_1", parsed.value.card_id);
-    try std.testing.expectEqual(@as(i64, 100), parsed.value.user_info.fee);
+    // user_info.info 是可变元素切片，期望值用局部 var 数组承载。
+    var want_infos = [_]Info{.{
+        .name = "NAME",
+        .num = 10,
+        .unit = "吨",
+        .fee = 10,
+        .price = 4,
+    }};
+    // 整体比较：一次覆盖 GetInvoiceInfoResponse 全部字段（响应里未下发的字段须保持默认值）。
+    try std.testing.expectEqualDeep(GetInvoiceInfoResponse{
+        .errmsg = "ok",
+        .card_id = "card_1",
+        .begin_time = 1469084420,
+        .end_time = 2100236420,
+        .openid = "o1",
+        .type = "增值税电子普通发票",
+        .payee = "深圳市XX有限公司",
+        .detail = "可在公司企业微信内报销使用",
+        .user_info = .{
+            .fee = 4000,
+            .title = "XX有限公司",
+            .billing_time = 1478620800,
+            .billing_no = "00000001",
+            .billing_code = "000000000001",
+            .info = &want_infos,
+            .fee_without_tax = 2345,
+            .tax = 123,
+            .detail = "项目",
+            .pdf_url = "pdf_url",
+            .trip_pdf_url = "trip_pdf_url",
+            .reimburse_status = "INVOICE_REIMBURSE_INIT",
+            .order_id = "12345678",
+            .check_code = "CHECKCODE",
+            .buyer_number = "BUYERNUMBER",
+            .buyer_address_and_phone = "buyer_addr",
+            .buyer_bank_account = "buyer_bank",
+            .seller_number = "SELLERNUMBER",
+            .seller_address_and_phone = "seller_addr",
+            .seller_bank_account = "seller_bank",
+            .remarks = "remarks",
+            .cashier = "cashier",
+            .maker = "maker",
+        },
+    }, parsed.value);
+
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
     try std.testing.expect(std.mem.find(u8, mt.history.items[0], "access_token=old-token") != null);
@@ -448,7 +496,7 @@ test "getInvoiceBatch token 失效自愈：41001 → 作废缓存 → 新 token 
         .body = "{\"errcode\":41001,\"errmsg\":\"access_token missing\"}",
     });
     try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/card/invoice/reimburse/getinvoiceinfobatch?access_token=new-token", .{
-        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"item_list\":[{\"card_id\":\"card_1\",\"openid\":\"o1\"}]}",
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"item_list\":[{\"card_id\":\"card_1\",\"begin_time\":1469084420,\"end_time\":2100236420,\"openid\":\"o1\",\"type\":\"增值税电子普通发票\",\"payee\":\"深圳市XX有限公司\",\"detail\":\"可在公司企业微信内报销使用\",\"user_info\":{\"fee\":4000,\"title\":\"XX有限公司\",\"order_id\":\"12345678\"}}]}",
     });
 
     const client = util_http.getDefaultClient(allocator);
@@ -465,9 +513,57 @@ test "getInvoiceBatch token 失效自愈：41001 → 作废缓存 → 新 token 
     var parsed = try inv.getInvoiceBatch(.{ .item_list = &items });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.item_list.len);
-    try std.testing.expectEqualStrings("card_1", parsed.value.item_list[0].card_id);
+    // item_list 是可变元素切片，期望值用局部 var 数组承载。
+    var want_items = [_]Item{.{
+        .card_id = "card_1",
+        .begin_time = 1469084420,
+        .end_time = 2100236420,
+        .openid = "o1",
+        .type = "增值税电子普通发票",
+        .payee = "深圳市XX有限公司",
+        .detail = "可在公司企业微信内报销使用",
+        .user_info = .{
+            .fee = 4000,
+            .title = "XX有限公司",
+            .order_id = "12345678",
+        },
+    }};
+    // 整体比较：一次覆盖 GetInvoiceBatchResponse 全部字段。
+    try std.testing.expectEqualDeep(GetInvoiceBatchResponse{
+        .errmsg = "ok",
+        .item_list = &want_items,
+    }, parsed.value);
+
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
     try std.testing.expect(std.mem.find(u8, mt.history.items[1], "access_token=new-token") != null);
+}
+
+test "getInvoiceInfo 上游返回畸形 JSON → DecodeError" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/card/invoice/reimburse/getinvoiceinfo?access_token=old-token", .{
+        .body = "{",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = HealState{};
+    var ctx = makeHealCtx(&state);
+    var inv = Invoice.init(&ctx, allocator);
+
+    // `callApi` 只在响应是合法 JSON 错误体时才判 errcode；非法 JSON 原样上抛，
+    // 由 `getInvoiceInfo` 的 `parseFromSlice` 兜底成 DecodeError（不作废 token、不重试）。
+    try std.testing.expectError(
+        error.DecodeError,
+        inv.getInvoiceInfo(.{ .card_id = "card_1", .encrypt_code = "enc1" }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
 }

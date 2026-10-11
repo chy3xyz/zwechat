@@ -125,6 +125,8 @@ pub const Redpacket = struct {
             try client.postXMLWithTLS(url, xml_body, self.cfg.root_ca, self.cfg.mch_id)
         else
             try client.postXML(url, xml_body);
+        // 解析失败时 `body` 的所有权尚未转移给返回值，必须在此释放。
+        errdefer allocator.free(body);
 
         var doc = try util_xml.parse(allocator, body);
         defer doc.deinit();

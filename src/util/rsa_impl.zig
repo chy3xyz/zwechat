@@ -767,3 +767,175 @@ test "decrypt 解出 RSAES-PKCS1-v1_5 已知密文，并拒绝错误长度" {
     var zeros: [128]u8 = @splat(0);
     try std.testing.expectError(error.InvalidCiphertext, decrypt(allocator, priv, &zeros));
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// fuzz（`zig build test --fuzz=<N>` 才真正变异；普通 `zig build test` 会先跑 corpus
+// 里的真实 PEM、再跑一次空输入冒烟 —— 见文件末尾的 `fuzz_corpus`）
+//
+// 选 `rsa_impl` 而不是 `util/rsa.zig` 的同名包装作为 fuzz 入口：这里的两条 PEM 解析
+// 直接吃 `[]const u8`（任意字节都能喂，`detectPemKind` 认不出就 `InvalidPemKey`），
+// 且错误集是完整的 `Error`（`InvalidDer` / `UnsupportedTag` / `EncodingFailed` …）；
+// `rsa.zig` 的包装会把除 `OutOfMemory` 外的一切折叠成 `InvalidPemKey`，既丢失
+// DER 层的失败信号，也让"失败必须落在声明集内"的断言变得没有意义。
+// `platform_cert.publicKeyPemFromCertificate` 最终也正是把公钥 PEM 交给
+// `rsa_impl.parsePublicKeyPem`，覆盖等价。
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// 变异权重的重心是 PEM 头尾与 base64 字母表；中间夹着 DER 结构字节
+/// （SEQUENCE / INTEGER / OCTET STRING / OID / BIT STRING），末条覆盖整个字节域，
+/// 保证 corpus 里的真实 PEM 被**原样**保留。把 DER 的"骨架字节"也放进输入域，
+/// 是因为 `detectPemKind` 命中后真正的解析全在 DER 走查上（长度字段、嵌套 SEQUENCE、
+/// BIT STRING 内再套一层 RSAPublicKey）。
+const fuzz_byte_weights = [_]std.testing.Smith.Weight{
+    .value(u8, '-', 6),
+    .value(u8, '\n', 4),
+    .value(u8, ' ', 2),
+    .rangeAtMost(u8, 'A', 'Z', 6),
+    .rangeAtMost(u8, 'a', 'z', 3),
+    .rangeAtMost(u8, '0', '9', 3),
+    .value(u8, '+', 3),
+    .value(u8, '/', 3),
+    .value(u8, '=', 3),
+    .value(u8, 0x30, 4), // SEQUENCE
+    .value(u8, 0x02, 4), // INTEGER
+    .value(u8, 0x04, 4), // OCTET STRING
+    .value(u8, 0x06, 3), // OBJECT IDENTIFIER
+    .value(u8, 0x03, 3), // BIT STRING
+    .value(u8, 0xa0, 2), // [0] constructed
+    .value(u8, 0x00, 3),
+    .value(u8, 0x7f, 2), // 长格式长度：num_bytes 过大
+    .value(u8, 0x80, 2), // 长格式长度：num_bytes = 0（非法）
+    .value(u8, 0x82, 3), // 长格式长度：num_bytes = 2
+    .rangeAtMost(u8, 0x00, 0xff, 2),
+};
+
+/// 输入长度上限。
+const fuzz_max_len: usize = 2048;
+
+/// 长度分布：绝大多数迭代落在短输入；`257..2048` 覆盖三份真实 PEM 语料
+/// （X.509 公钥 272B、PKCS#1 私钥 ~460B、PKCS#8 私钥 ~585B），只给 1 份权重。
+const fuzz_len_weights = [_]std.testing.Smith.Weight{
+    .rangeAtMost(u32, 0, 256, 100),
+    .rangeAtMost(u32, 257, fuzz_max_len, 1),
+};
+
+/// 性质：任意字节都必须
+/// 1. 不 panic / 不越界 / 不泄漏（这两条 PEM 解析是网络对端可直接喂的入口：
+///    平台证书提取出的公钥 PEM、配置里的商户私钥，都从这里进）；
+/// 2. 不含任何 PEM 头（`detectPemKind == null`）时必须报 `InvalidPemKey`
+///    ——这是两条入口的第一行守卫，也是"垃圾输入不得被当成密钥"的最低保证；
+/// 3. 否则要么成功、要么返回 `Error` 声明的错误变体（`fuzzExpectRsaError`）；
+/// 4. 成功时模数字节数不得超过输入长度——大整数是从 DER 的 INTEGER 逐字节累加
+///    出来的，任何"越界读"或"长度字段驱动的野分配"都会在这里暴露。
+///
+/// 刻意**不**对解析出的密钥跑 `signSha256` / `verifySha256`：畸形 DER 能造出
+/// 上万位的模数 / 指数，模幂会慢到让一次 fuzz 迭代跑不完（DoS 自身）。
+fn testRsaPemParseInvariants(allocator: std.mem.Allocator, smith: *std.testing.Smith) anyerror!void {
+    var buf: [fuzz_max_len]u8 = undefined;
+    const len = smith.sliceWeighted(&buf, &fuzz_len_weights, &fuzz_byte_weights);
+    const pem = buf[0..len];
+
+    if (detectPemKind(pem) == null) {
+        try std.testing.expectError(error.InvalidPemKey, parsePrivateKeyPem(allocator, pem));
+        try std.testing.expectError(error.InvalidPemKey, parsePublicKeyPem(allocator, pem));
+        return;
+    }
+
+    if (parsePrivateKeyPem(allocator, pem)) |priv| {
+        var key = priv;
+        defer key.deinit();
+        try std.testing.expect(byteLenOfModulus(key.n.toConst()) <= pem.len);
+    } else |err| {
+        try fuzzExpectRsaError(err);
+    }
+
+    if (parsePublicKeyPem(allocator, pem)) |pub_key| {
+        var key = pub_key;
+        defer key.deinit();
+        try std.testing.expect(byteLenOfModulus(key.n.toConst()) <= pem.len);
+    } else |err| {
+        try fuzzExpectRsaError(err);
+    }
+}
+
+/// `parse*KeyPem` 失败只允许落在 `Error` 声明的变体里。参数取 `anyerror` 而非
+/// `Error`，`else` 才是可达的——这样"未来把某个内部错误泄出声明集"会变成一次显式
+/// 失败，而不是被类型系统静默吞掉。
+fn fuzzExpectRsaError(err: anyerror) anyerror!void {
+    switch (err) {
+        error.InvalidPemKey,
+        error.UnsupportedKeyFormat,
+        error.InvalidDer,
+        error.UnsupportedTag,
+        error.OutOfMemory,
+        error.EncodingFailed,
+        error.InvalidSignature,
+        error.InvalidCiphertext,
+        => {},
+        else => return error.UnexpectedRsaParseError,
+    }
+}
+
+test "fuzz: parse*KeyPem 不 panic / 失败即声明错误 / 模数不超输入" {
+    try std.testing.fuzz(std.testing.allocator, testRsaPemParseInvariants, .{
+        .corpus = &fuzz_corpus,
+    });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// corpus（真实输入种子）
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// corpus 种子：三份真实 PEM（本文件的测试素材，PKCS#1 / PKCS#8 私钥 + X.509 公钥），
+/// 布局 = `Smith` 输入流要求的 `[u32 小端长度][PEM 字节]`。长度前缀不能省。
+const fuzz_corpus = [_][]const u8{
+    &fuzz_corpus_priv_pkcs1,
+    &fuzz_corpus_priv_pkcs8,
+    &fuzz_corpus_pub_x509,
+};
+
+/// 与 `fuzz_corpus` 一一对应的原文，供哨兵测试逐字比对。
+const fuzz_corpus_sources = [_][]const u8{
+    test_private_key_pkcs1,
+    test_private_key_pkcs8,
+    test_public_key_x509,
+};
+
+const fuzz_corpus_priv_pkcs1 = fuzzCorpusSeed(test_private_key_pkcs1);
+const fuzz_corpus_priv_pkcs8 = fuzzCorpusSeed(test_private_key_pkcs8);
+const fuzz_corpus_pub_x509 = fuzzCorpusSeed(test_public_key_x509);
+
+fn fuzzCorpusSeed(comptime pem: []const u8) [4 + pem.len]u8 {
+    var seed: [4 + pem.len]u8 = undefined;
+    std.mem.writeInt(u32, seed[0..4], pem.len, .little);
+    @memcpy(seed[4..], pem);
+    return seed;
+}
+
+// corpus 是「先过一遍断言」的，但那些断言只要求「失败必须是声明的错误变体」——
+// 一份错位的种子会解析失败、断言照旧全绿，语料却已退化成垃圾输入
+// （p12 / xml 那边都踩过一次）。这个测试用**和 body 完全相同的 Smith 读取顺序与
+// 权重表**回放每份种子，钉住：取出来的就是那份真实 PEM，且各走通对应解析路径。
+test "fuzz corpus 布局：种子按 body 的读取顺序还原出真实 PEM 且能解析" {
+    const allocator = std.testing.allocator;
+
+    for (fuzz_corpus, fuzz_corpus_sources) |seed, src| {
+        var smith: std.testing.Smith = .{ .in = seed };
+        var buf: [fuzz_max_len]u8 = undefined;
+        const len = smith.sliceWeighted(&buf, &fuzz_len_weights, &fuzz_byte_weights);
+        try std.testing.expectEqualStrings(src, buf[0..len]);
+    }
+
+    // 私钥两份走 parsePrivateKeyPem、公钥一份走 parsePublicKeyPem，模数均为 128 字节。
+    var pkcs1 = try parsePrivateKeyPem(allocator, fuzz_corpus_sources[0]);
+    defer pkcs1.deinit();
+    try std.testing.expectEqual(@as(usize, 128), byteLenOfModulus(pkcs1.n.toConst()));
+
+    var pkcs8 = try parsePrivateKeyPem(allocator, fuzz_corpus_sources[1]);
+    defer pkcs8.deinit();
+    try std.testing.expectEqual(@as(usize, 128), byteLenOfModulus(pkcs8.n.toConst()));
+
+    var pub_key = try parsePublicKeyPem(allocator, fuzz_corpus_sources[2]);
+    defer pub_key.deinit();
+    try std.testing.expectEqual(@as(usize, 128), byteLenOfModulus(pub_key.n.toConst()));
+}

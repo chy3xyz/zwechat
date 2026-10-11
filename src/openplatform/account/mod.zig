@@ -194,7 +194,7 @@ pub const Account = struct {
     fn postJSON(self: *Self, uri: []const u8, payload: []const u8) (util_error.WechatError || std.mem.Allocator.Error)![]u8 {
         if (self.transport) |t| {
             const tctx = self.transport_ctx orelse
-                @panic("Account.transport 已设置但 transport_ctx 为空：请同时传入两者");
+                return util_error.WechatError.TransportMisconfigured;
             var client = util_http.HttpClient.init(self.allocator);
             defer client.deinit();
             client.setTransport(t, tctx);
@@ -255,6 +255,25 @@ test "OpenAccountResponse 默认值" {
     try std.testing.expectEqualStrings("", r.open_appid);
 }
 
+test "只设 transport 不设 transport_ctx 时返回 TransportMisconfigured（不再 abort 进程）" {
+    const allocator = std.testing.allocator;
+    var ctx: Context = .{ .config = .{ .app_id = "wx-op" } };
+    var a = Account.init(&ctx, allocator);
+    // 公开字段直接注入：只设 transport，transport_ctx 保持 null。
+    a.setTransport(util_http.MockTransport.dispatch, null);
+    try std.testing.expect(a.transport != null);
+    try std.testing.expect(a.transport_ctx == null);
+
+    try std.testing.expectError(
+        error.TransportMisconfigured,
+        a.createOpenAccount("wx-1", "12_tok"),
+    );
+    try std.testing.expectError(
+        error.TransportMisconfigured,
+        a.getOpenAccount("wx-1", "12_tok"),
+    );
+}
+
 test "createOpenAccountURL / getOpenAccountURL 指向正确主机" {
     try std.testing.expect(std.mem.find(u8, createOpenAccountURL, "api.weixin.qq.com") != null);
     try std.testing.expect(std.mem.find(u8, createOpenAccountURL, "/cgi-bin/open/create") != null);
@@ -311,47 +330,20 @@ test "getOpenAccount 请求 URL 带 access_token= 参数" {
     try std.testing.expect(std.mem.find(u8, uri, "component_access_token=") == null);
 }
 
-/// 记录请求体的测试 transport：`util_http.MockTransport` 只记录 URI、不记录
-/// payload，无法断言**实际发出**的请求体（模式同 `openplatform/miniprogram/component.zig`）。
-const RecordingTransport = struct {
-    allocator: std.mem.Allocator,
-    response: []const u8,
-    payloads: std.ArrayList([]u8) = .empty,
-
-    fn deinit(self: *RecordingTransport) void {
-        for (self.payloads.items) |p| self.allocator.free(p);
-        self.payloads.deinit(self.allocator);
-    }
-
-    fn dispatch(
-        ctx: *anyopaque,
-        allocator: std.mem.Allocator,
-        uri: []const u8,
-        method: std.http.Method,
-        payload: []const u8,
-        content_type: ?[]const u8,
-    ) anyerror![]u8 {
-        _ = uri;
-        _ = method;
-        _ = content_type;
-        const self: *RecordingTransport = @ptrCast(@alignCast(ctx));
-        try self.payloads.append(self.allocator, try self.allocator.dupe(u8, payload));
-        return allocator.dupe(u8, self.response);
-    }
-};
-
 test "createOpenAccount：app_id 含引号时请求体仍是合法 JSON 且值原样回传" {
     const allocator = std.testing.allocator;
 
-    var rec = RecordingTransport{
-        .allocator = allocator,
-        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"open_appid\":\"wx-open-1\"}",
-    };
-    defer rec.deinit();
+    // 请求体由 MockTransport 记录（`payloads`/`payloadAt`），无需自造 recording transport。
+    var mock = util_http.MockTransport.init(allocator);
+    defer mock.deinit();
+    try mock.addRoute(
+        createOpenAccountURL ++ "?access_token=12_tok",
+        .{ .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"open_appid\":\"wx-open-1\"}" },
+    );
 
     var ctx: Context = .{ .config = .{ .app_id = "wx-op" } };
     var a = Account.init(&ctx, allocator);
-    a.setTransport(RecordingTransport.dispatch, @ptrCast(&rec));
+    a.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mock));
 
     // app_id 来自调用方，故意含 `"`：裸 allocPrint 插值会拼出非法 JSON。
     const app_id = "wx\"trick";
@@ -359,8 +351,8 @@ test "createOpenAccount：app_id 含引号时请求体仍是合法 JSON 且值�
     defer allocator.free(open_appid);
     try std.testing.expectEqualStrings("wx-open-1", open_appid);
 
-    try std.testing.expectEqual(@as(usize, 1), rec.payloads.items.len);
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, rec.payloads.items[0], .{});
+    try std.testing.expectEqual(@as(usize, 1), mock.payloads.items.len);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, mock.payloadAt(0), .{});
     defer parsed.deinit();
     const obj = switch (parsed.value) {
         .object => |o| o,
@@ -372,23 +364,24 @@ test "createOpenAccount：app_id 含引号时请求体仍是合法 JSON 且值�
 test "getOpenAccount：app_id 含引号时请求体仍是合法 JSON 且值原样回传" {
     const allocator = std.testing.allocator;
 
-    var rec = RecordingTransport{
-        .allocator = allocator,
-        .response = "{\"errcode\":0,\"errmsg\":\"ok\",\"open_appid\":\"wx-open-2\"}",
-    };
-    defer rec.deinit();
+    var mock = util_http.MockTransport.init(allocator);
+    defer mock.deinit();
+    try mock.addRoute(
+        getOpenAccountURL ++ "?access_token=12_tok",
+        .{ .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"open_appid\":\"wx-open-2\"}" },
+    );
 
     var ctx: Context = .{ .config = .{ .app_id = "wx-op" } };
     var a = Account.init(&ctx, allocator);
-    a.setTransport(RecordingTransport.dispatch, @ptrCast(&rec));
+    a.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mock));
 
     const app_id = "wx\"trick";
     const open_appid = try a.getOpenAccount(app_id, "12_tok");
     defer allocator.free(open_appid);
     try std.testing.expectEqualStrings("wx-open-2", open_appid);
 
-    try std.testing.expectEqual(@as(usize, 1), rec.payloads.items.len);
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, rec.payloads.items[0], .{});
+    try std.testing.expectEqual(@as(usize, 1), mock.payloads.items.len);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, mock.payloadAt(0), .{});
     defer parsed.deinit();
     const obj = switch (parsed.value) {
         .object => |o| o,
@@ -461,4 +454,25 @@ test "bind / unbind errcode 非零返回 ApiError" {
 
     try std.testing.expectError(util_error.WechatError.ApiError, a.bind("wx-t", "wx-o", "12_t"));
     try std.testing.expectError(util_error.WechatError.ApiError, a.unbind("wx-t", "wx-o", "12_t"));
+}
+
+test "createOpenAccount / getOpenAccount / bind / unbind 畸形 JSON 返回 DecodeError" {
+    const allocator = std.testing.allocator;
+
+    var mock = util_http.MockTransport.init(allocator);
+    defer mock.deinit();
+    // 四个入口各喂一种「不是合法 JSON 对象」的上游响应。
+    try mock.addRoute(createOpenAccountURL ++ "?access_token=12_tok", .{ .body = "{" });
+    try mock.addRoute(getOpenAccountURL ++ "?access_token=12_tok", .{ .body = "truncated" });
+    try mock.addRoute("https://api.weixin.qq.com/cgi-bin/open/bind?access_token=12_tok", .{ .body = "{\"errcode\":" });
+    try mock.addRoute("https://api.weixin.qq.com/cgi-bin/open/unbind?access_token=12_tok", .{ .body = "]" });
+
+    var ctx: Context = .{ .config = .{ .app_id = "wx-op" } };
+    var a = Account.init(&ctx, allocator);
+    a.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mock));
+
+    try std.testing.expectError(util_error.WechatError.DecodeError, a.createOpenAccount("wx-t", "12_tok"));
+    try std.testing.expectError(util_error.WechatError.DecodeError, a.getOpenAccount("wx-t", "12_tok"));
+    try std.testing.expectError(util_error.WechatError.DecodeError, a.bind("wx-t", "wx-o", "12_tok"));
+    try std.testing.expectError(util_error.WechatError.DecodeError, a.unbind("wx-t", "wx-o", "12_tok"));
 }

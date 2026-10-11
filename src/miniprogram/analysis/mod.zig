@@ -399,7 +399,7 @@ test "getAnalysisDailyRetain POST datacube 并解析留存（回归：泛型 T �
 
 test "getAnalysisVisitPage POST datacube 并解析页面访问" {
     const allocator = std.testing.allocator;
-    var tt = CapturingTransport{ .response = "{\"ref_date\":\"20240901\",\"list\":[{\"page_path\":\"pages/index\",\"page_visit_pv\":100,\"page_visit_uv\":80}]}" };
+    var tt = CapturingTransport{ .response = "{\"ref_date\":\"20240901\",\"list\":[{\"page_path\":\"pages/index\",\"page_visit_pv\":100,\"page_visit_uv\":80,\"page_staytime_pv\":12.5,\"entrypage_pv\":30,\"exitpage_pv\":20,\"page_share_pv\":5,\"page_share_uv\":3}]}" };
     defer tt.deinit(allocator);
 
     var ctx = makeCtx();
@@ -410,9 +410,22 @@ test "getAnalysisVisitPage POST datacube 并解析页面访问" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/datacube/getweanalysisappidvisitpage?access_token=token-abc", tt.uri);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.list.len);
-    try std.testing.expectEqualStrings("pages/index", parsed.value.list[0].page_path);
-    try std.testing.expectEqual(@as(i64, 100), parsed.value.list[0].page_visit_pv);
+    // 整体比较：一次覆盖 ResAnalysisVisitPage / VisitPageItem 全部字段。
+    // `page_staytime_pv` 与期望字面量取自同一十进制字符串（12.5 二进制精确表示），
+    // 因此 expectEqualDeep 的精确浮点比较成立。
+    try std.testing.expectEqualDeep(ResAnalysisVisitPage{
+        .ref_date = "20240901",
+        .list = &.{.{
+            .page_path = "pages/index",
+            .page_visit_pv = 100,
+            .page_visit_uv = 80,
+            .page_staytime_pv = 12.5,
+            .entrypage_pv = 30,
+            .exitpage_pv = 20,
+            .page_share_pv = 5,
+            .page_share_uv = 3,
+        }},
+    }, parsed.value);
 }
 
 test "getAnalysisMonthlyRetain POST datacube 月度留存并解析" {
@@ -473,7 +486,7 @@ test "getAnalysisDailySummary POST datacube 数据概况并解析" {
 
 test "getAnalysisDailyVisitTrend POST datacube 日访问趋势并解析" {
     const allocator = std.testing.allocator;
-    var tt = CapturingTransport{ .response = "{\"list\":[{\"ref_date\":\"20240901\",\"session_cnt\":9,\"visit_pv\":20,\"visit_uv\":8,\"visit_uv_new\":2,\"stay_time_uv\":1.5}]}" };
+    var tt = CapturingTransport{ .response = "{\"list\":[{\"ref_date\":\"20240901\",\"session_cnt\":9,\"visit_pv\":20,\"visit_uv\":8,\"visit_uv_new\":2,\"stay_time_uv\":1.5,\"stay_time_session\":2.25,\"visit_depth\":3.5}]}" };
     defer tt.deinit(allocator);
 
     var ctx = makeCtx();
@@ -484,9 +497,21 @@ test "getAnalysisDailyVisitTrend POST datacube 日访问趋势并解析" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/datacube/getweanalysisappiddailyvisittrend?access_token=token-abc", tt.uri);
-    try std.testing.expectEqual(@as(i64, 9), parsed.value.list[0].session_cnt);
-    try std.testing.expectEqual(@as(i64, 2), parsed.value.list[0].visit_uv_new);
-    try std.testing.expectEqual(@as(f64, 1.5), parsed.value.list[0].stay_time_uv);
+    // 整体比较：一次覆盖 ResAnalysisVisitTrend / VisitTrendItem 全部字段。
+    // 三个浮点字段的期望字面量与响应里的十进制字符串一致，且都是二进制精确表示
+    // （1.5 / 2.25 / 3.5），expectEqualDeep 的精确比较成立。
+    try std.testing.expectEqualDeep(ResAnalysisVisitTrend{
+        .list = &.{.{
+            .ref_date = "20240901",
+            .session_cnt = 9,
+            .visit_pv = 20,
+            .visit_uv = 8,
+            .visit_uv_new = 2,
+            .stay_time_uv = 1.5,
+            .stay_time_session = 2.25,
+            .visit_depth = 3.5,
+        }},
+    }, parsed.value);
 }
 
 test "getAnalysisMonthlyVisitTrend POST datacube 月访问趋势并解析" {
@@ -525,7 +550,7 @@ test "getAnalysisWeeklyVisitTrend POST datacube 周访问趋势并解析" {
 
 test "getAnalysisUserPortrait POST datacube 用户画像并解析" {
     const allocator = std.testing.allocator;
-    var tt = CapturingTransport{ .response = "{\"ref_date\":\"20240901\",\"visit_uv\":{\"index\":1,\"province\":[{\"id\":31,\"name\":\"广东\",\"value\":7}]}}" };
+    var tt = CapturingTransport{ .response = "{\"ref_date\":\"20240901\",\"visit_uv_new\":{\"index\":0,\"province\":[{\"id\":1,\"name\":\"北京\",\"value\":2}]},\"visit_uv\":{\"index\":1,\"province\":[{\"id\":31,\"name\":\"广东\",\"value\":7}],\"city\":[{\"id\":4403,\"name\":\"深圳\",\"value\":5}],\"genders\":[{\"id\":1,\"name\":\"男\",\"value\":4}],\"platforms\":[{\"id\":1,\"name\":\"Android\",\"value\":6}],\"devices\":[{\"id\":1,\"name\":\"iPhone\",\"value\":3}],\"ages\":[{\"id\":20,\"name\":\"20-29\",\"value\":2}]}}" };
     defer tt.deinit(allocator);
 
     var ctx = makeCtx();
@@ -536,10 +561,22 @@ test "getAnalysisUserPortrait POST datacube 用户画像并解析" {
     defer parsed.deinit();
 
     try std.testing.expectEqualStrings("https://api.weixin.qq.com/datacube/getweanalysisappiduserportrait?access_token=token-abc", tt.uri);
-    try std.testing.expectEqualStrings("20240901", parsed.value.ref_date);
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.visit_uv.index);
-    try std.testing.expectEqualStrings("广东", parsed.value.visit_uv.province[0].name);
-    try std.testing.expectEqual(@as(i64, 7), parsed.value.visit_uv.province[0].value);
+    // 整体比较：一次覆盖 ResAnalysisUserPortrait / UserPortrait 全部字段（六个维度切片）。
+    try std.testing.expectEqualDeep(ResAnalysisUserPortrait{
+        .ref_date = "20240901",
+        .visit_uv_new = .{
+            .province = &.{.{ .id = 1, .name = "北京", .value = 2 }},
+        },
+        .visit_uv = .{
+            .index = 1,
+            .province = &.{.{ .id = 31, .name = "广东", .value = 7 }},
+            .city = &.{.{ .id = 4403, .name = "深圳", .value = 5 }},
+            .genders = &.{.{ .id = 1, .name = "男", .value = 4 }},
+            .platforms = &.{.{ .id = 1, .name = "Android", .value = 6 }},
+            .devices = &.{.{ .id = 1, .name = "iPhone", .value = 3 }},
+            .ages = &.{.{ .id = 20, .name = "20-29", .value = 2 }},
+        },
+    }, parsed.value);
 }
 
 test "getAnalysisVisitDistribution POST datacube 访问分布并解析" {
@@ -618,4 +655,20 @@ test "getAnalysisDailyRetain token 失效自愈：作废缓存后用新 token �
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
     try std.testing.expect(std.mem.endsWith(u8, mt.history.items[0], "access_token=token-abc"));
     try std.testing.expect(std.mem.endsWith(u8, mt.history.items[1], "access_token=token-new"));
+}
+
+test "getAnalysisVisitPage 上游返回畸形 JSON → DecodeError" {
+    const allocator = std.testing.allocator;
+    var tt = CapturingTransport{ .response = "{" };
+    defer tt.deinit(allocator);
+
+    var ctx = makeCtx();
+    var a = Analysis.init(&ctx, allocator);
+    a.setTransport(CapturingTransport.dispatch, &tt);
+
+    // `fetchDateRange` 在 `std.json.parseFromSlice` 失败时映射为 WechatError.DecodeError。
+    try std.testing.expectError(
+        error.DecodeError,
+        a.getAnalysisVisitPage("20240901", "20240901"),
+    );
 }

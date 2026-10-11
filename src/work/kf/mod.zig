@@ -17,7 +17,8 @@
 //! - 消息：`sendMsg`（文本）/ `sendMsgRich`（富媒体：图片 / 语音 / 视频 / 文件 /
 //!   图文链接 / 小程序 / 菜单 / 地理位置）/ `sendMsgOnEvent`（事件响应文本）/
 //!   `syncMsg`（游标式增量拉取，`msg_list` 各消息类型强类型解析 + 原始 JSON
-//!   留存于 `SyncMessage.origin_data`，等价 Go 的 `OriginData`）
+//!   留存于 `SyncMessage.origin_data`，等价 Go 的 `OriginData`；可用
+//!   `Kf.keep_origin_data = false` 关闭原始 JSON 保留以省内存）
 //! - 客户：`customerBatchGet`
 //! - 升级服务（upgrade）：`getUpgradeServiceConfig` / `upgradeService` /
 //!   `upgradeMemberService` / `upgradeGroupChatService` / `cancelUpgradeService`
@@ -698,20 +699,29 @@ pub const SyncMessage = struct {
     /// `parsed.deinit()` 一并释放；`SyncMessage` 自身不持有裸切片、无需单独释放。
     /// 因此只应在 `parsed` 存活期间（即 `parsed.value` 的借用期内）读取；
     /// 需要长期保存时先用 `getOriginData` 拷出 JSON 字节。
-    /// 手工构造的 `SyncMessage`（未走 `syncMsg`）该字段为 null。
+    /// 手工构造的 `SyncMessage`（未走 `syncMsg`）该字段为 null；
+    /// 用 `Kf.keep_origin_data = false` 关闭保留时该字段**恒为 null**（见 `keep_origin_data`）。
     origin_data: ?std.json.Value = null,
 
-    /// 自定义 JSON 解析：先把整条消息元素物化成 `std.json.Value` 树，
+    /// 自定义 JSON 解析：默认先把整条消息元素物化成 `std.json.Value` 树，
     /// 再从该树解码上面的强类型字段，最后把整棵树挂到 `origin_data`。
     ///
     /// 由 `std.json` 在解析 `msg_list` 元素时自动调用（`std.meta.hasFn(T, "jsonParse")`），
     /// 调用方无需直接调用。树与强类型字段共用调用方传入的 allocator
     /// （`syncMsg` 路径下即 `Parsed` 的 arena），无额外所有权转移。
+    ///
+    /// 线程局部开关 `keep_origin_data` 为 `false` 时改走**直解路径**：解码到没有本钩子的
+    /// 孪生类型 `SyncMessagePlain`（`std.json` 按普通结构体解析），**不物化 Value 树**，
+    /// `origin_data` 保持 null。`Kf.syncMsg` 按实例的 `Kf.keep_origin_data` 设置该开关。
     pub fn jsonParse(
         allocator: std.mem.Allocator,
         source: anytype,
         options: std.json.ParseOptions,
     ) !@This() {
+        if (!keep_origin_data) {
+            const plain = try std.json.innerParse(SyncMessagePlain, allocator, source, resolveParseOptions(options));
+            return syncMessageFromPlain(plain);
+        }
         const origin = try std.json.Value.jsonParse(allocator, source, options);
         var msg = try std.json.parseFromValueLeaky(@This(), allocator, origin, .{
             .ignore_unknown_fields = true,
@@ -782,6 +792,74 @@ pub const SyncMessage = struct {
         };
     }
 };
+
+// ── OriginData 保留开关（省内存路径）─────────────────────────────────────────
+//
+// `SyncMessage.jsonParse` 是 `std.json` 的**类型钩子**（`std.meta.hasFn(T, "jsonParse")`），
+// 拿不到实例、也拿不到调用参数，因此"是否保留 origin_data"只能经线程局部开关传递：
+// `Kf.syncMsg` 在解析前按实例的 `Kf.keep_origin_data` 设置、解析结束后恢复
+// （解析全程同步、同线程，无并发窗口）。直接调用 `jsonParse` 时保持默认值 `true`。
+
+/// 解析 `SyncMessage` 时是否保留 `origin_data` 原始 JSON 树（线程局部，默认 `true`）。
+///
+/// `true`：保持历史行为——每条消息物化一份 `std.json.Value` 树挂到 `origin_data`，
+/// 代价是每条消息多一份 Value 副本（批量 `syncMsg` 时内存约翻倍）。
+/// `false`：走直解路径（`SyncMessagePlain`），不物化 Value 树，**所有**消息
+/// （含未建模的 `msgtype`）的 `origin_data` 均为 null。
+threadlocal var keep_origin_data: bool = true;
+
+/// `SyncMessage` 的"无 `jsonParse` 钩子"孪生类型（`@Struct` 按字段反射生成，Zig 0.17
+/// 以 `@Struct` 取代了 `@Type`）。
+///
+/// 只复制字段（名 / 类型 / 默认值），**不复制 decls**，因此不含 `jsonParse`：
+/// `std.json` 会按普通结构体解析，不会物化 `std.json.Value` 树。
+/// 字段与 `SyncMessage` 必须始终一致，由下方 `comptime` 断言强制（漏改即编译失败）。
+const SyncMessagePlain = blk: {
+    const info = @typeInfo(SyncMessage).@"struct";
+    break :blk @Struct(.auto, info.backing_integer, info.field_names, info.field_types, info.field_attrs);
+};
+
+comptime {
+    const full = @typeInfo(SyncMessage).@"struct";
+    const plain = @typeInfo(SyncMessagePlain).@"struct";
+    if (full.field_names.len != plain.field_names.len) {
+        @compileError("SyncMessagePlain 字段数必须与 SyncMessage 一致");
+    }
+    for (full.field_names, full.field_types, plain.field_names, plain.field_types) |f_name, f_type, p_name, p_type| {
+        if (!std.mem.eql(u8, f_name, p_name)) {
+            @compileError("SyncMessagePlain 字段名（含顺序）必须与 SyncMessage 一致");
+        }
+        if (f_type != p_type) {
+            @compileError("SyncMessagePlain 字段类型必须与 SyncMessage 一致");
+        }
+    }
+}
+
+/// 把直解结果转换成 `SyncMessage`（字段一一对应，`origin_data` 恒为 null）。
+fn syncMessageFromPlain(plain: SyncMessagePlain) SyncMessage {
+    var msg: SyncMessage = .{};
+    inline for (@typeInfo(SyncMessage).@"struct".field_names) |name| {
+        @field(msg, name) = @field(plain, name);
+    }
+    msg.origin_data = null;
+    return msg;
+}
+
+/// 补全直解路径所需的 `ParseOptions` 字段。
+///
+/// `std.json` 内部调用 `jsonParse` 时传入的 options 无 null 字段；但直接调用
+/// `SyncMessage.jsonParse`（如单元测试）可能传 `.{}`，而 `std.json.innerParse`
+/// 会对 `max_value_len` / `allocate` 取 `.?`，故此处按 `parseFromSlice` 的默认值补全。
+///
+/// 同时强制 `ignore_unknown_fields = true`：钩子路径的强类型解码硬编码了该选项
+/// （微信新增字段不能让整次拉取失败），直解路径必须与之语义一致。
+fn resolveParseOptions(options: std.json.ParseOptions) std.json.ParseOptions {
+    var resolved = options;
+    if (resolved.max_value_len == null) resolved.max_value_len = std.json.default_max_value_len;
+    if (resolved.allocate == null) resolved.allocate = .alloc_if_needed;
+    resolved.ignore_unknown_fields = true;
+    return resolved;
+}
 
 /// `syncMsg` 响应。
 pub const SyncMsgResponse = struct {
@@ -1176,12 +1254,33 @@ pub const CorpQualificationResponse = struct {
 pub const Kf = struct {
     ctx: *Context,
     allocator: std.mem.Allocator,
+    /// 解析 `syncMsg` 拉到的消息时是否保留 `origin_data` 原始 JSON 树，默认 `true`
+    /// （即历史行为）。
+    ///
+    /// `true`：每条消息物化一份 `std.json.Value` 树并挂到 `SyncMessage.origin_data`，
+    /// 可用 `getOriginData` / `originAs` / `originPayloadAs` 二次解析（读取微信新增字段
+    /// 与新 `msgtype` 的负载），代价是每条消息多一份 Value 副本、批量拉取时内存约翻倍
+    /// （见 `docs/OPEN_ITEMS.md` 第 6 条）。
+    /// `false`：不保留原始 JSON 树（直解、不物化 Value），**所有**消息（含未建模的
+    /// `msgtype`）的 `origin_data` 均为 null，上述三个方法返回 `error.NoOriginData`
+    /// ——适用于只需要强类型字段、愿意以放弃原始 JSON 换取内存的调用方。
+    ///
+    /// 注意：该开关只影响 `Kf.syncMsg` 这条解析路径（经线程局部传给类型钩子
+    /// `SyncMessage.jsonParse`）；直接调用 `SyncMessage.jsonParse` 仍按默认值保留。
+    keep_origin_data: bool = true,
 
     const Self = @This();
 
     /// 通过 `Context` 与 `allocator` 构造实例。
     pub fn init(ctx: *Context, allocator: std.mem.Allocator) Self {
         return .{ .ctx = ctx, .allocator = allocator };
+    }
+
+    /// 设置 `keep_origin_data`（`false` = 不再保留 `origin_data` 原始 JSON 树）。
+    ///
+    /// 与直接赋值 `kf.keep_origin_data = keep;` 等价，提供具名入口便于阅读。
+    pub fn setKeepOriginData(self: *Self, keep: bool) void {
+        self.keep_origin_data = keep;
     }
 
     // ── 内部辅助 ────────────────────────────────────────────────────────────
@@ -1450,10 +1549,18 @@ pub const Kf = struct {
     /// `OriginData`），可用 `getOriginData` / `originAs` / `originPayloadAs`
     /// 二次解析，应对微信新增字段与新 `msgtype`。原始 JSON 随返回的
     /// `Parsed(SyncMsgResponse).deinit()` 释放。
+    ///
+    /// 若 `self.keep_origin_data` 为 `false`（默认 `true`），本次解析不保留原始 JSON
+    /// 树（省内存路径，见该字段说明），`origin_data` 恒为 null。
     pub fn syncMsg(self: *Self, req: SyncMsgRequest) !std.json.Parsed(SyncMsgResponse) {
         if (req.limit > 1000) return util_error.WechatError.InvalidArgument;
         const body = try encodeSyncMsgJson(self.allocator, req);
         defer self.allocator.free(body);
+        // `SyncMessage.jsonParse` 是类型钩子、拿不到本实例，故经线程局部开关把
+        // `keep_origin_data` 传给解析；解析同步、同线程，调用后立即恢复原值。
+        const prev_keep = keep_origin_data;
+        keep_origin_data = self.keep_origin_data;
+        defer keep_origin_data = prev_keep;
         return self.postJsonParsed(SyncMsgResponse, syncMsgURL, body);
     }
 
@@ -2516,7 +2623,7 @@ test "addAccount POST account/add 并解析 open_kfid" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.addAccount(.{ .name = "客服一号", .media_id = "m_1" });
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("wkf_new001", parsed.value.open_kfid);
+    try std.testing.expectEqualDeep(AccountAddResponse{ .errmsg = "ok", .open_kfid = "wkf_new001" }, parsed.value);
 }
 
 test "addAccount name 为空返回 InvalidArgument" {
@@ -2616,7 +2723,10 @@ test "addContactWay POST add_contact_way 并解析 url" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.addContactWay(.{ .open_kfid = "wkf_1", .scene = "s_123" });
     defer parsed.deinit();
-    try std.testing.expect(std.mem.find(u8, parsed.value.url, "enc_scene=") != null);
+    try std.testing.expectEqualDeep(ContactWayResponse{
+        .errmsg = "ok",
+        .url = "https://work.weixin.qq.com/kf/kfcbf8f8d07ac7215f?enc_scene=ENCGFSDF567DF",
+    }, parsed.value);
 }
 
 // ── 接待人员 ──────────────────────────────────────────────────────────────────
@@ -2639,9 +2749,14 @@ test "addServicer POST servicer/add 并解析 result_list" {
         .department_id_list = &.{2},
     });
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 2), parsed.value.result_list.len);
-    try std.testing.expectEqualStrings("zhangsan", parsed.value.result_list[0].userid);
-    try std.testing.expectEqual(@as(i64, 2), parsed.value.result_list[1].department_id);
+    var want_results = [_]ServicerResult{
+        .{ .userid = "zhangsan", .department_id = 0, .errcode = 0, .errmsg = "ok" },
+        .{ .userid = "lisi", .department_id = 2, .errcode = 0, .errmsg = "ok" },
+    };
+    try std.testing.expectEqualDeep(ServicerResponse{
+        .errmsg = "ok",
+        .result_list = &want_results,
+    }, parsed.value);
 }
 
 test "delServicer POST servicer/del 并解析 result_list" {
@@ -2662,8 +2777,11 @@ test "delServicer POST servicer/del 并解析 result_list" {
         .department_id_list = &.{},
     });
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.result_list.len);
-    try std.testing.expectEqualStrings("wangwu", parsed.value.result_list[0].userid);
+    var want_results = [_]ServicerResult{.{ .userid = "wangwu", .department_id = 0, .errcode = 0, .errmsg = "ok" }};
+    try std.testing.expectEqualDeep(ServicerResponse{
+        .errmsg = "ok",
+        .result_list = &want_results,
+    }, parsed.value);
 }
 
 test "getServicerList GET servicer/list 拼 open_kfid query" {
@@ -2706,8 +2824,11 @@ test "getServiceState POST service_state/get 并解析 service_state" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.getServiceState(.{ .open_kfid = "wkf_1", .external_userid = "wm_ext_1" });
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(i64, 3), parsed.value.service_state);
-    try std.testing.expectEqualStrings("zhangsan", parsed.value.service_userid);
+    try std.testing.expectEqualDeep(ServiceStateGetResponse{
+        .errmsg = "ok",
+        .service_state = 3,
+        .service_userid = "zhangsan",
+    }, parsed.value);
 }
 
 test "transServiceState POST service_state/trans 并解析 msg_code" {
@@ -2729,7 +2850,7 @@ test "transServiceState POST service_state/trans 并解析 msg_code" {
         .servicer_userid = "zhangsan",
     });
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("code_123", parsed.value.msg_code);
+    try std.testing.expectEqualDeep(ServiceStateTransResponse{ .errmsg = "ok", .msg_code = "code_123" }, parsed.value);
 }
 
 // ── 消息 ────────────────────────────────────────────────────────────────────
@@ -2752,7 +2873,7 @@ test "sendMsgOnEvent POST send_msg_on_event 并解析 msgid" {
         .content = "您好，欢迎咨询",
     });
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("msg_evt_1", parsed.value.msgid);
+    try std.testing.expectEqualDeep(SendMsgResponse{ .errmsg = "ok", .msgid = "msg_evt_1" }, parsed.value);
 }
 
 test "syncMsg POST sync_msg 游标与 has_more 解析" {
@@ -2946,7 +3067,7 @@ test "sendMsgRich image POST send_msg 成功解析" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.sendMsgRich(.{ .image = .{ .open_kfid = "kf_1", .touser = "wm_1", .media_id = "media_img" } });
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("msg_img_1", parsed.value.msgid);
+    try std.testing.expectEqualDeep(SendMsgResponse{ .errmsg = "ok", .msgid = "msg_img_1" }, parsed.value);
 }
 
 test "sendMsgRich voice POST send_msg 成功解析" {
@@ -2963,7 +3084,7 @@ test "sendMsgRich voice POST send_msg 成功解析" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.sendMsgRich(.{ .voice = .{ .open_kfid = "kf_1", .touser = "wm_1", .msgid = "msg_voice_1", .media_id = "media_v" } });
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("msg_voice_1", parsed.value.msgid);
+    try std.testing.expectEqualDeep(SendMsgResponse{ .errmsg = "ok", .msgid = "msg_voice_1" }, parsed.value);
 }
 
 test "sendMsgRich video POST send_msg 成功解析" {
@@ -2980,7 +3101,7 @@ test "sendMsgRich video POST send_msg 成功解析" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.sendMsgRich(.{ .video = .{ .open_kfid = "kf_1", .touser = "wm_1", .media_id = "media_vid" } });
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("msg_video_1", parsed.value.msgid);
+    try std.testing.expectEqualDeep(SendMsgResponse{ .errmsg = "ok", .msgid = "msg_video_1" }, parsed.value);
 }
 
 test "sendMsgRich file POST send_msg 成功解析" {
@@ -2997,7 +3118,7 @@ test "sendMsgRich file POST send_msg 成功解析" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.sendMsgRich(.{ .file = .{ .open_kfid = "kf_1", .touser = "wm_1", .media_id = "media_f" } });
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("msg_file_1", parsed.value.msgid);
+    try std.testing.expectEqualDeep(SendMsgResponse{ .errmsg = "ok", .msgid = "msg_file_1" }, parsed.value);
 }
 
 test "sendMsgRich link POST send_msg 成功解析" {
@@ -3021,7 +3142,7 @@ test "sendMsgRich link POST send_msg 成功解析" {
         .thumb_media_id = "media_t",
     } });
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("msg_link_1", parsed.value.msgid);
+    try std.testing.expectEqualDeep(SendMsgResponse{ .errmsg = "ok", .msgid = "msg_link_1" }, parsed.value);
 }
 
 test "sendMsgRich miniprogram POST send_msg 成功解析" {
@@ -3045,7 +3166,7 @@ test "sendMsgRich miniprogram POST send_msg 成功解析" {
         .pagepath = "pages/faq",
     } });
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("msg_mp_1", parsed.value.msgid);
+    try std.testing.expectEqualDeep(SendMsgResponse{ .errmsg = "ok", .msgid = "msg_mp_1" }, parsed.value);
 }
 
 test "sendMsgRich menu POST send_msg 成功解析" {
@@ -3068,7 +3189,7 @@ test "sendMsgRich menu POST send_msg 成功解析" {
         .tail_content = "感谢",
     } });
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("msg_menu_1", parsed.value.msgid);
+    try std.testing.expectEqualDeep(SendMsgResponse{ .errmsg = "ok", .msgid = "msg_menu_1" }, parsed.value);
 }
 
 test "sendMsgRich location POST send_msg 成功解析" {
@@ -3092,7 +3213,7 @@ test "sendMsgRich location POST send_msg 成功解析" {
         .address = "北京市东城区",
     } });
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("msg_loc_1", parsed.value.msgid);
+    try std.testing.expectEqualDeep(SendMsgResponse{ .errmsg = "ok", .msgid = "msg_loc_1" }, parsed.value);
 }
 
 test "sendMsgRich 必填字段缺失返回 InvalidArgument" {
@@ -3505,6 +3626,110 @@ test "SyncMessage OriginData 缺失与负载缺失返回明确错误" {
     );
 }
 
+// ── OriginData 保留开关（省内存路径）──────────────────────────────────────────
+
+test "syncMsg keep_origin_data=false：直解不物化 Value 树，origin_data 恒为 null" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/kf/sync_msg?access_token=token-abc", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"next_cursor\":\"nc_off\",\"has_more\":0,\"msg_list\":[" ++
+            "{\"msgid\":\"m_t\",\"open_kfid\":\"kf_1\",\"external_userid\":\"wm_1\",\"send_time\":1700000000,\"origin\":3,\"msgtype\":\"text\",\"text\":{\"content\":\"你好\",\"new_text_field\":\"tx\"},\"new_wechat_field\":\"v1\"}," ++
+            "{\"msgid\":\"e_1\",\"send_time\":1700000001,\"origin\":4,\"msgtype\":\"event\",\"event\":{\"event_type\":\"enter_session\",\"welcome_code\":\"wc_1\"}}," ++
+            "{\"msgid\":\"m_new\",\"msgtype\":\"order_info\",\"order_info\":{\"order_id\":\"12345\"}}" ++
+            "]}",
+    });
+    const client = useMock(allocator, &mt);
+    defer dropMock(client);
+
+    var ctx = makeCtx();
+    var k = Kf.init(&ctx, allocator);
+    // 默认 true（历史行为），这里用具名 setter 显式关闭。
+    try std.testing.expect(k.keep_origin_data);
+    k.setKeepOriginData(false);
+    try std.testing.expect(!k.keep_origin_data);
+
+    var parsed = try k.syncMsg(.{ .limit = 10 });
+    defer parsed.deinit();
+
+    const list = parsed.value.msg_list;
+    try std.testing.expectEqual(@as(usize, 3), list.len);
+
+    // 强类型字段照常解析（微信新增的未知字段被忽略，不报错）。
+    try std.testing.expectEqualStrings("m_t", list[0].msgid);
+    try std.testing.expectEqualStrings("kf_1", list[0].open_kfid);
+    try std.testing.expectEqualStrings("wm_1", list[0].external_userid);
+    try std.testing.expectEqual(@as(u64, 1700000000), list[0].send_time);
+    try std.testing.expectEqual(@as(u32, 3), list[0].origin);
+    try std.testing.expectEqualStrings("text", list[0].msgtype);
+    try std.testing.expectEqualStrings("你好", list[0].text.content);
+    try std.testing.expectEqualStrings("enter_session", list[1].event.event_type);
+
+    // 已建模 msgtype（text / event）：origin_data 不再保留——与默认行为的关键差异。
+    try std.testing.expect(list[0].origin_data == null);
+    try std.testing.expect(list[1].origin_data == null);
+    // 未建模 msgtype（newtype，order_info）：同样为 null——关闭开关即放弃这层保护网，
+    // 强类型字段拿不到的负载也无法再经 originPayloadAs 取回。
+    try std.testing.expectEqualStrings("order_info", list[2].msgtype);
+    try std.testing.expect(list[2].origin_data == null);
+
+    // 二次解析入口在缺失原始 JSON 时统一返回 NoOriginData。
+    try std.testing.expectError(error.NoOriginData, list[0].getOriginData(allocator));
+    try std.testing.expectError(
+        error.NoOriginData,
+        list[0].originAs(allocator, struct { msgid: []const u8 = "" }),
+    );
+    try std.testing.expectError(
+        error.NoOriginData,
+        list[0].originPayloadAs(allocator, struct { content: []const u8 = "" }),
+    );
+
+    // 解析结束即恢复线程局部默认值：开关只随本次调用生效，不污染后续解析。
+    try std.testing.expect(keep_origin_data);
+}
+
+test "syncMsg keep_origin_data 默认 true（行为不变）且按次生效" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/kf/sync_msg?access_token=token-abc", .{
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"has_more\":0,\"msg_list\":[{\"msgid\":\"m_1\",\"msgtype\":\"text\",\"text\":{\"content\":\"hi\"},\"new_wechat_field\":\"v1\"}]}",
+    });
+    const client = useMock(allocator, &mt);
+    defer dropMock(client);
+
+    var ctx = makeCtx();
+    var k = Kf.init(&ctx, allocator);
+
+    // 不碰开关：默认即历史行为，原始 JSON 仍保留。
+    {
+        var parsed = try k.syncMsg(.{ .limit = 10 });
+        defer parsed.deinit();
+        const msg = parsed.value.msg_list[0];
+        try std.testing.expect(msg.origin_data != null);
+        const origin = try msg.getOriginData(allocator);
+        defer allocator.free(origin);
+        try std.testing.expect(std.mem.find(u8, origin, "\"new_wechat_field\":\"v1\"") != null);
+    }
+
+    // 关闭 → 本次调用不保留。
+    k.setKeepOriginData(false);
+    {
+        var parsed = try k.syncMsg(.{ .limit = 10 });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.msg_list[0].origin_data == null);
+    }
+    try std.testing.expect(keep_origin_data);
+
+    // 重新打开 → 再次保留（同一实例上开关按次生效）。
+    k.setKeepOriginData(true);
+    {
+        var parsed = try k.syncMsg(.{ .limit = 10 });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.msg_list[0].origin_data != null);
+    }
+}
+
 // ── 客户 ────────────────────────────────────────────────────────────────────
 
 test "customerBatchGet POST customer/batchget 并解析客户列表" {
@@ -3664,7 +3889,7 @@ test "addKnowledgeGroup POST knowledge/add_group 并解析 group_id" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.addKnowledgeGroup(.{ .name = "常见问题" });
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("grp_1", parsed.value.group_id);
+    try std.testing.expectEqualDeep(KnowledgeGroupAddResponse{ .errmsg = "ok", .group_id = "grp_1" }, parsed.value);
 }
 
 test "delKnowledgeGroup POST knowledge/del_group" {
@@ -3748,7 +3973,7 @@ test "addKnowledgeIntent POST knowledge/add_intent 并解析 intent_id" {
         },
     });
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("intent_1", parsed.value.intent_id);
+    try std.testing.expectEqualDeep(KnowledgeIntentAddResponse{ .errmsg = "ok", .intent_id = "intent_1" }, parsed.value);
 }
 
 test "delKnowledgeIntent POST knowledge/del_intent" {
@@ -3933,7 +4158,10 @@ test "getCorpQualification GET 解析视频号绑定状态" {
     var k = Kf.init(&ctx, allocator);
     var parsed = try k.getCorpQualification();
     defer parsed.deinit();
-    try std.testing.expect(parsed.value.wechat_channels_binding);
+    try std.testing.expectEqualDeep(CorpQualificationResponse{
+        .errmsg = "ok",
+        .wechat_channels_binding = true,
+    }, parsed.value);
 }
 
 // ── 请求体编码断言 ────────────────────────────────────────────────────────────
@@ -4319,4 +4547,40 @@ test "SyncMessage.jsonParse 直接调用：强类型字段与 origin_data 同时
     const origin = msg.getOriginValue() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("keep-me", origin.object.get("new_wechat_field").?.string);
     try std.testing.expectEqualStrings("你好", origin.object.get("text").?.object.get("content").?.string);
+}
+
+test "SyncMessage.jsonParse 直解路径：显式关闭开关后不物化 Value 树" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const json =
+        \\{"msgid":"m_plain","open_kfid":"kf_1","send_time":1700000000,
+        \\ "origin":3,"msgtype":"text","text":{"content":"你好","menu_id":"menu_9"},
+        \\ "new_wechat_field":"dropped"}
+    ;
+
+    const prev_keep = keep_origin_data;
+    keep_origin_data = false;
+    defer keep_origin_data = prev_keep;
+
+    var scanner = std.json.Scanner.initCompleteInput(a, json);
+    defer scanner.deinit();
+
+    // 故意传空 options：直解路径会自行补全 max_value_len / allocate，并与钩子路径
+    // 一致地强制忽略未知字段（json 里的 `new_wechat_field` 不得导致解析失败）。
+    const msg = try SyncMessage.jsonParse(a, &scanner, .{});
+
+    try std.testing.expectEqualStrings("m_plain", msg.msgid);
+    try std.testing.expectEqualStrings("kf_1", msg.open_kfid);
+    try std.testing.expectEqual(@as(u64, 1700000000), msg.send_time);
+    try std.testing.expectEqual(@as(u32, 3), msg.origin);
+    try std.testing.expectEqualStrings("text", msg.msgtype);
+    try std.testing.expectEqualStrings("你好", msg.text.content);
+    try std.testing.expectEqualStrings("menu_9", msg.text.menu_id);
+
+    // 直解路径不物化 Value 树：origin_data 为 null，未知字段一并丢弃。
+    try std.testing.expect(msg.getOriginValue() == null);
+    try std.testing.expectError(error.NoOriginData, msg.getOriginData(allocator));
 }

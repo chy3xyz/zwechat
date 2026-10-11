@@ -427,7 +427,7 @@ test "getCheckinOption 解析含 note_can_use_local_pic/schedulelist/open_sp_che
     var mt = util_http.MockTransport.init(allocator);
     defer mt.deinit();
     try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/checkin/getcheckinoption?access_token=token-abc", .{
-        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"info\":[{\"userid\":\"zhangsan\",\"group\":{\"grouptype\":1,\"groupid\":100,\"groupname\":\"研发组\",\"note_can_use_local_pic\":true,\"open_sp_checkin\":true,\"schedulelist\":[{\"schedule_id\":1,\"schedule_name\":\"早班\"}],\"checkindate\":[{\"workdays\":[1,2,3,4,5],\"checkintime\":[{\"work_sec\":32400,\"off_work_sec\":61200}]}]}}]}",
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"info\":[{\"userid\":\"zhangsan\",\"group\":{\"grouptype\":1,\"groupid\":100,\"groupname\":\"研发组\",\"note_can_use_local_pic\":true,\"open_sp_checkin\":true,\"schedulelist\":[{\"schedule_id\":1,\"schedule_name\":\"早班\"}],\"checkindate\":[{\"workdays\":[1,2,3,4,5],\"checkintime\":[{\"work_sec\":32400,\"off_work_sec\":61200,\"remind_work_sec\":3000,\"remind_off_work_sec\":3600}],\"flex_time\":60,\"noneed_offwork\":true,\"limit_aheadtime\":1800,\"flex_on_duty_time\":29000,\"flex_off_duty_time\":62000}],\"spe_workdays\":[{\"timestamp\":1600000000,\"notes\":\"补班\"}],\"spe_offdays\":[{\"timestamp\":1600100000,\"notes\":\"调休\"}],\"sync_holidays\":true,\"need_photo\":true,\"wifimac_infos\":[{\"wifiname\":\"office\",\"wifimac\":\"aa:bb:cc\"}],\"loc_infos\":[{\"lat\":23,\"lng\":113,\"loc_title\":\"总部\",\"loc_detail\":\"1F\",\"distance\":100}],\"allow_checkin_offworkday\":true,\"allow_apply_offworkday\":true,\"buka_restriction\":1,\"span_day_time\":2,\"standard_work_duration\":28800,\"offwork_interval_time\":60,\"checkin_method_type\":1}}]}",
     });
 
     const client = util_http.getDefaultClient(allocator);
@@ -445,15 +445,61 @@ test "getCheckinOption 解析含 note_can_use_local_pic/schedulelist/open_sp_che
     });
     defer parsed.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.info.len);
-    const g = parsed.value.info[0].group;
-    try std.testing.expectEqualStrings("研发组", g.groupname);
-    try std.testing.expectEqual(@as(i64, 100), g.groupid);
-    try std.testing.expectEqual(@as(usize, 1), g.checkindate.len);
-    try std.testing.expectEqual(@as(usize, 5), g.checkindate[0].workdays.len);
-    try std.testing.expectEqual(@as(i64, 32400), g.checkindate[0].checkintime[0].work_sec);
-    // note_can_use_local_pic / schedulelist / open_sp_checkin 是结构体未建模的字段，
-    // 解析不报错即说明 ignore_unknown_fields 生效。
+    // 可变元素切片字段的期望值用局部 var 数组承载。
+    var checkin_times = [_]CheckinTime{.{
+        .work_sec = 32400,
+        .off_work_sec = 61200,
+        .remind_work_sec = 3000,
+        .remind_off_work_sec = 3600,
+    }};
+    var checkin_dates = [_]CheckinDate{.{
+        .workdays = &.{ 1, 2, 3, 4, 5 },
+        .checkintime = &checkin_times,
+        .flex_time = 60,
+        .noneed_offwork = true,
+        .limit_aheadtime = 1800,
+        .flex_on_duty_time = 29000,
+        .flex_off_duty_time = 62000,
+    }};
+    var spe_workdays = [_]SpeDay{.{ .timestamp = 1600000000, .notes = "补班" }};
+    var spe_offdays = [_]SpeDay{.{ .timestamp = 1600100000, .notes = "调休" }};
+    var wifimac_infos = [_]WifiMacInfo{.{ .wifiname = "office", .wifimac = "aa:bb:cc" }};
+    var loc_infos = [_]LocInfo{.{
+        .lat = 23,
+        .lng = 113,
+        .loc_title = "总部",
+        .loc_detail = "1F",
+        .distance = 100,
+    }};
+    var want_info = [_]OptionInfo{.{
+        .userid = "zhangsan",
+        .group = .{
+            .grouptype = 1,
+            .groupid = 100,
+            .groupname = "研发组",
+            .checkindate = &checkin_dates,
+            .spe_workdays = &spe_workdays,
+            .spe_offdays = &spe_offdays,
+            .sync_holidays = true,
+            .need_photo = true,
+            .wifimac_infos = &wifimac_infos,
+            .loc_infos = &loc_infos,
+            .allow_checkin_offworkday = true,
+            .allow_apply_offworkday = true,
+            .buka_restriction = 1,
+            .span_day_time = 2,
+            .standard_work_duration = 28800,
+            .offwork_interval_time = 60,
+            .checkin_method_type = 1,
+        },
+    }};
+    // 整体比较：一次覆盖 OptionGroup 全部字段（含嵌套的 CheckinDate / CheckinTime /
+    // SpeDay / WifiMacInfo / LocInfo）。响应里的 note_can_use_local_pic / schedulelist /
+    // open_sp_checkin 是结构体未建模的字段，解析不报错即说明 ignore_unknown_fields 生效。
+    try std.testing.expectEqualDeep(CheckinOptionResponse{
+        .errmsg = "ok",
+        .info = &want_info,
+    }, parsed.value);
 }
 
 test "getCheckinData token 失效自愈：40001 → 作废缓存 → 新 token 重试成功" {
@@ -464,7 +510,7 @@ test "getCheckinData token 失效自愈：40001 → 作废缓存 → 新 token �
         .body = "{\"errcode\":40001,\"errmsg\":\"invalid credential, access_token is invalid or not latest\"}",
     });
     try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/checkin/getcheckindata?access_token=new-token", .{
-        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"checkindata\":[{\"userid\":\"zhangsan\",\"checkin_time\":1700000000}]}",
+        .body = "{\"errcode\":0,\"errmsg\":\"ok\",\"checkindata\":[{\"userid\":\"zhangsan\",\"groupname\":\"研发组\",\"checkin_type\":\"上班打卡\",\"exception_type\":\"未打卡\",\"checkin_time\":1700000000,\"location_title\":\"总部\",\"location_detail\":\"1F\",\"wifiname\":\"office\",\"notes\":\"迟到\",\"wifimac\":\"aa:bb\",\"mediaids\":[\"m1\",\"m2\"],\"sch_checkin_time\":1700000000,\"groupid\":100,\"schedule_id\":1,\"timeline_id\":2,\"lat\":23,\"lng\":113,\"deviceid\":\"dev-1\"}]}",
     });
 
     const client = util_http.getDefaultClient(allocator);
@@ -480,7 +526,33 @@ test "getCheckinData token 失效自愈：40001 → 作废缓存 → 新 token �
     var parsed = try c.getCheckinData(.{ .useridlist = &.{"zhangsan"} });
     defer parsed.deinit();
 
-    try std.testing.expectEqualStrings("zhangsan", parsed.value.checkindata[0].userid);
+    // checkindata 是可变元素切片，期望值用局部 var 数组承载。
+    var want_items = [_]CheckinDataItem{.{
+        .userid = "zhangsan",
+        .groupname = "研发组",
+        .checkin_type = "上班打卡",
+        .exception_type = "未打卡",
+        .checkin_time = 1700000000,
+        .location_title = "总部",
+        .location_detail = "1F",
+        .wifiname = "office",
+        .notes = "迟到",
+        .wifimac = "aa:bb",
+        .mediaids = &.{ "m1", "m2" },
+        .sch_checkin_time = 1700000000,
+        .groupid = 100,
+        .schedule_id = 1,
+        .timeline_id = 2,
+        .lat = 23,
+        .lng = 113,
+        .deviceid = "dev-1",
+    }};
+    // 整体比较：一次覆盖 CheckinDataResponse / CheckinDataItem 全部字段。
+    try std.testing.expectEqualDeep(CheckinDataResponse{
+        .errmsg = "ok",
+        .checkindata = &want_items,
+    }, parsed.value);
+
     // 作废恰好一次，且第二次请求确实换上了新 token。
     try std.testing.expectEqual(@as(usize, 1), state.invalidates);
     try std.testing.expectEqual(@as(usize, 2), mt.history.items.len);
@@ -509,6 +581,35 @@ test "getCheckinOption 非 token 类 errcode（60011）直接 ApiError，不重�
 
     try std.testing.expectError(error.ApiError, c.getCheckinOption(.{ .datetime = 1700000000 }));
 
+    try std.testing.expectEqual(@as(usize, 0), state.invalidates);
+    try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
+}
+
+test "getCheckinData 上游返回畸形 JSON → DecodeError" {
+    const allocator = std.testing.allocator;
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    try mt.addRoute("https://qyapi.weixin.qq.com/cgi-bin/checkin/getcheckindata?access_token=old-token", .{
+        .body = "not json",
+    });
+
+    const client = util_http.getDefaultClient(allocator);
+    client.setTransport(util_http.MockTransport.dispatch, @ptrCast(&mt));
+    defer {
+        client.setTransport(null, null);
+        util_http.deinitDefaultClient();
+    }
+
+    var state = HealState{};
+    var ctx = makeHealCtx(&state);
+    var c = Checkin.init(&ctx, allocator);
+
+    // `callApi` 只在响应是合法 JSON 错误体时才判 errcode；非法 JSON 原样上抛，
+    // 由 `getCheckinData` 的 `parseFromSlice` 兜底成 DecodeError（不作废 token、不重试）。
+    try std.testing.expectError(
+        error.DecodeError,
+        c.getCheckinData(.{ .useridlist = &.{"zhangsan"} }),
+    );
     try std.testing.expectEqual(@as(usize, 0), state.invalidates);
     try std.testing.expectEqual(@as(usize, 1), mt.history.items.len);
 }

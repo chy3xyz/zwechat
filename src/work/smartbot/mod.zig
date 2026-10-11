@@ -134,7 +134,7 @@ pub const Server = struct {
             encrypted,
         });
         defer self.allocator.free(sig);
-        return std.mem.eql(u8, sig, q.msg_signature);
+        return util_crypto.timingSafeEqlSlices(sig, q.msg_signature);
     }
 
     /// 校验 GET URL 握手的 msg_signature。
@@ -147,7 +147,7 @@ pub const Server = struct {
             q.echostr,
         });
         defer self.allocator.free(sig);
-        return std.mem.eql(u8, sig, q.msg_signature);
+        return util_crypto.timingSafeEqlSlices(sig, q.msg_signature);
     }
 
     /// 处理加密消息：验签 → AES 解密 → 解析内部 XML。

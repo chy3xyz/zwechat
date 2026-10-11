@@ -101,7 +101,7 @@ pub const Server = struct {
     pub fn validateURL(self: *Self, q: Query) !bool {
         const computed = try self.validateSignature(q);
         defer self.allocator.free(computed);
-        return std.mem.eql(u8, computed, q.signature);
+        return util_crypto.timingSafeEqlSlices(computed, q.signature);
     }
 
     /// 处理明文模式（不安全）的消息：直接解析 body XML。
@@ -139,7 +139,7 @@ pub const Server = struct {
             encrypted_b64,
         });
         defer self.allocator.free(computed);
-        if (!std.mem.eql(u8, computed, q.msg_signature)) return error.SignatureMismatch;
+        if (!util_crypto.timingSafeEqlSlices(computed, q.msg_signature)) return error.SignatureMismatch;
 
         // 3) base64 解码出原始密文，再 AES 解密（aesDecryptMsg 收的是原始字节）。
         const cipher_len = std.base64.standard.Decoder.calcSizeForSlice(encrypted_b64) catch

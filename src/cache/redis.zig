@@ -545,6 +545,7 @@ pub const Redis = struct {
         .isExist = isExistImpl,
         .delete = deleteImpl,
         .deinit = deinitImpl,
+        .getOwned = getOwnedImpl,
     };
 
     fn getImpl(ctx: *anyopaque, key: []const u8) CacheError!?[]const u8 {
@@ -564,6 +565,37 @@ pub const Redis = struct {
         switch (reply) {
             .null_bulk => return null,
             .bulk_string => |bs| return bs,
+            .error_msg => |e| {
+                log.warn("redis GET failed: {s}", .{e});
+                return error.StorageError;
+            },
+            else => {
+                reusable = false;
+                return error.StorageError;
+            },
+        }
+    }
+
+    /// `getOwned` 的实现：拷贝发生在**独占借用这条连接期间**（池中一条连接任意时刻
+    /// 至多被一个调用方持有），因此 `value_buf` 不可能在拷贝前被别的线程覆盖 ——
+    /// 这正是本后端「自己的临界区」。返回的切片由调用方的 `allocator` 拥有。
+    fn getOwnedImpl(ctx: *anyopaque, allocator: std.mem.Allocator, key: []const u8) CacheError!?[]u8 {
+        const self: *Redis = @ptrCast(@alignCast(ctx));
+        const conn = try self.acquireForOp();
+        var reusable = true;
+        defer self.release(conn, reusable);
+
+        conn.sendCommand(&.{ "GET", key }) catch {
+            reusable = false;
+            return error.StorageError;
+        };
+        const reply = conn.readReply() catch {
+            reusable = false;
+            return error.StorageError;
+        };
+        switch (reply) {
+            .null_bulk => return null,
+            .bulk_string => |bs| return allocator.dupe(u8, bs) catch return error.OutOfMemory,
             .error_msg => |e| {
                 log.warn("redis GET failed: {s}", .{e});
                 return error.StorageError;
@@ -1021,7 +1053,7 @@ fn mockRedisServer(allocator: std.mem.Allocator, bind_addr: std.Io.net.IpAddress
             var threaded = std.Io.Threaded.init(alloc, .{});
             defer threaded.deinit();
             const io = threaded.io();
-            var server = try addr.listen(io, .{ .reuse_address = true });
+            var server = try addr.listen(io, .{ .reuse_address = false });
             rdy.store(true, .release);
             defer server.deinit(io);
 
@@ -1085,7 +1117,7 @@ const MockPoolServer = struct {
         defer threaded.deinit();
         const io = threaded.io();
 
-        var server = try self.addr.listen(io, .{ .reuse_address = true });
+        var server = try self.addr.listen(io, .{ .reuse_address = false });
         defer server.deinit(io);
         self.ready.store(true, .release);
 
@@ -1237,7 +1269,7 @@ fn makeStalledTarget(io: std.Io, port: u16) !?StalledTarget {
     var target = StalledTarget{
         .addr = addr,
         // 只 listen、**永不 accept**：进来的连接会堆在内核的 accept 队列里。
-        .server = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 1 }),
+        .server = try addr.listen(io, .{ .reuse_address = false, .kernel_backlog = 1 }),
     };
     errdefer target.deinit(io);
 
@@ -1270,29 +1302,13 @@ fn waitReady(ready: *std.atomic.Value(bool)) void {
     }
 }
 
-fn findFreePort() !u16 {
-    const io = default_io.io();
-    var rng: std.Random.DefaultPrng = .init(@intCast(std.Io.Clock.now(.real, default_io.io()).nanoseconds));
-    for (0..20) |_| {
-        const port: u16 = @intCast(20000 + rng.random().int(u16) % 45000);
-        const addr = std.Io.net.IpAddress{ .ip4 = .{
-            .bytes = .{ 127, 0, 0, 1 },
-            .port = port,
-        } };
-        if (addr.listen(io, .{ .reuse_address = true })) |server| {
-            var s = server;
-            s.deinit(io);
-            return port;
-        } else |err| {
-            if (err != error.AddressInUse) return err;
-        }
-    }
-    return error.AddressInUse;
-}
+// 端口分配夹具已收敛到 `net.findFreePort()`（`net.zig`），本文件不再持有私有副本 ——
+// 旧副本的「随机挑端口 + `reuse_address = true` 探测」既是 probe-then-bind 竞争，
+// 又因 `SO_REUSEPORT` 让探测结果失去意义（详见 `net.findFreePort` 的文档）。
 
 test "redis 基本 set/get/exists/delete 往返" {
     const allocator = std.testing.allocator;
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     const addr = std.Io.net.IpAddress{ .ip4 = .{
         .bytes = .{ 127, 0, 0, 1 },
@@ -1325,9 +1341,58 @@ test "redis 基本 set/get/exists/delete 往返" {
     thread.join();
 }
 
+test "redis getOwned：副本独立于连接的值缓冲，后续 set/get/delete 不影响其内容" {
+    // 回归（OPEN_ITEMS 第 15 条）：Redis 的 `get` 返回的切片借用自连接的 `value_buf`，
+    // **任何**后续 get（含其它线程的）都会覆盖它。`getOwned` 必须在独占借用该连接的
+    // 期间完成拷贝，返回真正属于调用方的内存。
+    const allocator = std.testing.allocator;
+    const port = try net.findFreePort();
+
+    const addr = std.Io.net.IpAddress{ .ip4 = .{
+        .bytes = .{ 127, 0, 0, 1 },
+        .port = port,
+    } };
+    var ready = std.atomic.Value(bool).init(false);
+    const thread = try mockRedisServer(allocator, addr, &ready);
+    while (!ready.load(.acquire)) {
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+    }
+
+    const redis = try Redis.create(allocator, .{
+        .host = "127.0.0.1",
+        .port = port,
+    });
+    const c = redis.asCache();
+
+    try c.set("tok", "original_token_value", 60);
+
+    const copy = (try c.getOwned(allocator, "tok")) orelse return error.TestUnexpectedResult;
+    defer allocator.free(copy);
+    try std.testing.expectEqualStrings("original_token_value", copy);
+
+    // 副本不是连接内部的值缓冲。
+    const borrowed = (try c.get("tok")).?;
+    try std.testing.expect(copy.ptr != borrowed.ptr);
+
+    // 覆盖写、读别的 key（会复用同一个 value_buf）、删除：副本都必须完好。
+    try c.set("tok", "replaced_token_value_longer_than_the_original", 60);
+    try std.testing.expectEqualStrings("original_token_value", copy);
+    try std.testing.expect((try c.get("unrelated")) == null);
+    try std.testing.expectEqualStrings("original_token_value", copy);
+    try c.delete("tok");
+    try std.testing.expectEqualStrings("original_token_value", copy);
+
+    // 未命中返回 null。
+    try std.testing.expect((try c.getOwned(allocator, "tok")) == null);
+
+    redis.deinit();
+    allocator.destroy(redis);
+    thread.join();
+}
+
 test "redis get 不存在的 key 返回 null" {
     const allocator = std.testing.allocator;
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     const addr = std.Io.net.IpAddress{ .ip4 = .{
         .bytes = .{ 127, 0, 0, 1 },
@@ -1364,7 +1429,7 @@ test "redis 接口公共 API 全部导出" {
 
 test "redis 多线程并发 set/get 不同 key 全部正确" {
     const allocator = std.testing.allocator;
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     const addr = std.Io.net.IpAddress{ .ip4 = .{
         .bytes = .{ 127, 0, 0, 1 },
@@ -1451,7 +1516,7 @@ test "redis 连接池：默认上限为 1，显式 0 也按 1 处理（兼容既
     try std.testing.expectEqual(@as(usize, 1), defaults.max_connections);
     try std.testing.expectEqual(@as(u64, 30_000), defaults.pool_timeout_ms);
 
-    const port = try findFreePort();
+    const port = try net.findFreePort();
     const addr = std.Io.net.IpAddress{ .ip4 = .{
         .bytes = .{ 127, 0, 0, 1 },
         .port = port,
@@ -1486,7 +1551,7 @@ test "redis 连接池：默认上限为 1，显式 0 也按 1 处理（兼容既
 
 test "redis 连接池：max_connections>1 时多线程真并发（服务端观测峰值 > 1）" {
     const allocator = std.testing.allocator;
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     var srv: MockPoolServer = .{
         .allocator = allocator,
@@ -1577,7 +1642,7 @@ test "redis 连接池：max_connections>1 时多线程真并发（服务端观�
 
 test "redis 连接池：坏连接丢弃不进池，后续请求重建连接" {
     const allocator = std.testing.allocator;
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     var srv: MockPoolServer = .{
         .allocator = allocator,
@@ -1623,7 +1688,7 @@ test "redis 连接池：坏连接丢弃不进池，后续请求重建连接" {
 
 test "redis 连接池：顺序请求复用连接，连接数不增长" {
     const allocator = std.testing.allocator;
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     var srv: MockPoolServer = .{
         .allocator = allocator,
@@ -1670,7 +1735,7 @@ test "redis 连接池：顺序请求复用连接，连接数不增长" {
 
 test "redis 连接池：池满等待超时返回 PoolTimeout 而非挂死" {
     const allocator = std.testing.allocator;
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     var srv: MockPoolServer = .{
         .allocator = allocator,
@@ -1784,7 +1849,7 @@ test "redis 主机解析：IPv4/IPv6 字面量、域名与非法输入" {
 
 test "redis 读超时：服务端不回包 → 有界失败、连接被丢弃、下次请求重建" {
     const allocator = std.testing.allocator;
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     var srv: MockPoolServer = .{
         .allocator = allocator,
@@ -1847,7 +1912,7 @@ test "redis 读超时：服务端不回包 → 有界失败、连接被丢弃、
 test "redis 建连超时：SYN 被丢弃 → 有界失败、不建连接、同实例随后连正常地址成功" {
     const allocator = std.testing.allocator;
     const io = default_io.io();
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     // 黑洞目标（本进程内的本地 listener，队列填满后内核丢 SYN）。
     // 造不出来（队列满即 RST 的环境）就跳过 —— 绝不用「可能永久阻塞」的地址硬测。
@@ -1912,4 +1977,76 @@ test "redis 建连超时：SYN 被丢弃 → 有界失败、不建连接、同�
     redis.deinit();
     allocator.destroy(redis);
     server_thread.join();
+}
+
+test "redis 畸形 RESP 帧返回 StorageError 且坏连接被丢弃（不崩溃）" {
+    const allocator = std.testing.allocator;
+
+    // 脚本化的一次性服务器：每条连接先读走客户端的命令（避免关闭时留下未读数据
+    // 触发 RST 把已写出的帧吞掉），再回一帧非法 RESP（未知类型字节 `?`）。
+    const MalformedServer = struct {
+        fn run(
+            alloc: std.mem.Allocator,
+            addr: std.Io.net.IpAddress,
+            rdy: *std.atomic.Value(bool),
+            conns: usize,
+            frame: []const u8,
+        ) !void {
+            var threaded = std.Io.Threaded.init(alloc, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var server = try addr.listen(io, .{ .reuse_address = false });
+            rdy.store(true, .release);
+            defer server.deinit(io);
+
+            for (0..conns) |_| {
+                const conn = server.accept(io) catch break;
+                defer conn.close(io);
+
+                var read_buf: [512]u8 = undefined;
+                var write_buf: [64]u8 = undefined;
+                var reader = conn.reader(io, &read_buf);
+                var writer = conn.writer(io, &write_buf);
+
+                if (mockReadCommand(alloc, &reader) catch null) |args| {
+                    var a = args;
+                    for (a.items) |item| alloc.free(item);
+                    a.deinit(alloc);
+                }
+
+                _ = writer.interface.writeAll(frame) catch break;
+                writer.interface.flush() catch break;
+                // 留出时间让客户端把帧读走，再关闭。
+                std.Io.sleep(io, std.Io.Duration.fromMilliseconds(20), .awake) catch {};
+            }
+        }
+    };
+
+    const port = try net.findFreePort();
+    const addr = std.Io.net.IpAddress{ .ip4 = .{
+        .bytes = .{ 127, 0, 0, 1 },
+        .port = port,
+    } };
+    var ready = std.atomic.Value(bool).init(false);
+    const thread = try std.Thread.spawn(.{}, MalformedServer.run, .{
+        allocator, addr, &ready, 2, "?unexpected\r\n",
+    });
+    waitReady(&ready);
+
+    const redis = try Redis.create(allocator, .{ .host = "127.0.0.1", .port = port });
+    const c = redis.asCache();
+
+    // 协议解析失败 → CacheError.StorageError（不是崩溃 / 挂死）。
+    try std.testing.expectError(error.StorageError, c.get("k"));
+    try std.testing.expectError(error.StorageError, c.isExist("k"));
+
+    // 失步的连接必须被丢弃而不是放回池里：池中零存活连接，`discarded` 计到 2。
+    const stats = redis.poolStats();
+    try std.testing.expectEqual(@as(usize, 2), stats.discarded);
+    try std.testing.expectEqual(@as(usize, 0), stats.live);
+    try std.testing.expectEqual(@as(usize, 0), stats.idle);
+
+    redis.deinit();
+    allocator.destroy(redis);
+    thread.join();
 }

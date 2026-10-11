@@ -123,46 +123,51 @@ pub const DefaultAccessToken = struct {
         errmsg: []const u8 = "",
     };
 
-    /// 持锁读缓存并返回**深拷贝**（`null` = 未命中或值为空）。
+    /// 持锁读缓存并返回**所有权副本**（`null` = 未命中或值为空）。
     ///
-    /// **深拷贝必须在锁内完成**：`Cache.get` 返回的是**借用**切片，其有效期只到该 Cache
-    /// 实例的下一次写操作（见 `src/cache/mod.zig` 的生命周期契约）。本模块此前先在锁外
-    /// `get` 再 `dupe`，而"加锁双检"分支也是**先 `unlock` 再 `dupe`** —— 两条路径都留了窗口：
-    /// 并发的 `invalidate` / 回源回写若落在窗口内，`val` 指向的内存已被释放，
-    /// `dupe` 就成了读已释放内存（Debug 下可能崩，ReleaseFast 下是 UB）。
+    /// 副本由 cache 后端在**它自己的临界区**内拷出（`Cache.getOwned`：Memory 在自身
+    /// 互斥区内、Redis / Memcache 在独占借出连接期间），所以即使**另一个**
+    /// `DefaultAccessToken` 实例、或宿主其它模块与本次使用**同一个 `Cache` 实例**
+    /// 并在并发地写同一个 key，拿到的也是独立内存。
     ///
-    /// 现在"取借用 + 深拷贝"整体在临界区内完成；代价是一次互斥量 acquire，
-    /// 相对随后必然发生的 HTTP RTT 可以忽略。
+    /// 本对象自带的 `lock` 仍然保留：它串行化本实例自己的缓存操作，并让紧随其后的
+    /// `set` / `delete` 与本次读取互斥（跨实例的写互斥则由 cache 后端负责）。
+    /// 取值仍带一次互斥量 acquire，相对随后必然发生的 HTTP RTT 可以忽略。
     ///
-    /// 已知残留面（本函数无法覆盖）：若**另一个** `DefaultAccessToken` 实例、或宿主其它模块
-    /// 与本次使用**同一个 `Cache` 实例**并在并发地写同一个 key，跨实例仍无互斥
-    /// （锁是每个凭据对象自带的）。见 `docs/OPEN_ITEMS.md`。
+    /// 背景：`Cache.get` 返回的是**借用**切片，有效期只到该 Cache 实例的下一次写操作
+    /// （见 `src/cache/mod.zig` 的生命周期契约）。此前这里（以及"加锁双检"分支）
+    /// 是 `get` 之后再 `dupe`，跨实例写入落在窗口内就会读到已释放内存。
     fn readCachedCopy(self: *DefaultAccessToken, allocator: std.mem.Allocator, key: []const u8) CredentialError!?[]u8 {
         self.lock.lockUncancelable(self.io);
         defer self.lock.unlock(self.io);
 
-        const hit = try self.cache.get(key);
-        const val = hit orelse return null;
-        if (val.len == 0) return null;
-        return try allocator.dupe(u8, val);
+        const owned = try self.cache.getOwned(allocator, key);
+        const val = owned orelse return null;
+        if (val.len == 0) {
+            // 空值视为未命中；副本的所有权已在调用方，必须归还。
+            allocator.free(val);
+            return null;
+        }
+        return val;
     }
 
     /// 获取 access_token，先缓存后服务端。
     ///
     /// 流程（singleflight 风格，HTTP 回源在锁外）：
-    /// 1. 加锁查缓存：命中则返回深拷贝（取借用与拷贝都在锁内，见 `readCachedCopy`）。
+    /// 1. 加锁查缓存：命中则返回所有权副本（副本由 cache 后端在自己的临界区拷出，
+    ///    见 `readCachedCopy`）。
     /// 2. 解锁后 HTTP GET 微信接口并解析（锁不跨网络 I/O）。
     /// 3. 若 `errcode != 0` 返回 `CredentialError.ApiError`。
     /// 4. 重新加锁，再次双检（回源期间可能已被回写，命中直接用现成的），
-    ///    否则写入缓存（TTL 由 `tokenTTL` 计算），解锁返回深拷贝。
-    /// 5. 返回深拷贝的 token（调用方负责 `allocator.free`）。
+    ///    否则写入缓存（TTL 由 `tokenTTL` 计算），解锁返回副本。
+    /// 5. 返回所有权副本的 token（调用方负责 `allocator.free`）。
     ///
     /// 注意：极端并发 miss 时允许多个并发回源（端点为幂等 GET，last-write-wins 无害）。
     pub fn getAccessToken(self: *DefaultAccessToken, allocator: std.mem.Allocator) CredentialError![]u8 {
         const key = try self.cacheKey(allocator);
         defer allocator.free(key);
 
-        // 1) 加锁双检：命中则直接用现成值（深拷贝在锁内完成）
+        // 1) 加锁双检：命中则直接用现成值（副本由 cache 后端在自己的临界区拷出）
         if (try self.readCachedCopy(allocator, key)) |tok| return tok;
 
         // 2) 锁外从服务端拉取（锁不跨网络 I/O）
@@ -182,18 +187,20 @@ pub const DefaultAccessToken = struct {
 
         // 3) 重新加锁双检：回源期间可能已被其他线程回写，命中直接用现成的。
         //
-        //    这里的 `defer unlock` 一直持锁到函数返回，所以下面的 `dupe` 与 `set` 都在
-        //    临界区内 —— 正是它让这一分支不落在 `readCachedCopy` 修掉的那个窗口里。
+        //    读取同样走 `getOwned`（副本由 cache 后端在自己的临界区内拷出），
+        //    所以共享同一个 Cache 实例的其它对象在此并发写同一 key 也不会读到
+        //    已释放内存；本对象的 `lock` 则让 `set` 与本次读取互斥。
         self.lock.lockUncancelable(self.io);
         defer self.lock.unlock(self.io);
-        if (try self.cache.get(key)) |val| {
-            if (val.len > 0) return allocator.dupe(u8, val);
+        if (try self.cache.getOwned(allocator, key)) |existing| {
+            if (existing.len > 0) return existing;
+            allocator.free(existing);
         }
 
         // 4) 写入缓存（TTL = expires_in - 1500 秒，边界处理见 `tokenTTL`）
         try self.cache.set(key, resp.access_token, tokenTTL(resp.expires_in));
 
-        // 5) 返回深拷贝
+        // 5) 返回所有权副本
         return allocator.dupe(u8, resp.access_token);
     }
 
@@ -618,7 +625,13 @@ test "DefaultAccessToken: expires_in 取 i64 极值不溢出 panic 且缓存 TTL
     defer allocator.free(key);
     const entry = ctx.mem.data.getEntry(key).?;
     try std.testing.expect(entry.value_ptr.expire_at_ns > 0);
-    const now_ns = std.Io.Clock.now(.awake, std.testing.io).nanoseconds;
+    // ⚠ 必须用与 `cache.Memory` 写入 `expire_at_ns` **相同的时钟源**（`Clock.boot`，见
+    // `src/cache/memory.zig` 的 `ttlClock()`）。若这里改用 `.awake`，两者在 macOS 上分别是
+    // `CLOCK_MONOTONIC_RAW`（计入休眠）与 `CLOCK_UPTIME_RAW`（排除休眠），差值就是**累计
+    // 休眠时间** —— 笔记本合盖睡过觉后差值会到小时级，断言 `<= 2s` 必挂（CI 的 runner
+    // 不休眠，所以这条只在开发者机器上稳定复现，属"睡过觉就红"的隐蔽陷阱）。
+    // `src/cache/memory.zig` 里有一条守卫测试固定 `ttlClock() == .boot`，防止此处漂移。
+    const now_ns = std.Io.Clock.now(.boot, std.testing.io).nanoseconds;
     try std.testing.expect(entry.value_ptr.expire_at_ns -| now_ns <= 2 * std.time.ns_per_s);
 }
 

@@ -1056,3 +1056,148 @@ test "NotifyVerifier.setTransport 注入普通 transport：拉取平台证书 + 
     try std.testing.expect(verifier.store.transport == null);
     try std.testing.expect(verifier.store.header_transport == null);
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// fuzz（`zig build test --fuzz=<N>` 才真正变异；普通 `zig build test` 会先跑 corpus
+// 里的真实回调密文、再跑一次空输入冒烟 —— 见文件末尾的 `fuzz_corpus`）
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// 固定密钥 / nonce / aad：真实攻击面里攻击者控制的是 `resource.ciphertext`
+/// （base64 串），key 是商户配置、nonce 是调用参数。把三者固定住，fuzzer 的每一次
+/// 迭代才会走过两条平凡的早退守卫（`InvalidKeyLength` / `InvalidNonceLength`），
+/// 落到真正难啃的 base64 长度计算 → `cipher_len - 16` → tag 切分 → GCM 认证上。
+const fuzz_api_v3_key: [32]u8 = "12345678901234567890123456789012".*;
+const fuzz_nonce: [12]u8 = "123456789012".*;
+const fuzz_aad = "transaction";
+
+/// 变异时各字节的权重：base64 字母表给高权重（真实密文全是这些字符），
+/// `=` / `+` / `/` 与非法字符给中低权重（专打 `calcSizeForSlice` 的长度与 padding
+/// 判定），末条覆盖整个字节域——因此 corpus 里的 base64 会被**原样**保留。
+const fuzz_byte_weights = [_]std.testing.Smith.Weight{
+    .rangeAtMost(u8, 'A', 'Z', 8),
+    .rangeAtMost(u8, 'a', 'z', 8),
+    .rangeAtMost(u8, '0', '9', 8),
+    .value(u8, '+', 4),
+    .value(u8, '/', 4),
+    .value(u8, '=', 4),
+    .value(u8, '\n', 2),
+    .value(u8, '-', 2),
+    .value(u8, '_', 2),
+    .rangeAtMost(u8, 0x00, 0xff, 2),
+};
+
+/// 输入长度上限：真实 v3 回调的 `resource.ciphertext` 通常几百字节。
+const fuzz_max_len: usize = 2048;
+
+/// 长度分布：绝大多数迭代落在短输入（每次迭代都要走一遍 base64 + GCM），
+/// 长输入只给 1 份权重。`0..256` 覆盖了下面的真实语料（124 字节）。
+const fuzz_len_weights = [_]std.testing.Smith.Weight{
+    .rangeAtMost(u32, 0, 256, 100),
+    .rangeAtMost(u32, 257, fuzz_max_len, 1),
+};
+
+/// 性质：任意 base64 文本都必须
+/// 1. 不 panic / 不越界 / 不整数溢出（`cipher_len < 16` 守卫先于 `cipher_len - 16`）；
+/// 2. 失败只能是声明的错误变体（base64 的 `InvalidCharacter` / `InvalidPadding` /
+///    `NoSpaceLeft`、`InvalidCiphertext`、`DecryptFailed`、`OutOfMemory`）——
+///    GCM 认证失败的密文绝不返回明文；
+/// 3. 成功（只可能是"用本文件的固定 key/nonce/aad 正确加密过的密文"）时，
+///    明文长度恰为 `解码后密文长度 - 16`（Auth Tag 长度），且用同一组参数重新加密
+///    必须逐字节还原密文（GCM 的黄金性质，验证 tag 切分与明文边界无误）。
+///
+/// 输入布局（= `Smith` 的输入流布局，也是 corpus 的布局）：
+/// `[base64 段 u32 小端长度][base64 字节]`。
+fn testDecryptNotifyResourceInvariants(allocator: std.mem.Allocator, smith: *std.testing.Smith) anyerror!void {
+    var buf: [fuzz_max_len]u8 = undefined;
+    const len = smith.sliceWeighted(&buf, &fuzz_len_weights, &fuzz_byte_weights);
+    const b64 = buf[0..len];
+
+    const out = decryptNotifyResource(
+        allocator,
+        &fuzz_api_v3_key,
+        b64,
+        fuzz_aad,
+        &fuzz_nonce,
+    ) catch |err| switch (err) {
+        error.InvalidKeyLength,
+        error.InvalidNonceLength,
+        error.InvalidCiphertext,
+        error.DecryptFailed,
+        error.InvalidCharacter,
+        error.InvalidPadding,
+        error.NoSpaceLeft,
+        error.OutOfMemory,
+        => return,
+    };
+    defer allocator.free(out);
+
+    const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(b64);
+    try std.testing.expectEqual(decoded_len - 16, out.len);
+
+    const decoded = try allocator.alloc(u8, decoded_len);
+    defer allocator.free(decoded);
+    try std.base64.standard.Decoder.decode(decoded, b64);
+
+    const re = try allocator.alloc(u8, out.len + 16);
+    defer allocator.free(re);
+    var tag: [16]u8 = undefined;
+    Aes256Gcm.encrypt(re[0..out.len], &tag, out, fuzz_aad, fuzz_nonce, fuzz_api_v3_key);
+    @memcpy(re[out.len..], &tag);
+    try std.testing.expectEqualSlices(u8, decoded, re);
+}
+
+test "fuzz: decryptNotifyResource 不 panic / 失败即明确错误 / 成功可重加密还原" {
+    try std.testing.fuzz(std.testing.allocator, testDecryptNotifyResourceInvariants, .{
+        .corpus = &fuzz_corpus,
+    });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// corpus（真实输入种子）
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// corpus 种子：用上面的固定 key/nonce/aad 真实加密出的 v3 回调密文（base64）。
+///
+/// 布局同 body：`[u32 小端长度][base64]`。长度前缀不能省——`Smith` 的切片生成器
+/// 就是按这个格式从 corpus 里读的，直接塞裸 base64 会被当成「长度 = 前 4 字节」
+/// 而切出一段垃圾。
+///
+/// `std.testing.FuzzInputOptions.corpus` 是 Zig 官方的语料入口（见
+/// `lib/compiler/test_runner.zig` 的 `fuzz`）：语料**写在代码里**，没有目录约定、
+/// 也不需要 build.zig 接线。非 fuzz 模式下种子被**原样**跑一遍断言、fuzz 模式下
+/// 成为变异起点。它同时是唯一能稳定走到"解密成功"分支的输入（随机密文通过 GCM
+/// 认证的概率可忽略），所以 body 的"重加密还原"断言实际靠它来回归。
+const fuzz_corpus_b64 =
+    "+9CQjWoopcPfMA694SVYbC6PJs1d3p8bfJcX6ZOPwNQj3c8CEJYBEk0yHFp8qiCJvBq23VDwrkcyDWMZH1oWZaqoICoxv+OMy0njQPBiRzkcbFtFqDNfq3Arhg==";
+const fuzz_corpus_seed = fuzzCorpusSeed(fuzz_corpus_b64);
+
+/// 上面密文对应的业务明文。
+const fuzz_corpus_plaintext =
+    "{\"mchid\":\"1900000109\",\"out_trade_no\":\"20260722001\",\"trade_state\":\"SUCCESS\"}";
+
+const fuzz_corpus = [_][]const u8{&fuzz_corpus_seed};
+
+/// 给 base64 文本加上 `Smith` 要求的 u32 小端长度前缀（comptime 求值）。
+fn fuzzCorpusSeed(comptime b64: []const u8) [4 + b64.len]u8 {
+    var seed: [4 + b64.len]u8 = undefined;
+    std.mem.writeInt(u32, seed[0..4], b64.len, .little);
+    @memcpy(seed[4..], b64);
+    return seed;
+}
+
+// corpus 是「先过一遍断言」的，但 body 的断言只要求「失败必须是声明的错误变体」——
+// 一份错位的种子会被 base64 判定为非法、断言照旧全绿，语料却已退化成垃圾输入
+// （p12 / xml 那边都踩过一次）。这个测试用**和 body 完全相同的 Smith 读取顺序与
+// 权重表**回放种子，钉住：取出的就是那份密文，而且它确实能解密出预期明文。
+test "fuzz corpus 布局：种子还原出真实回调密文并能解密" {
+    const allocator = std.testing.allocator;
+    var smith: std.testing.Smith = .{ .in = &fuzz_corpus_seed };
+
+    var buf: [fuzz_max_len]u8 = undefined;
+    const len = smith.sliceWeighted(&buf, &fuzz_len_weights, &fuzz_byte_weights);
+    try std.testing.expectEqualStrings(fuzz_corpus_b64, buf[0..len]);
+
+    const out = try decryptNotifyResource(allocator, &fuzz_api_v3_key, buf[0..len], fuzz_aad, &fuzz_nonce);
+    defer allocator.free(out);
+    try std.testing.expectEqualStrings(fuzz_corpus_plaintext, out);
+}

@@ -5,6 +5,43 @@ All notable changes to `zwechat` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **测试套件在「笔记本合盖睡过觉」的机器上稳定变红（隐蔽陷阱，CI 永远发现不了）**：`src/credential/default_access_token.zig` 的 TTL 钳制测试用 `Clock.now(.awake)` 取时去对比 `expire_at_ns`，而 `cache.Memory` 写入该值时用的是 `Clock.now(.boot)`（见 `src/cache/memory.zig` 的 `ttlClock()`，刻意计入休眠）。在 macOS 上二者分别是 `CLOCK_UPTIME_RAW`（**排除**休眠）与 `CLOCK_MONOTONIC_RAW`（**计入**休眠，`std/Io.zig:870/877`），差值就等于**累计休眠时间** —— 本机睡过两晚后差值约 25h，断言 `<= 2s` 必挂；而 GitHub runner 不休眠，所以 CI 始终绿（v0.8.0 发版当时机器没睡过，故也过了）。现改成用同一时钟源取时，并在 `src/cache/memory.zig` 增加守卫测试钉住 `ttlClock() == .boot`（否则耦合漂移会退化成"饱和减法 → 0 → 必过"的**假绿**）。
+- **`officialaccount/draft` 与 `freepublish` 的 `no_content` 发的是 JSON 布尔，官方要求 `number`（0/1）**：两处 `batchget` 的序列化改为 `@intFromBool` 输出 `0`/`1`（官方表格原文：`no_content | number | 否 | 1 | 1 表示不返回 content 字段，0 表示正常返回，默认为 0`）。Go 参考实现同样是 bool，**两处同错**，故未照 Go 改。公开面（函数参数仍为 `bool`）不变。
+- **公开字段可配置出进程 abort**：此前若调用方只设了 `transport`（或 `header_transport`）而未设 `transport_ctx`，任意一次请求都会 `@panic` —— 而这两个字段都是**公开字段**，`setTransport(t, ctx)` 也不校验。现统一改为返回新错误 `WechatError.TransportMisconfigured`（`src/util/error.zig`），涉及 `util/http.zig` 与 6 处 `openplatform/*` 调用点；「必须成对传入」写进了 `setTransport` 与字段的文档注释。**刻意保留** `initDefaultClient` 严格模式下 allocator 不一致的 `@panic`（仓库有意的 fail-closed 设计，AGENTS.md 有记载）。
+
+### Added
+
+- **公开 API 恒定时间比较**：新增 `util.crypto.timingSafeEqlSlices(a, b) bool`（长度不等立即 false，否则不做短路的 XOR 累积比较），替换 7 处用 `std.mem.eql` 比较**签名/摘要**的站点（V2 支付回调、企微回调、智能机器人回调、公众号回调、通用中间件）——原先的短路口径理论上可做时序攻击。非签名的业务字段比较（如 `smartbot` 的 `app_id`）**刻意不动**。
+- **`util/http.MockTransport` 记录请求体**：新增 `payloads: std.ArrayList([]const u8)` 与 `MockTransport.payloadAt(idx)`，与既有的 `history`（URI）同序；`deinit` 一并释放。此前 `dispatch` 里 `_ = payload;` 直接丢弃请求体，导致任何"断言实际发出的 body"的测试都得在各自文件里自造一遍 recording transport（仓库里已有两处这样的复制）。
+- **fuzz 目标 5 → 8**：补上三处"上游/对端可控输入"的入口 —— `pay/v3/notify.decryptNotifyResource`（攻击者可控的 base64 + AES-GCM 回调密文）、`util/rsa_impl` 的 PEM/DER 解析（解析**网络来的**平台证书）、`util/crypto.aesDecryptMsg`（CBC 无认证 + PKCS#7 去填充，畸形输入必须永不 panic/越界）。三者各配真实语料与**布局哨兵测试**（防"长度权重没覆盖语料 → 种子被静默复位成 0 字节"这一仓库踩过的坑）。fuzz 模式实测跑到 5967 次迭代、无崩溃。
+- **`officialaccount/freepublish.deleteWithIndex(article_id, index)`**：官方 `freepublish/delete` 的请求体除 `article_id` 外还有可选 `index`（"要删除的文章在图文消息中的位置，第一篇编号为 1；不填或填 0 删除全部"）。原实现**完全不发 `index`**，调用方无法删指定篇。新增独立入口（`delete` 的签名与请求体字节保持不变；Zig 的函数参数不支持默认值，故没有做成可选参数）。
+- **`work.invoice.UserInfo.order_id`**：官方响应示例含该字段而实现缺失（因 `ignore_unknown_fields` 而静默丢弃）。
+- **公开错误集快照门禁（新增 `src/test/error_set_snapshot.zig`，已接进 `src/test_runner.zig` 的编译门）**：本仓的公开错误集（`WechatError` / `CredentialError` / `pay/v3.NotifyError` / `rsa_impl.Error`）**增删一个变体**都会让下游对这些 `error` 做穷尽 `switch` 时编译失败，但 `tools/api_surface_check.sh` 只看类型与签名、**不记错误集成员**，此前没有任何门禁能发现。现把每个公开错误集的成员名快照成常量数组并用 `@typeInfo(E).error_set` 逐项对账（**集合语义、顺序无关**），失配时报错信息**逐条列出多出/缺少的成员名**并让测试红，强制改动方显式更新快照。另配 5 条自检（含"快照多一项 → 报 missing 且门禁失败""实际多一项 → 报 extra 且门禁失败"），证明该门禁**真的会失败**而不是永远绿。
+- **弱断言强化（第二批）**：`work/kf`（18 个用例）、`miniprogram/tcb`（10 个）、`officialaccount/menu`（3 个）、`officialaccount/broadcast`（1 个）的解析测试改为 `expectEqualDeep` 整体比较。典型从"只断言 1 个字段"变成覆盖整颗响应（如 `addContactWay` 原先只 `mem.find(url, "enc_scene=")` 查子串、`getCorpQualification` 只断言 1 个布尔、`getMenu` 原先漏验 `key`/`url`/`sub_button`/`menuid`/`matchrule`）。`broadcast.getMassStatus` 返回裸 `![]u8`，**未改其 API 形状**，改为在测试内 `parseFromSlice` 后整体断言。
+- **错误路径测试补齐（`pay` / `openplatform` / `cache` 三域此前为零）**：`pay/v2` 五个入口的**畸形 XML → `MalformedXml`**（并断言错误路径不泄漏响应缓冲）；`pay/v3` 的 `OrderV3`/`RefundV3`/`TransferV3` 畸形 JSON → `DecodeError`；`openplatform` 的 `account`/`context`/`miniprogram` 各一组畸形 JSON → `DecodeError`；`cache` 的 **Redis 畸形 RESP 帧** / **Memcache 畸形文本帧** → `StorageError` 且坏连接被丢弃（不崩溃）。审计起初说"三域零 DecodeError 测试"，实际动手时按各域真实语义断言（v2 是 XML、cache 是协议解析），**没有硬套 `DecodeError`**。
+- **测试断言强化 + 错误路径补齐**：`work/invoice`、`work/checkin`、`miniprogram/operation`、`miniprogram/analysis` 的 10 条解析测试改为 `std.testing.expectEqualDeep` **整体结构比较**（失败时打印字段路径，"新增字段"从此自动进入断言范围），覆盖字段数普遍从 1–5 个提升到 8–42 个（例：`CheckinOption` 5 → 约 42、`UserInfo` 2 → 23）；并为这 4 个文件各补 1 条**畸形 JSON → `DecodeError`** 的错误路径测试（同时断言未触发 token 自愈）。
+
+- **`Cache` 新增「所有权副本」入口 `getOwned`（收口 `OPEN_ITEMS` 第 15 条）**：`Cache.get` 返回的是**借用**切片（有效期只到该 Cache 实例的下一次写操作），而凭据的快路径即使持自己的锁，「**另一个**凭据实例 / 宿主其它模块共享同一个 `Cache` 实例并并发写同一 key」时仍会读到已释放内存（锁是每个凭据对象自带的）。现给 `Cache.VTable` 增加一个**带默认值 `= null` 的可选槽位** `getOwned`，并新增 `pub fn Cache.getOwned(allocator, key) CacheError!?[]u8`：槽位存在则调用之（拷贝在**实现自己的临界区**内完成 —— Memory 的互斥区、Redis/Memcache 独占借出连接的期间），为 `null` 则**退化为 `get` + `dupe`**（文档明确写"不比现状更安全"）。**默认 `null` 这一点是关键**：既有与自定义 `Cache` 实现无需任何改动即可继续编译（配了一条 `LegacyCache` 手写实现的门禁测试钉住）。三个内置后端都实现了该槽位，四个凭据的 `readCachedCopy` 与「回源后重新加锁双检」分支都改用它。
+- **公开错误集快照门禁扩面（8 → 19 个错误集）**：本轮又补上 `util/pkcs12.Error`、`util/asn1.Error`、`util/rsa.Ed25519Error`、`util/mtls.NotEnabledError`、`openplatform/context/auth.Error`（17 成员）、`openplatform/miniprogram/{basic,component}.Error`（各 16）、`wechat.zig` 的 4 个 `Get*Error` —— 共 132 条快照条目。`openplatform/context/auth.Error` 的组合展开（17 成员）让两两对账超过 Zig 默认的 1000 逆分支配额，故给三个 comptime 夹具加了 `@setEvalBranchQuota(10_000)`（纯抬限、行为不变）。
+- **`cache/memcache` 新增可选连接池**（形状对齐 `cache/redis`）：`Options.max_connections`（默认 **1**）与 `Options.pool_timeout_ms`（默认 30s）、`pub const PoolStats`、`Memcache.poolStats()`。**默认档刻意走历史单连接实现本身**（既有 4 处测试直接断言 `mc.stream`/`mutex` 等内部字段，硬约束要求断言不许改），因此 `max_connections == 1` 时池统计恒为零、行为逐字不变；只有显式 `> 1` 才启用借还池（池满等待超时 → `PoolTimeout` → vtable 边界 `StorageError`，坏连接一律丢弃不进池）。协议实现只有一份：连接体抽成 `*Conn` 变体，单连接档加锁调用、池档借连接调用。
+- **`pay` 的 v2 回调现在能拿到微信原始字段**：新增 `pay.PaidNotifyResult`（`sign_verified` + `return_code` / `return_msg` / `result_code` / `err_code` / `err_code_des`，字段名照微信原始 key）与 `pub fn pay.verifyPaidNotifyDetail(...)`；`verifyPaidNotify` 的**签名与语义逐字不变**（改为内部委托）。此前 XML 里这些字段全被丢掉，调用方只能拿到 `bool`，**无法区分"验签失败"与"微信回 result_code=FAIL + err_code=ORDERPAID"**（对应 `docs/OPEN_ITEMS.md` 第 7 条）。同时补上 `pay` barrel 的 re-export（`PaidNotifyResult` / `verifyPaidNotify` / `verifyPaidNotifyDetail`）—— 顶层函数此前**没有**从 `pay/mod.zig` 导出，包外消费者够不着。
+- **`work/kf` 可关闭 `OriginData` 原始 JSON 保留（省内存）**：新增 `Kf.keep_origin_data`（默认 `true` = 历史行为）与 `Kf.setKeepOriginData()`。置 `false` 后 `syncMsg` 走"直解路径"，不再为每条消息物化一份 `std.json.Value` 树，`origin_data` 恒为 `null`、三个 origin 访问器返回 `error.NoOriginData`（解析开销与内存从约 2× 回到 1×，对应 `docs/OPEN_ITEMS.md` 第 6 条）。因为 `jsonParse` 钩子拿不到实例也拿不到调用参数，开关经**线程局部**传递给钩子，由 `syncMsg` 在解析前后设置/恢复（解析同步同线程）。
+- **公开错误集快照门禁扩面（4 → 8 个错误集）**：新增 `cache.CacheError`、`openplatform/context/access_token.Error`（组合集，按 `@typeInfo` 展开去重后 15 个成员）、`util/rsa.RsaError`、`util/rsa.P12Error` 的快照与门禁测试（对应 `docs/OPEN_ITEMS.md` 第 16 条；仍余若干公开错误集未纳入，附了建议扩面顺序）。
+
+### Changed
+
+- **`docs/api-reference.md` 与源码对齐（这笔文档债记在 `docs/OPEN_ITEMS.md` 第 10 条）**：657 → 1130 行，逐章按源码校正与补齐 —— 修正多处**会误导人写出编译不过的代码**的错误签名（`menu.getMenu` / `oauth.getUserAccessToken` / `basic.getCallbackIP` 等返回类型写错）、把"TODO/占位"的过时描述换成真实现状（`util/http` 的 mTLS 门控、`material` 的媒体下载与限额常量、`pay/v3` 整节、`miniprogram` 的 25 个子模块、`work` 的 15 个子模块）、补上各域 barrel 导出与懒加载工厂，并新增「事实来源优先级」声明（以 `src/` 为准）。章节编号全程未改（`doc/api_guide.md` 按"第 N 节"引用）。
+- **`doc/api_guide.md` 与源码对齐**：约 620 → 约 1100 行，修掉会让人写出**编译不过**的代码的描述（错误的方法名/签名/返回类型），补齐 `pay/v3` 的验签+解密与下单、`virtualpayment` 改名后的新方法名、`miniprogram` 的 25 个子模块、`work` 的 15 个子模块、`credential` 的 `invalidate`/`forceRefresh`、`util/http` 的超时表与 `initDefaultClient` 严格模式等；另补上**媒体下载限额** API（`getMediaWithLimit` / `getMediaToFileWithLimit` / `max_*_bytes` / `maxBytesFor`，这几个常量过去在指南里完全没出现）与 `setTimeouts`。
+- **去掉一处测试基建重复**：`src/openplatform/account/mod.zig` 测试里自造的 `RecordingTransport`（为断言"实际发出的请求体"而复制的一份）已删除，改用 `MockTransport` 新增的 `payloads` / `payloadAt`。
+
+### Tests
+
+- 测试总数 1331 → **1408**（fuzz 目标 5 → 8；另 1 条为环境相关 skip）。
+
 ## [0.8.0] — 2026-10-08
 
 ### Fixed
@@ -33,6 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Cache` 增一个"返回所有权副本"的 vtable 方法，属公开面变更，未做）。
   注：数据竞争无法在单测里确定性复现，故本次**未加**回归测试（加了也只能是永过的烟测）——改动的
   依据是代码审查 + 既有并发用例（`default_access_token` 的 worker 内 `std.debug.panic` 口径）仍全绿。
+- **测试端口分配存在 probe-then-bind 竞争（并发跑测试时的假红根因）**：`findFreePort` 此前是「在 20000–65000 里随机挑一个端口 → `listen(…, .{ .reuse_address = true })` 探测 → 立刻关闭 → 让调用方自己去绑」，而且这份实现被**复制了三份**（`cache/net.zig` / `cache/redis.zig` / `cache/memcache.zig`）。两个问题叠加：① 探测与真正绑定之间是完整的 listen→close→rebind，窗口内别的进程能抢走端口；② 探测用了 `reuse_address = true`，POSIX 上它**同时打开 `SO_REUSEPORT`**，于是"探测成功"根本不是独占证据——两端都能绑上、内核把连接分摊，某一方的 `accept` 永远等不到请求而挂死（`AGENTS.md` 记载过实测挂死 14 分钟）。现统一收敛到 `cache/net.zig` 的 `pub fn findFreePort`，改为**绑端口 0 让内核原子分配、再读回实际端口**（`Server.socket.address`），探测环节整个消失；`redis` / `memcache` 的私有副本删除并改用共享实现。**另外把 7 处假 server 的 `reuse_address = true` 全部改为 `false`**（`cache/{redis,memcache,net}.zig`）——这才是 `AGENTS.md` 的既定纪律，此前是实际实现与文档相悖。残留说明：关闭 → 调用方重绑之间仍有极小窗口（不是零），彻底消除需要让 `findFreePort` 直接交回 listener，已写进该函数的文档。
 
 ### Changed
 

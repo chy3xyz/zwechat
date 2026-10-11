@@ -766,3 +766,23 @@ test "OrderV3 注入了 transport 但缺 transport_ctx 返回 ConfigMissing" {
         o.queryOrderByOutTradeNo(std.testing.allocator, "O1"),
     );
 }
+
+test "OrderV3.createJsapiOrder / queryOrderByOutTradeNo 畸形 JSON 返回 DecodeError" {
+    const allocator = std.testing.allocator;
+    // `{` 是截断的 JSON：`checkV3Error` 的解析失败被吞掉（catch return），
+    // mock 状态码为 200，于是落到业务响应体解析 → DecodeError。
+    var stub = CaptureResp{ .response = "{" };
+    var o = newCaptureOrder(&stub);
+
+    try std.testing.expectError(util_error.WechatError.DecodeError, o.createJsapiOrder(allocator, .{
+        .description = "d",
+        .out_trade_no = "O-bad",
+        .notify_url = "https://x/y",
+        .amount = .{ .total = 100 },
+        .payer = .{ .openid = "openid-1" },
+    }));
+    try std.testing.expectError(
+        util_error.WechatError.DecodeError,
+        o.queryOrderByOutTradeNo(allocator, "O-bad"),
+    );
+}

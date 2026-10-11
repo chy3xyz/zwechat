@@ -53,7 +53,7 @@ pub const WorkServer = struct {
         const params = [_][]const u8{ token, query.timestamp, query.nonce, encrypt_msg };
         const computed = signature.signature(allocator, &params) catch return false;
         defer allocator.free(computed);
-        return std.mem.eql(u8, computed, query.msg_signature);
+        return crypto.timingSafeEqlSlices(computed, query.msg_signature);
     }
 
     /// 解密企业微信消息并返回明文消息与 CorpID 检验。

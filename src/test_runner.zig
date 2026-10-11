@@ -48,6 +48,7 @@ const util_uri = @import("util/uri.zig");
 const util_json = @import("util/json.zig");
 const util_default_io = @import("util/default_io.zig");
 const _integration = @import("integration_test.zig");
+const error_set_snapshot = @import("test/error_set_snapshot.zig");
 
 // —— officialaccount ——
 const oa_mod = @import("officialaccount/mod.zig");
@@ -184,6 +185,7 @@ test "test_runner 编译门 — 强制所有模块被解析 (v2)" {
     std.testing.refAllDecls(util_json);
     std.testing.refAllDecls(util_default_io);
     std.testing.refAllDecls(_integration);
+    std.testing.refAllDecls(error_set_snapshot);
     std.testing.refAllDecls(oa_mod);
     std.testing.refAllDecls(oa_config);
     std.testing.refAllDecls(oa_context);

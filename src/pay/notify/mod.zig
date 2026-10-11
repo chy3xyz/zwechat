@@ -19,15 +19,51 @@ pub const PaidNotify = struct {
     result_code: []const u8 = "",
 };
 
-/// 验证支付通知签名。
+/// 支付回调的详细解析结果：既带验签结论，也带微信原始报文中的业务字段。
 ///
-/// 算法：`sign_type`（XML 中可选，默认 MD5）over `orderParam(params_except_sign) + "&key=" + API_KEY`。
-/// 返回 `true` 表示签名匹配。
-pub fn verifyPaidNotify(allocator: std.mem.Allocator, cfg: Config, xml_body: []const u8) !bool {
+/// 与 `verifyPaidNotify` 的区别：后者只返回 `bool`，调用方无法区分「验签失败」
+/// 和「微信回 `result_code=FAIL` + `err_code=XXX`」。本结构把两类信息拆开：
+/// - `sign_verified == false` → 报文不可信（缺 `sign` 或签名不匹配）；
+/// - `sign_verified == true` 且 `return_code == "FAIL"` → 微信侧通信失败，看 `return_msg`；
+/// - `sign_verified == true` 且 `result_code == "FAIL"` → 业务失败，看 `err_code` / `err_code_des`。
+///
+/// **切片生命周期**：所有字符串字段都是 `xml_body` 的子切片（**不拷贝**），有效期与
+/// `xml_body` 相同——调用方释放 / 改写 `xml_body` 后不得再使用这些字段。
+/// 字段名与微信原始 XML key 逐字一致（`err_code_des` 是微信的拼写）。
+pub const PaidNotifyResult = struct {
+    /// 验签结论：`true` 表示报文的 `sign` 与本地计算值匹配。
+    sign_verified: bool = false,
+    return_code: []const u8 = "",
+    return_msg: []const u8 = "",
+    result_code: []const u8 = "",
+    err_code: []const u8 = "",
+    err_code_des: []const u8 = "",
+};
+
+/// 验签支付通知，并同时返回回调报文的业务字段（`err_code` / `err_code_des` 等）。
+///
+/// 验签算法与 `verifyPaidNotify` 共用同一实现（后者委托到本函数）：
+/// `sign_type`（XML 中可选，默认 MD5）over `orderParam(params_except_sign) + "&key=" + API_KEY`。
+/// 语义逐字保持一致——空值参数跳过、缺 `sign` 视为验签失败（不报错）、
+/// 畸形 XML 仍返回 `error.MalformedXml`（不会静默变成「验签失败」）。
+pub fn verifyPaidNotifyDetail(
+    allocator: std.mem.Allocator,
+    cfg: Config,
+    xml_body: []const u8,
+) !PaidNotifyResult {
     var doc = try util_xml.parse(allocator, xml_body);
     defer doc.deinit();
 
-    const given_sign = doc.get("sign") orelse return false;
+    var result = PaidNotifyResult{
+        .return_code = doc.get("return_code") orelse "",
+        .return_msg = doc.get("return_msg") orelse "",
+        .result_code = doc.get("result_code") orelse "",
+        .err_code = doc.get("err_code") orelse "",
+        .err_code_des = doc.get("err_code_des") orelse "",
+    };
+
+    // 缺 sign 与旧实现一致：直接判验签失败，不报错。
+    const given_sign = doc.get("sign") orelse return result;
 
     var param_array: std.ArrayList(util_param.Param) = .empty;
     defer param_array.deinit(allocator);
@@ -51,7 +87,20 @@ pub fn verifyPaidNotify(allocator: std.mem.Allocator, cfg: Config, xml_body: []c
     const computed = try util_crypto.calculateSign(allocator, ordered, sign_type, cfg.key);
     defer allocator.free(computed);
 
-    return std.mem.eql(u8, computed, given_sign);
+    result.sign_verified = util_crypto.timingSafeEqlSlices(computed, given_sign);
+    return result;
+}
+
+/// 验证支付通知签名。
+///
+/// 算法：`sign_type`（XML 中可选，默认 MD5）over `orderParam(params_except_sign) + "&key=" + API_KEY`。
+/// 返回 `true` 表示签名匹配。
+///
+/// 只关心真 / 假时用本函数；需要同时拿到 `err_code` / `return_msg` 等业务字段
+/// 以区分失败原因时用 `verifyPaidNotifyDetail`（本函数即其薄封装）。
+pub fn verifyPaidNotify(allocator: std.mem.Allocator, cfg: Config, xml_body: []const u8) !bool {
+    const result = try verifyPaidNotifyDetail(allocator, cfg, xml_body);
+    return result.sign_verified;
 }
 
 pub const Notify = struct {
@@ -217,4 +266,130 @@ test "verifyPaidNotify 支持 HMAC-SHA256 sign_type" {
     , .{md5_sign});
     defer allocator.free(bad);
     try std.testing.expect(!(try verifyPaidNotify(allocator, cfg, bad)));
+}
+
+test "verifyPaidNotify 畸形 XML 返回 MalformedXml（而非静默 false）" {
+    const allocator = std.testing.allocator;
+    const cfg = Config{ .app_id = "wx", .mch_id = "m", .key = "k" };
+
+    // 非 XML 的垃圾响应。
+    try std.testing.expectError(error.MalformedXml, verifyPaidNotify(allocator, cfg, "not xml"));
+    // 截断的 XML（缺结束标签）。
+    try std.testing.expectError(error.MalformedXml, verifyPaidNotify(allocator, cfg, "<xml><sign>abc"));
+    // 空标签名（`util/xml.zig` 的 fuzz 回归点）。
+    try std.testing.expectError(error.MalformedXml, verifyPaidNotify(allocator, cfg, "<></>"));
+}
+
+/// 测试用：按 `verifyPaidNotifyDetail` 的算法计算 `params` 的 MD5 签名。
+fn testComputedSign(allocator: std.mem.Allocator, cfg: Config, params: []const util_param.Param) ![]u8 {
+    const biz = try allocator.print("&key={s}", .{cfg.key});
+    defer allocator.free(biz);
+    const ordered = try util_param.orderParam(allocator, params, biz);
+    defer allocator.free(ordered);
+    return util_crypto.calculateSign(allocator, ordered, util_crypto.SignTypeMD5, "");
+}
+
+test "verifyPaidNotifyDetail SUCCESS：业务字段全提取且验签通过" {
+    const allocator = std.testing.allocator;
+    const cfg = Config{ .app_id = "wx123", .mch_id = "m", .key = "thekey" };
+
+    const params = [_]util_param.Param{
+        .{ .key = "appid", .value = "wx123" },
+        .{ .key = "mch_id", .value = "m" },
+        .{ .key = "nonce_str", .value = "5K8264ILTKCH" },
+        .{ .key = "out_trade_no", .value = "T123" },
+        .{ .key = "result_code", .value = "SUCCESS" },
+        .{ .key = "return_code", .value = "SUCCESS" },
+        .{ .key = "return_msg", .value = "OK" },
+        .{ .key = "total_fee", .value = "1" },
+        .{ .key = "transaction_id", .value = "4200000000" },
+    };
+    const sign = try testComputedSign(allocator, cfg, &params);
+    defer allocator.free(sign);
+
+    const body = try allocator.print(
+        \\<xml><appid>wx123</appid><mch_id>m</mch_id><nonce_str>5K8264ILTKCH</nonce_str><out_trade_no>T123</out_trade_no><return_code>SUCCESS</return_code><return_msg>OK</return_msg><result_code>SUCCESS</result_code><total_fee>1</total_fee><transaction_id>4200000000</transaction_id><sign>{s}</sign></xml>
+    , .{sign});
+    defer allocator.free(body);
+
+    const r = try verifyPaidNotifyDetail(allocator, cfg, body);
+    try std.testing.expect(r.sign_verified);
+    try std.testing.expectEqualStrings("SUCCESS", r.return_code);
+    try std.testing.expectEqualStrings("OK", r.return_msg);
+    try std.testing.expectEqualStrings("SUCCESS", r.result_code);
+    try std.testing.expectEqualStrings("", r.err_code);
+    try std.testing.expectEqualStrings("", r.err_code_des);
+
+    // 旧入口（薄封装）对同一报文结论一致。
+    try std.testing.expect(try verifyPaidNotify(allocator, cfg, body));
+}
+
+test "verifyPaidNotifyDetail result_code=FAIL：验签通过但业务失败可读 err_code" {
+    const allocator = std.testing.allocator;
+    const cfg = Config{ .app_id = "wx123", .mch_id = "m", .key = "thekey" };
+
+    const params = [_]util_param.Param{
+        .{ .key = "appid", .value = "wx123" },
+        .{ .key = "mch_id", .value = "m" },
+        .{ .key = "err_code", .value = "ORDERPAID" },
+        .{ .key = "err_code_des", .value = "订单已支付" },
+        .{ .key = "result_code", .value = "FAIL" },
+        .{ .key = "return_code", .value = "SUCCESS" },
+    };
+    const sign = try testComputedSign(allocator, cfg, &params);
+    defer allocator.free(sign);
+
+    const body = try allocator.print(
+        \\<xml><appid>wx123</appid><mch_id>m</mch_id><return_code>SUCCESS</return_code><result_code>FAIL</result_code><err_code>ORDERPAID</err_code><err_code_des>订单已支付</err_code_des><sign>{s}</sign></xml>
+    , .{sign});
+    defer allocator.free(body);
+
+    const r = try verifyPaidNotifyDetail(allocator, cfg, body);
+    // 关键区分点：验签是过的，失败来自业务（旧入口这里只会给出 `true`，无从得知 err_code）。
+    try std.testing.expect(r.sign_verified);
+    try std.testing.expectEqualStrings("SUCCESS", r.return_code);
+    try std.testing.expectEqualStrings("FAIL", r.result_code);
+    try std.testing.expectEqualStrings("ORDERPAID", r.err_code);
+    try std.testing.expectEqualStrings("订单已支付", r.err_code_des);
+    try std.testing.expect(try verifyPaidNotify(allocator, cfg, body));
+}
+
+test "verifyPaidNotifyDetail return_code=FAIL：通信失败可读 return_msg 而验签为假" {
+    const allocator = std.testing.allocator;
+    const cfg = Config{ .app_id = "wx123", .mch_id = "m", .key = "thekey" };
+
+    // 微信在 return_code=FAIL 时通常不带 sign（报文根本未进业务层）。
+    const body =
+        \\<xml><return_code>FAIL</return_code><return_msg>签名失败</return_msg></xml>
+    ;
+
+    const r = try verifyPaidNotifyDetail(allocator, cfg, body);
+    try std.testing.expect(!r.sign_verified);
+    try std.testing.expectEqualStrings("FAIL", r.return_code);
+    try std.testing.expectEqualStrings("签名失败", r.return_msg);
+    try std.testing.expectEqualStrings("", r.result_code);
+    try std.testing.expectEqualStrings("", r.err_code);
+    try std.testing.expectEqualStrings("", r.err_code_des);
+
+    // 旧入口只看到布尔 false —— 正是本入口要解决的「无法区分失败原因」。
+    try std.testing.expect(!(try verifyPaidNotify(allocator, cfg, body)));
+}
+
+test "verifyPaidNotifyDetail 畸形 XML 返回 MalformedXml（与旧入口一致）" {
+    const allocator = std.testing.allocator;
+    const cfg = Config{ .app_id = "wx", .mch_id = "m", .key = "k" };
+
+    try std.testing.expectError(error.MalformedXml, verifyPaidNotifyDetail(allocator, cfg, "not xml"));
+    try std.testing.expectError(error.MalformedXml, verifyPaidNotifyDetail(allocator, cfg, "<xml><sign>abc"));
+    try std.testing.expectError(error.MalformedXml, verifyPaidNotifyDetail(allocator, cfg, "<></>"));
+}
+
+test "decryptRefund 非法 base64 返回 InvalidCharacter（不崩溃）" {
+    const allocator = std.testing.allocator;
+    var n = Notify.init(.{ .key = "ziR0QKsTUfMOuochC9RfCdmfHECorQAP" });
+
+    // 8 字节（4 的整数倍，能过长度检查）但含 base64 字母表之外的字符。
+    try std.testing.expectError(error.InvalidCharacter, n.decryptRefund(allocator, "!!!!!!!!"));
+    // 长度不是 4 的整数倍 → InvalidPadding。
+    try std.testing.expectError(error.InvalidPadding, n.decryptRefund(allocator, "A"));
 }

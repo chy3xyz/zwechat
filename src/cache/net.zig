@@ -6,7 +6,8 @@
 //!
 //! - `SocketReader`：「带可选读超时的 socket 读取器」，支持 `recv_timeout_ms`
 //!   语义（见其文档）；
-//! - `resolveHost`：主机名 / IP 字面量 → 可连接的 `std.Io.net.IpAddress`。
+//! - `resolveHost`：主机名 / IP 字面量 → 可连接的 `std.Io.net.IpAddress`；
+//! - `findFreePort`：测试用回环端口分配（绑 0 端口让内核分配后读回，见其文档）。
 //!
 //! 日志 scope 按后端区分（`Backend`）：读超时告警打到 `zwechat_redis` /
 //! `zwechat_memcache`，宿主可用 `std_options.log_scope_levels` 单点静音某个
@@ -148,6 +149,48 @@ pub fn resolveHost(io: std.Io, host: []const u8, port: u16) !std.Io.net.IpAddres
     return fallback orelse error.InvalidAddress;
 }
 
+/// 取一个当前空闲的本地回环 TCP 端口（`127.0.0.1`，供 redis / memcache 的
+/// 进程内 mock server 用例使用；两个后端共用这一份，不再各自复制）。
+///
+/// 实现是「bind 端口 0 → 内核分配 → `getsockname` 读回 → 关闭」：`std.Io.net`
+/// 的 `listen` 在 bind 之后会做 `getsockname`（POSIX 见 `std/Io/Threaded.zig`
+/// 的 `netListenIpPosix`，Windows 走 AFD bind 的返回地址），结果就在
+/// `server.socket.address` 上（`Socket.address` 的文档写的就是「被请求解析临时
+/// 端口时包含解析结果」），这里用 `IpAddress.getPort()` 取回。
+///
+/// 相比旧的「在 20000..65000 里随机挑端口 → `listen` 探测 → 立刻关闭」：
+/// - 内核只会分配**当前确实空闲**的端口，不会把同一个端口同时交给两个调用方，
+///   所以「两个测试进程选中同一个随机端口」这类碰撞不再发生；
+/// - 旧实现的探测还用了 `reuse_address = true`，它在 POSIX 上同时打开
+///   `SO_REUSEPORT`（见 `std/Io/net.zig` 的 `ListenOptions.reuse_address` 文档，
+///   AGENTS.md 亦有记载），于是「探测成功」这个信号本身就是错的 —— 别的进程
+///   已经绑着同一个端口时探测照样成功，两个进程随后都能绑上同一个端口，内核
+///   把连接分摊给它们，某一方的 `accept` 永远等不到请求而挂死。这里用
+///   `reuse_address = false`，探测结果不再具有这种双重含义（探测本身也取消了）。
+///
+/// **残留窗口（如实说明）**：端口是在 `defer server.deinit` 之后才真正让出的，
+/// 调用方随后还要自己 `listen` 同一个端口，因此「关闭 → 重新绑定」之间仍有极
+/// 小的竞争窗口。要彻底消除只有让调用方直接持用这里返回的 listener（改动全部
+/// 调用点的形状），不在本次修复范围内。
+pub fn findFreePort() !u16 {
+    const io = default_io.io();
+    const addr = std.Io.net.IpAddress{
+        .ip4 = .{
+            .bytes = .{ 127, 0, 0, 1 },
+            // 端口 0 = 交给内核在内核临时端口范围里挑一个空闲的。
+            .port = 0,
+        },
+    };
+    var server = try addr.listen(io, .{ .reuse_address = false });
+    defer server.deinit(io);
+
+    const port = server.socket.address.getPort();
+    // 后端若没做 `getsockname`，拿回的就是 0；宁可报错也**不要**把 0 号端口交给
+    // 调用方（用它去 connect 只会得到一堆与真实原因无关的失败）。
+    if (port == 0) return error.AddressInUse;
+    return port;
+}
+
 // ============================================================================
 // 单元测试：全部离线（回环 socket + 纯函数），不依赖外部服务。
 // ============================================================================
@@ -173,6 +216,29 @@ test "cache/net resolveHost：IPv4/IPv6 字面量带端口，非法输入报 Inv
     // 而不是被当成地址或域名拿去做解析。
     try std.testing.expectError(error.InvalidAddress, resolveHost(io, "not a host", 6379));
     try std.testing.expectError(error.InvalidAddress, resolveHost(io, "bad_host", 6379));
+}
+
+test "cache/net findFreePort：内核分配的空闲端口可独占重绑，不被 SO_REUSEPORT 共享" {
+    const io = default_io.io();
+    const port = try findFreePort();
+
+    // 内核分配的临时端口一定是真的（0 表示后端没回读成功，属实现错误）。
+    try std.testing.expect(port != 0);
+
+    const addr = std.Io.net.IpAddress{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = port } };
+
+    // 交出来的端口必须能立刻被调用方（mock server）以独占方式绑上，且绑回的是
+    // 同一个端口号。极小概率下外部进程恰好抢占该端口才会失败 —— 这与生产调用点
+    // 承担的残留窗口是同一个，不是本用例引入的新风险。
+    var server = try addr.listen(io, .{ .reuse_address = false });
+    defer server.deinit(io);
+    try std.testing.expectEqual(port, server.socket.address.getPort());
+
+    // 独占语义（本用例的核心）：listener 还活着时，第二个 `reuse_address = false`
+    // 的 bind 必须报 `AddressInUse`。旧实现的探测走 `reuse_address = true` ——
+    // 那会同时打开 `SO_REUSEPORT`，于是这里会**成功**，两个进程共享同一端口、
+    // 内核把连接分摊给它们，某一方的 `accept` 永远等不到请求（测试挂死的成因）。
+    try std.testing.expectError(error.AddressInUse, addr.listen(io, .{ .reuse_address = false }));
 }
 
 test "cache/net SocketReader：recv_timeout_ms=0 时与 std 的 Stream.Reader 逐字节等价" {
@@ -243,7 +309,7 @@ fn servePayloadOnce(
             var threaded = std.Io.Threaded.init(alloc, .{});
             defer threaded.deinit();
             const io = threaded.io();
-            var server = try addr.listen(io, .{ .reuse_address = true });
+            var server = try addr.listen(io, .{ .reuse_address = false });
             rdy.store(true, .release);
             defer server.deinit(io);
 
@@ -269,22 +335,5 @@ fn waitReady(ready: *std.atomic.Value(bool)) void {
     }
 }
 
-fn findFreePort() !u16 {
-    const io = default_io.io();
-    var rng: std.Random.DefaultPrng = .init(@intCast(std.Io.Clock.now(.real, default_io.io()).nanoseconds));
-    for (0..20) |_| {
-        const port: u16 = @intCast(20000 + rng.random().int(u16) % 45000);
-        const addr = std.Io.net.IpAddress{ .ip4 = .{
-            .bytes = .{ 127, 0, 0, 1 },
-            .port = port,
-        } };
-        if (addr.listen(io, .{ .reuse_address = true })) |server| {
-            var s = server;
-            s.deinit(io);
-            return port;
-        } else |err| {
-            if (err != error.AddressInUse) return err;
-        }
-    }
-    return error.AddressInUse;
-}
+// 端口分配夹具 `findFreePort` 已上移为公开实现（`pub fn findFreePort`），
+// 与 `resolveHost` 一样由 redis / memcache 共用一份。

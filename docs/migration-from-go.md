@@ -19,7 +19,7 @@
 | `interface{}` | 函数指针 + `*anyopaque` ctx | 见下文 §2 |
 | `error` | `error{...}!T` | 显式错误集 |
 | `context.Context` | 省略 / `std.Io` runtime | 见 §3 |
-| `sync.Mutex` | `SpinMutex`（自实现）| 见 [architecture.md §2.6](architecture.md) |
+| `sync.Mutex` | `std.Io.Mutex`（futex 实现，可静态初始化并内嵌为结构体字段）| `util/sync.zig` 的 `SpinMutex` 仅作兼容层，见 [architecture.md §2.6](architecture.md) |
 
 ### 1.2 调用范式
 
@@ -27,10 +27,10 @@
 |---|---|
 | `cfg := config.NewConfig(...)` | `const cfg = Config{ .app_id = "...", ... };` |
 | `wc := wechat.NewWechat()` | `var wc = Wechat.init();` |
-| `wc.SetCache(cache.NewMemory())` | `wc.setCache(cache.Memory.create(alloc).asCache());` |
-| `oa := wc.GetOfficialAccount(cfg)` | `const oa = OfficialAccount.init(ctx);` |
-| `tok, err := oa.GetAccessToken()` | `const tok = try oa.getAccessToken(allocator); defer allocator.free(tok);` |
-| `resp, err := oa.GetMenu()` | `const resp = try oa.menu.getMenu(); defer allocator.free(resp.menu.button[0].name); ...` |
+| `wc.SetCache(cache.NewMemory())` | `wc.setCache((try cache.Memory.create(alloc)).asCache());`（`create` 返回 `!*Memory`，别忘了 `try`）|
+| `oa := wc.GetOfficialAccount(cfg)` | `var oa = try wc.getOfficialAccount(allocator, cfg, factory);`（也可 `OfficialAccount.init(ctx)` 手工组装）|
+| `tok, err := oa.GetAccessToken()` | `const tok = try oa.getAccessToken(allocator); defer allocator.free(tok);`（`getAccessToken` 取 `*OfficialAccount`，故 `oa` 需为 `var`）|
+| `resp, err := oa.GetMenu()` | `var menu = oa.getMenu(allocator); var resp = try menu.getMenu(); defer resp.deinit();` 再读 `resp.value.menu.button[0].name`（返回 `std.json.Parsed(ResMenu)`，字段在 `.value` 下，须 `deinit`）|
 
 ### 1.3 错误处理
 
@@ -109,6 +109,8 @@ fn memoryGet(ctx: *anyopaque, key: []const u8) CacheError!?[]const u8 {
 
 **好处**：调用方拿到的 `Cache` 值是 **值类型**（两个指针 + vtable 指针），可以自由传递而不用担心生命周期。
 
+**近期补充：`Cache.getOwned(allocator, key)`。** `Cache.get` 返回的是**借用**切片（有效期只到本实例下一次写操作），跨写持有必须先 `dupe`——而当多处共享同一个 `Cache` 实例并发写同一 key 时，`get` 后再 `dupe` 就是读已释放内存。`getOwned` 把拷贝移进**实现自己的临界区**（Memory 的互斥区、Redis/Memcache 的独占借出连接期间）并返回**调用方拥有**的副本（记得 `free`）。vtable 里的 `getOwned` 槽位是**可选**的（默认 `null`，自定义实现不必改），缺省时退化为 `get` + `dupe`。
+
 ---
 
 ## 3. context.Context → 省略 / std.Io
@@ -122,12 +124,14 @@ Go 的所有 SDK 方法都接受 `context.Context`（带超时、取消、trace 
 func (oa *OfficialAccount) GetMenu() (*MenuResponse, error)
 
 // Zig
-pub fn getMenu(self: *Self) !ResMenu {
+pub fn getMenu(self: *Self) !std.json.Parsed(ResMenu) {
     // ...
 }
 ```
 
 如果业务需要超时，由调用方在外层用 `std.Io` 或单独的超时包装器处理。
+（注意 Zig 侧多数返回 JSON 的接口用 `std.json.Parsed(T)` 表达"值 + 其内部 arena"，
+读取字段走 `.value`，用完必须 `.deinit()`。）
 
 ### 3.2 可取消操作：暂时不支持
 
@@ -210,13 +214,20 @@ pub fn main() !void {
         .app_secret = "secret",
         .cache = mem.asCache(),
     };
+    // 先把 token 获取器放进具名变量（`asHandle()` 取 `*DefaultAccessToken`）。
+    var default_token = zwechat.credential.DefaultAccessToken.init(
+        cfg.app_id,
+        cfg.app_secret,
+        zwechat.credential.CacheKeyOfficialAccountPrefix,
+        mem.asCache(),
+    );
     const ctx = zwechat.officialaccount.Context{
         .config = cfg,
-        .access_token_handle = zwechat.credential.DefaultAccessToken
-            .init(cfg.app_id, cfg.app_secret, zwechat.credential.CacheKeyOfficialAccountPrefix, mem.asCache())
-            .asHandle(),
+        .access_token_handle = default_token.asHandle(),
     };
-    const oa = zwechat.officialaccount.OfficialAccount.init(ctx);
+    // `var oa`：`getContext()` / `getMenu()` 都取 `*OfficialAccount`；
+    // 且实例地址派生子模块后不得再移动。
+    var oa = zwechat.officialaccount.OfficialAccount.init(ctx);
 
     const buttons = [_]zwechat.officialaccount.menu.Button{
         zwechat.officialaccount.menu.Button.setClick("今日歌曲", "V1001_TODAY_MUSIC"),
@@ -224,7 +235,7 @@ pub fn main() !void {
     };
     var fbabuf: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&fbabuf);
-    const menu = zwechat.officialaccount.menu.Menu.init(oa.getContext(), fba.allocator());
+    var menu = zwechat.officialaccount.menu.Menu.init(oa.getContext(), fba.allocator());
     try menu.setMenu(&buttons);
 }
 ```
@@ -238,6 +249,23 @@ pub fn main() !void {
 | 内存 | GC | 显式 `defer allocator.destroy(mem)` |
 | context.Context | 第一参数 | 省略 |
 | menu 子模块 | `wc.GetMenu()` | `Menu.init(oa.getContext(), allocator)` |
+
+### 支付回调验签：一个接口，两个入口
+
+Go 版 `pay.GetNotify().VerifySign(...)` 只回真 / 假。Zig 版保留等价布尔入口，并新增一个返回业务字段的详细入口（顶层 re-export，包外可直接 `zwechat.pay.verifyPaidNotifyDetail` 访问）：
+
+```zig
+// 只要「验签是否通过」：
+const ok = try zwechat.pay.verifyPaidNotify(allocator, cfg, xml_body);
+
+// 还要区分失败原因（返回 PaidNotifyResult）：
+const r = try zwechat.pay.verifyPaidNotifyDetail(allocator, cfg, xml_body);
+// r.sign_verified / r.return_code / r.return_msg / r.result_code / r.err_code / r.err_code_des
+```
+
+注意 `PaidNotifyResult` 里的字符串都是 `xml_body` 的**子切片**（不拷贝），`xml_body` 释放后不得再用。`verifyPaidNotify` 就是 `verifyPaidNotifyDetail` 的薄封装。
+
+另外，企业微信客服消息的 `work/kf.Kf` 新增了 `keep_origin_data` 开关（默认 `true`）：置 `false` 可让 `syncMsg` 走直解路径、不再物化原始 JSON 树（`origin_data` 恒为 `null`），换取解析开销与内存减半。默认行为与不设时完全一致。
 
 ---
 
@@ -273,34 +301,41 @@ test "Menu.getMenu 解析响应" {
         .{ .body = "{\"menu\":{\"button\":[{\"name\":\"今日歌曲\"}]}}" },
     );
 
-    var client = zwechat.util.http.HttpClient.init(allocator);
-    defer client.deinit();
-    client.setTransport(zwechat.util.http.MockTransport.dispatch, @ptrCast(&mock));
-
-    // 走 cache 命中 fake token，避免真实 HTTP 拉取 access_token
+    // 走 cache 命中 fake token，避免真实 HTTP 拉取 access_token。
+    // key = "{prefix}_access_token_{app_id}"，而 prefix 本身以 `_` 结尾，
+    // 拼出来是**双下划线**：gowechat_officialaccount__access_token_wx_test。
     var mem = try zwechat.cache.Memory.create(allocator);
     defer {
         mem.deinit();
         allocator.destroy(mem);
     }
-    try mem.asCache().set("gowechat_officialaccount_access_token_wx_test", "fake_tok", 7000);
+    try mem.asCache().set("gowechat_officialaccount__access_token_wx_test", "fake_tok", 7000);
 
     const cfg = zwechat.officialaccount.Config{
         .app_id = "wx_test",
         .app_secret = "sec",
         .cache = mem.asCache(),
     };
-    const ctx = zwechat.officialaccount.Context{
+    var default_token = zwechat.credential.DefaultAccessToken.init(
+        cfg.app_id,
+        cfg.app_secret,
+        zwechat.credential.CacheKeyOfficialAccountPrefix,
+        mem.asCache(),
+    );
+    var ctx = zwechat.officialaccount.Context{
         .config = cfg,
-        .access_token_handle = zwechat.credential.DefaultAccessToken
-            .init(cfg.app_id, cfg.app_secret, zwechat.credential.CacheKeyOfficialAccountPrefix, mem.asCache())
-            .asHandle(),
+        .access_token_handle = default_token.asHandle(),
     };
-    var fba = std.heap.FixedBufferAllocator.init(&[_]u8{} ** 4096);
-    const menu = zwechat.officialaccount.menu.Menu.init(&ctx, fba.allocator());
 
-    const resp = try menu.getMenu();
-    try std.testing.expectEqualStrings("今日歌曲", resp.menu.button[0].name);
+    var fbabuf: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&fbabuf);
+    var menu = zwechat.officialaccount.menu.Menu.init(&ctx, fba.allocator());
+    // transport 注入在 Menu 自身（`Menu.setTransport`），不是另建一个 HttpClient。
+    menu.setTransport(zwechat.util.http.MockTransport.dispatch, @ptrCast(&mock));
+
+    var resp = try menu.getMenu();
+    defer resp.deinit();
+    try std.testing.expectEqualStrings("今日歌曲", resp.value.menu.button[0].name);
 }
 ```
 
@@ -324,10 +359,10 @@ test "Menu.getMenu 解析响应" {
 ## 8. 不兼容项（已知差异）
 
 1. **context.Context**：Zig 版省略；如需取消语义，需调用方自行包装。
-2. **goroutine / channel**：Zig 用 `std.Thread` + `std.atomic` + 自旋锁模拟；无 channel，需要用 MPSC queue 等模式。
+2. **goroutine / channel**：Zig 用 `std.Thread` + `std.atomic` + `std.Io.Mutex`（futex）实现同步；无 channel，需要用 MPSC queue 等模式。
 3. **defer / recover**：Zig 的 `defer` 不支持 recover（无 panic 恢复），需 `try` + `errdefer` 替代。
 4. **reflect / runtime type info**：Zig 有 comptime，但不像 Go 那样支持任意类型的运行时反射；vtable 设计需要预先定义接口。
-5. **RSA 签名**：Zig 0.17 标准库暂无 RSA，需 vendor；Ed25519 已可用。
+5. **RSA 签名**：Zig 标准库仍无 RSA，但 `zwechat` 已**自带纯 Zig 实现**（`util/rsa.zig` / `util/rsa_impl.zig`：RSA-SHA256 PKCS#1 v1.5、PKCS#8/PKCS#1 私钥、RSAES-PKCS1-v1_5 解密），**不需要 vendor 第三方库**；Ed25519 走 `std.crypto.sign.Ed25519`。
 
 ---
 

@@ -18,6 +18,11 @@ pub const RefundParams = @import("refund/mod.zig").RefundParams;
 pub const RefundResult = @import("refund/mod.zig").RefundResult;
 pub const Notify = @import("notify/mod.zig").Notify;
 pub const PaidNotify = @import("notify/mod.zig").PaidNotify;
+// 顶层函数也必须 re-export：包外消费者只能经 `zwechat.pay.*` 访问，
+// 子模块路径（`pay/notify/mod.zig`）不在公开面内、够不着。
+pub const PaidNotifyResult = @import("notify/mod.zig").PaidNotifyResult;
+pub const verifyPaidNotify = @import("notify/mod.zig").verifyPaidNotify;
+pub const verifyPaidNotifyDetail = @import("notify/mod.zig").verifyPaidNotifyDetail;
 pub const Transfer = @import("transfer/mod.zig").Transfer;
 pub const TransferWalletParams = @import("transfer/mod.zig").TransferWalletParams;
 pub const TransferWalletResult = @import("transfer/mod.zig").TransferWalletResult;

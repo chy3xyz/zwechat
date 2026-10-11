@@ -86,12 +86,57 @@ pub fn main() !void {
 }
 ```
 
-### 凭据自动刷洗与 Token 强刷
-当 Token 失效（如微信返回 `40001` / `40014`）时，可调用 `forceRefresh` 手动重新回源拉取：
+### 凭据失效自愈：自动重试 + 手动强刷
+
+SDK 内所有业务调用都经 `util/retry.callApi` 包装：微信返回 **token 失效码**
+（`40001` / `40014` / `41001` / `42001`）时自动走「作废缓存 → 取新 token → **只重试一次**」，
+调用方无需自己写重试；网络错误不重试，非 token 类 errcode 抛 `WechatError.ApiError`。
+
 ```zig
+// 手动强刷：清缓存 + 立即回源（确认凭据已变更、或需要主动轮换时）
 const access_token = try default_token.forceRefresh(allocator);
 defer allocator.free(access_token);
+
+// 只作废不取：让下一次 getAccessToken 必须回源
+try default_token.invalidate(allocator);
 ```
+
+> 自定义 `AccessTokenHandle` / `JsTicketHandle` 若未提供 `invalidate` 钩子，
+> 自愈链路会退化为 `error.InvalidateNotSupported` 并用同一 token 再试一次——详见 [§10](#10-缓存与凭据配置-cache--credential)。
+
+### HTTP 客户端：超时与默认 client 严格模式
+
+`util.http.HttpClient` 自带三层保护，新增 HTTP 调用**不要绕开它**：
+
+| 项 | 默认值 | 说明 |
+|---|---|---|
+| `connect_timeout_ms` | 10s | TCP 建连超时（超时 `error.ConnectTimeout`） |
+| `read_timeout_ms` | 30s | **单次**读超时（超时 `error.ReadTimeout`）；`0` = 不限 |
+| `max_response_bytes` | 16 MiB | 响应体上限（超限 `error.ResponseTooLarge`） |
+
+```zig
+const zwechat = @import("zwechat");
+
+// 启动期一次性进入严格模式（幂等）：之后同一线程再传不同 allocator 调用
+// getDefaultClient 会直接 @panic，让"传错分配器"从静默失效变成立刻可见。
+try zwechat.util.http.initDefaultClient(allocator);
+
+// 自查当前线程默认 client 的 allocator 是否与传入一致
+_ = zwechat.util.http.defaultClientAllocatorMatches(allocator);
+
+// 线程结束前释放默认 client（连接池等资源）
+defer zwechat.util.http.deinitDefaultClient();
+
+// 需要自定义超时（例如对接慢链路）时用 setTimeouts（0 = 不限）：
+//   client.setTimeouts(connect_timeout_ms, read_timeout_ms)
+// 注意：mock/transport 注入路径不套超时（那是由测试驱动的同步调用）。
+```
+
+> `getDefaultClient` 是**线程局部**的：每个线程一份实例，互不影响。
+> 未调用 `initDefaultClient` 的懒初始化路径保持历史宽容语义（首个 allocator 生效）。
+
+> ⚠ **新增 HTTP 调用不要绕开 `HttpClient`**（自己 new `std.http.Client` 会失去上面三层保护，
+> 包括超时与响应体上限）。需要自带头部时走 `HeaderTransport` / `requestWithHeaders`。
 
 > **常见坑**
 > - **工厂绝不能返回指向栈上临时变量的 handle**——函数返回后即悬垂，线上表现为偶发 segfault。用 `create` 在堆上分配或让实例与业务对象同生命周期（见上例）。
@@ -101,7 +146,12 @@ defer allocator.free(access_token);
 
 ## 2. 微信公众号 (OfficialAccount)
 
-> **涉及模块**：`src/officialaccount/`（`menu` / `message` / `user` / `material` / `server` 等）
+> **涉及模块**：`src/officialaccount/` 共 15 个业务子模块 —— `basic` / `broadcast` /
+> `customerservice` / `datacube` / `device` / `draft` / `freepublish` / `js` / `material` /
+> `menu` / `message` / `oauth` / `ocr` / `server` / `user`，经 `OfficialAccount` 的
+> `getXxx()` 工厂懒加载（`getBasic` / `getBroadcast` / `getCustomerService` / `getDataCube` /
+> `getDevice` / `getDraft` / `getFreePublish` / `getJs` / `getMaterial` / `getMenu` /
+> `getMessage` / `getOauth` / `getOcr` / `getServer` / `getUser`）。
 > **API 索引**：`docs/api-reference.md` 第 5 节「officialaccount」
 
 ### URL 签名校验与消息加解密
@@ -222,6 +272,21 @@ const media_id = added.value.media_id; // 借用自 Parsed，切勿 free
 // 返回完整二进制，调用方负责 free
 const img_bytes = try material.getMedia(media_id);
 defer allocator.free(img_bytes);
+
+// 视频素材动辄几十 MB —— 不设上限就等于把服务端内存交给上游。
+// 需要设限时用 getMediaWithLimit / getMediaToFileWithLimit；
+// 模块公开的推荐上限常量（`zwechat.officialaccount.material`）：
+//   max_image_bytes = 10 MiB、max_voice_bytes = 2 MiB、
+//   max_video_bytes = 100 MiB、max_media_bytes = 100 MiB；
+// 也可用 maxBytesFor(PermanentMaterialType) 取该类型的推荐值。
+// 超限会中止并返回 error.ResponseTooLarge。
+const capped = try material.getMediaWithLimit(media_id, 10 * 1024 * 1024);
+defer allocator.free(capped);
+
+// 大文件不要读进内存：流式落盘，返回写入字节数；
+// 超限时中止、**删除不完整文件**并返回 error.ResponseTooLarge（目录需已存在）。
+const written_bytes: u64 = try material.getMediaToFileWithLimit(media_id, "out/video.mp4", 100 * 1024 * 1024);
+_ = written_bytes;
 ```
 
 > **常见坑**
@@ -234,8 +299,13 @@ defer allocator.free(img_bytes);
 
 ## 3. 微信支付 v2/v3 (Pay v2 & v3)
 
-> **涉及模块**：`src/pay/`（v2：`order` / `refund` / `notify` / `transfer` / `redpacket`；v3：`v3/` 含 `config` / `signer` / `order` / `refund` / `transfer` / `notify`）
+> **涉及模块**：`src/pay/`（v2：顶层 `Pay` + `order` / `refund` / `notify` / `transfer` /
+> `redpacket`；v3：`v3/` 含 `config` / `signer` / `order` / `refund` / `transfer` /
+> `notify` / `platform_cert`）
 > **API 索引**：`docs/api-reference.md` 第 6 节「pay」
+>
+> **v2 入口**：`zwechat.pay.Pay.init(cfg)` 后取子模块 —— `getOrder()` / `getRefund()` /
+> `getNotify()` / `getTransfer()` / `getRedpacket()`（`src/pay/pay.zig`）。
 
 ### 微信支付 v3 签名 Header 生成
 ```zig
@@ -261,11 +331,50 @@ defer sign_res.deinit(allocator);
 // Authorization: sign_res.authorization
 ```
 
-### 微信支付 v3 异步通知解密 (AES-256-GCM 纯 Zig 原生)
+### 微信支付 v3 回调：先验签、再解密（**推荐入口**）
+
+⚠️ 只做 AES-256-GCM 解密**不足以**确认回调来源 —— 任何人都能伪造一个密文。
+正式回调必须走 `NotifyVerifier.verifyAndDecrypt`：它先校验四个 `Wechatpay-*` 签名头与
+时间戳窗口（默认 ±300s），用平台证书（或微信支付公钥）做 RSA-SHA256 验签，通过后才解密。
+
+```zig
+const v3 = zwechat.pay.v3;
+
+// verifier 持有平台证书缓存（未命中会自动拉取 /v3/certificates 并缓存、支持轮换重试）
+var verifier = v3.NotifyVerifier.init(allocator, v3_cfg);
+defer verifier.deinit();
+
+// headers 为 HTTP 请求头：Wechatpay-Signature / -Timestamp / -Nonce / -Serial
+var verified = try verifier.verifyAndDecrypt(
+    allocator,
+    v3.NotifyHeaders.fromHeaders(req.headers),
+    body, // 回调**原始** JSON body（未解析）
+);
+defer verified.deinit(allocator);
+
+// verified.body.value.event_type 选结构体；verified.plaintext 是 resource 的业务明文 JSON
+const parsed = try std.json.parseFromSlice(v3.TransferNotifyResource, allocator, verified.plaintext, .{
+    .ignore_unknown_fields = true,
+    .allocate = .alloc_always,
+});
+defer parsed.deinit();
+// REFUND.SUCCESS            → v3.RefundNotifyResource
+// MCHTRANSFER.BILL.FINISHED → v3.TransferNotifyResource
+```
+
+> - 验签失败**不要**给微信回 200（官方要求 4xx/5xx 等待重发）；回调须在 5 秒内应答，业务处理建议异步做。
+> - `NotifyVerifier` **非线程安全**（内部平台证书缓存会被整体替换）：多线程框架下请串行化回调，或每线程各持一个实例。
+> - 微信支付公钥模式（`Wechatpay-Serial` 形如 `PUB_KEY_ID_xxx`）下，把公钥 PEM 赋给
+>   `verifier.wechatpay_public_key_pem`，SDK 直接用它验签、不再拉平台证书。
+
+### 只解密不验签（`decryptNotifyResource`）
+
+仅在**已自行完成验签**、或非回调场景（离线解密自己保存的密文）时使用：
+
 ```zig
 const plain_json = try zwechat.pay.v3.decryptNotifyResource(
     allocator,
-    api_v3_key,           // 32 字节 APIv3 密钥
+    v3_cfg.api_v3_key,    // 32 字节 APIv3 密钥
     resource.ciphertext,  // base64 密文（含末尾 16 字节 Tag）
     resource.associated_data,
     resource.nonce,       // 12 字节向量
@@ -273,13 +382,13 @@ const plain_json = try zwechat.pay.v3.decryptNotifyResource(
 defer allocator.free(plain_json);
 ```
 
-### 微信支付 v3 推荐入口速查（下单 / 退款 / 商家转账 / 通知解密）
+### 微信支付 v3 推荐入口速查（下单 / 退款 / 商家转账）
 
 ```zig
 const zwechat = @import("zwechat");
 const v3 = zwechat.pay.v3;
 
-// 四个入口共用同一份 Config：api_v3_key 用于通知解密，私钥/序列号用于请求签名
+// 各入口共用同一份 Config：api_v3_key 用于通知解密，私钥 / 序列号用于请求签名
 const v3_cfg = v3.Config{
     .app_id = "wx12345",
     .mch_id = "1900000109",
@@ -289,12 +398,30 @@ const v3_cfg = v3.Config{
     .notify_url = "https://merchant.example.com/wxpay/notify",
 };
 
-// ① 下单：拿到 prepay_id 后生成前端拉起支付参数（JSAPI / 小程序）
+// ① 下单：POST /v3/pay/transactions/jsapi（description / out_trade_no / amount / payer 必填）
 var order = v3.OrderV3.init(v3_cfg);
-var pay_params = try order.getJsPayParams(allocator, "wx201411101639507cbf6ffd8b0779950800");
-defer pay_params.deinit(allocator); // time_stamp / nonce_str / package / pay_sign 均为堆内存
+var created = try order.createJsapiOrder(allocator, .{
+    .description = "手机支架",
+    .out_trade_no = "ORDER20260722001",
+    .amount = .{ .total = 100 },                       // 单位：分
+    .payer = .{ .openid = "o-MYE42l80oelYMDE34nYD456Xoy" },
+    // notify_url 留空则回落到 v3_cfg.notify_url（两者都空返回 InvalidArgument）
+});
+defer created.deinit();
+const prepay_id = created.value.prepay_id; // 借用自 Parsed，切勿 free
 
-// ② 退款（transaction_id 与 out_trade_no 二选一）
+// ② 生成前端拉起支付参数（JSAPI / 小程序）：
+//    time_stamp / nonce_str / package / pay_sign 均为堆内存
+var pay_params = try order.getJsPayParams(allocator, prepay_id);
+defer pay_params.deinit(allocator);
+
+// 关单（成功应答为 204 No Content）
+// try order.closeOrder(allocator, "ORDER20260722001");
+// 查单（只能按商户订单号查）
+// var q1 = try order.queryOrderByOutTradeNo(allocator, "ORDER20260722001");
+// defer q1.deinit();
+
+// ③ 退款（transaction_id 与 out_trade_no 二选一）
 var refund = v3.RefundV3.init(v3_cfg);
 var refund_res = try refund.refund(allocator, .{
     .transaction_id = "4200000119202504081234567890",
@@ -305,7 +432,7 @@ var refund_res = try refund.refund(allocator, .{
 defer refund_res.deinit();
 // var queried = try refund.queryRefund(allocator, "R20260722001");
 
-// ③ 商家转账（新版商家转账；不做已升级停用的「商家转账到零钱」）
+// ④ 商家转账（新版商家转账；不做已升级停用的「商家转账到零钱」）
 var transfer = v3.TransferV3.init(v3_cfg);
 var bill = try transfer.transfer(allocator, .{
     .out_bill_no = "plfk2020042013",        // 仅数字/大小写字母，商户内唯一
@@ -324,26 +451,11 @@ if (std.mem.eql(u8, bill.value.state, "WAIT_USER_CONFIRM")) {
 }
 // var q = try transfer.queryTransfer(allocator, "plfk2020042013");
 // var c = try transfer.cancelTransfer(allocator, "plfk2020042013");
-
-// ④ 通知解密：支付 / 退款 / 商家转账回调共用同一套 AES-256-GCM 解密
-const plain = try v3.decryptNotifyResource(
-    allocator,
-    v3_cfg.api_v3_key,
-    notify_body.resource.ciphertext,
-    notify_body.resource.associated_data,
-    notify_body.resource.nonce,
-);
-defer allocator.free(plain);
-
-// 解密后的 JSON 按 event_type 选结构体：
-//   REFUND.SUCCESS            → v3.RefundNotifyResource
-//   MCHTRANSFER.BILL.FINISHED → v3.TransferNotifyResource
-const parsed = try std.json.parseFromSlice(v3.TransferNotifyResource, allocator, plain, .{
-    .ignore_unknown_fields = true,
-    .allocate = .alloc_always,
-});
-defer parsed.deinit();
 ```
+
+> 回调请走上文「先验签、再解密」的 `NotifyVerifier.verifyAndDecrypt`，解密后的明文按
+> `event_type` 解析（`REFUND.SUCCESS` → `v3.RefundNotifyResource`，
+> `MCHTRANSFER.BILL.FINISHED` → `v3.TransferNotifyResource`）。
 
 > **常见坑**：
 > - v3 signer 在 `private_key_pem` 为空时返回 `error.MissingPrivateKey`（不会静默生成伪签名）；v3 通知解密是 AES-256-GCM，与 v2 的 AES-256-CBC + PKCS#7 完全不同，不要混用。
@@ -384,7 +496,10 @@ error.MtlsNotEnabled
 
 ## 4. 企业微信 (Work)
 
-> **涉及模块**：`src/work/`（`message` / `addresslist` / `externalcontact` / `kf` / `jsapi` / `server` 等）
+> **涉及模块**：`src/work/` 共 15 个子目录 = `context` 基础设施 + **14 个业务子模块** ——
+> `oauth` / `jsapi` / `message` / `material` / `msgaudit` / `checkin` / `kf` /
+> `externalcontact` / `invoice` / `addresslist` / `appchat` / `robot` / `server` / `smartbot`，
+> 经 `Work` 的 `getXxx(allocator)` 工厂懒加载（`getJs()` / `getServer()` 不接 allocator）。
 > **API 索引**：`docs/api-reference.md` 第 9 节「work」
 
 ### 实例化与地址稳定性
@@ -506,15 +621,17 @@ std.debug.print("Agent 签名: {s}\n", .{agent_cfg.signature});
 ```zig
 const work_server = zwechat.work.WorkServer.init(work_inst.getContext());
 
-// 1. 签名校验
-const ok = work_server.verifyMsgSignature(allocator, encrypted_msg_body, .{
+// encrypt_b64 = 回调 XML 中 <Encrypt> 节点的 base64 内容（不是整段 XML！）
+// 回调 query 提供 msg_signature / timestamp / nonce
+// 1. 签名校验（token 取自 Config.token；token 为空返回 false）
+const ok = work_server.verifyMsgSignature(allocator, encrypt_b64, .{
     .msg_signature = msg_signature_str,
     .timestamp = timestamp_str,
     .nonce = nonce_str,
 });
 
-// 2. 解密并自动校验 CorpID (ReceiveID)
-var dec_msg = try work_server.decryptMsg(allocator, encrypted_xml_body);
+// 2. 解密并自动校验 CorpID (ReceiveID)；encoding_aes_key 为 43 字符 base64，内部自动解码
+var dec_msg = try work_server.decryptMsg(allocator, encrypt_b64);
 defer {
     allocator.free(dec_msg.random);
     allocator.free(dec_msg.raw_xml_msg);
@@ -532,7 +649,12 @@ defer {
 
 ## 5. 小程序 (MiniProgram)
 
-> **涉及模块**：`src/miniprogram/`（`auth` / `subscribe` / `security` / `urlscheme` / `urllink` / `qrcode` 等）
+> **涉及模块**：`src/miniprogram/` 共 **25 个子目录** = `config` / `context` 两个基础设施目录
+> + **23 个业务子模块** —— `auth` / `qrcode` / `urlscheme` / `message` / `security` /
+> `shortlink` / `encryptor` / `werun` / `urllink` / `riskcontrol` / `redpacketcover` /
+> `privacy` / `content` / `business` / `order` / `ocr` / `subscribe` / `analysis` /
+> `operation` / `tcb` / `express` / `minidrama` / `virtualpayment`，
+> 各对应一个同名的 `MiniProgram.getXxx()` 懒加载工厂。
 > **API 索引**：`docs/api-reference.md` 第 7 节「miniprogram」
 
 ### 登录链路：code2Session → getPhoneNumber
@@ -629,6 +751,43 @@ const png_bytes = try qrcode.getUnlimited("scene_id_123", "pages/index/index", 4
 defer allocator.free(png_bytes);
 ```
 
+### 虚拟支付（`virtualpayment`）
+
+```zig
+var vp = mp.getVirtualPayment();
+vp.setSessionKey(sess.value.session_key); // 服务端签名需要登录态 session_key
+
+// 余额 / 扣费（env 是数字：0 正式、1 沙箱）
+var bal = try vp.queryUserBalance(.{ .openid = openid, .env = .production });
+defer bal.deinit();
+
+var paid = try vp.currencyPay(.{
+    .openid = openid,
+    .env = .production,
+    .amount = 100,
+    .order_id = "T20260722001",
+    .payitem = "coin_100",
+});
+defer paid.deinit();
+
+// 其余分组：下单（queryOrder / notifyProvideGoods / presentCurrency / downloadBill / refundOrder）、
+// 提现（createWithdrawOrder / queryWithdrawOrder）、广告金（queryBizBalance / queryAdverFunds /
+// createFundsBill / queryFundsBill / queryRecoverBill …）、商品（startUploadGoods /
+// queryUploadGoods / startPublishGoods / queryPublishGoods）、下载（startDownloadOrder /
+// queryDownloadOrder）、投诉（getComplaintList / getComplaintDetail / getNegotiationHistory /
+// responseComplaint / completeComplaint）、上传与签名（uploadVPFile / getUploadFileSign）
+```
+
+> ⚠️ 本模块的请求 / 响应字段以**微信官方「小程序虚拟支付」文档**为准（与 Go 参考冲突处一律以官方为准）。
+> 几个容易踩的改名 / 陷阱：
+> - 投诉列表分页字段是 `offset` / `limit`（旧名 `page` / `page_size`）；两者**必填**，`offset=0` 也会写出请求体。
+> - 列表字段是 `complaints`（旧名 `complaint_list`），元素类型 `ComplaintItem`（旧名 `ComplaintInfo`）。
+> - 投诉单的 `complaint_time` / `complaint_state` 是**字符串**（旧实现的 `create_time` / `state` 是时间戳 / 整数）。
+> - `getComplaintDetail` 的详情在 `.complaint` 对象里，不在顶层。
+> - `GetUploadFileSignRequest.file_id` 已删除，改用 `wxpay_url` / `convert_cos` / `complaint_id`，应答字段为 `cos_url`。
+>
+> 完整方法 / 字段清单见 `docs/api-reference.md` 第 7 节。
+
 > **常见坑**
 > - **`MiniProgram` 地址稳定性**：与 Work 相同，`getAuth()` / `getSubscribe()` 等工厂持有 `&mp.ctx`，**禁止按值拷贝 / 移动 `MiniProgram`**（包括从函数按值返回后再取地址）。需要传递时用 `*MiniProgram`。
 > - **camelCase 响应字段**：`phone_info` 内是微信原始 key——`phoneNumber` / `purePhoneNumber` / `countryCode`（Zig 字段名逐字一致），不是 snake_case。
@@ -668,13 +827,18 @@ defer allocator.free(json_str);
 // {"first":{"value":"订单支付成功"},"trade_no":{"value":"202607221938001"},"amount":{"value":"88.00元"},"remark":{"value":"如有疑问请联系客服"}}
 ```
 
+> **限制**：生成器按字段顺序平铺输出，**只支持顶层字段**——字段类型限字符串切片 / 字符串数组 / 整型 / 浮点 / 布尔；
+> 嵌套结构体、以及微信模板要求的 `color` 子字段都不支持（传了会在编译期 `@compileError`）。
+
 ---
 
 ## 7. Web 框架中间件适配 (Middleware)
 
-> **涉及模块**：`src/middleware/` ｜ **API 索引**：`docs/api-reference.md` 第 2 节起各业务「server」小节
+> **涉及模块**：`src/middleware/` ｜ **API 索引**：`docs/api-reference.md` 第 12 节「middleware」
 
-支持无缝接入 `zfinal` / `zigmodu` / `zap` / `httpz` 路由框架。
+本模块不绑定任何框架：只要能从 HTTP 请求里拿到 **raw query string** 与请求头即可接入，
+已按 `zfinal` / `zigmodu` 等框架的常见形态封装（`parseCallbackQuery` / `verifyURL` /
+`verifyServerSignature` / `handleServerMessage`）。
 
 ```zig
 pub fn handleWeChatCallback(req: *zfinal.Request, res: *zfinal.Response) !void {
@@ -694,17 +858,26 @@ pub fn handleWeChatCallback(req: *zfinal.Request, res: *zfinal.Response) !void {
 
 ## 8. 内存管理与最佳实践 (Memory Management)
 
-1. **堆分配返回值处理**：SDK 中绝大多数返回切片的方法（如 `getAccessToken`, `signSHA1`, `decryptNotifyResource`）均在传入的 `allocator` 上分配内存，必须配对使用 `defer allocator.free(...)`。
-2. **结构体资源释放**：返回 `Config` / `JsapiPayParams` / `DecryptedMessage` / `AuthBaseInfo` / `AuthrAccessToken` 等复杂结构体时，使用对应的 `defer obj.deinit(allocator)` 释放其内部堆字段。
+1. **堆分配返回值处理**：SDK 中绝大多数返回切片的方法（如 `getAccessToken`, `signSHA1`, `decryptNotifyResource`, `msgSecCheck`）均在传入的 `allocator` 上分配内存，必须配对使用 `defer allocator.free(...)`。
+2. **结构体资源释放**：返回 `SignResult` / `JsapiPayParams` / `Config`（`work.jsapi` 与 `middleware` 各有一个）/ `DecryptedMessage`（`util.crypto` 与 `middleware` 各有一个）/ `AuthBaseInfo` / `AuthrAccessToken` / `VerifiedNotify` 等复杂结构体时，使用对应的 `defer obj.deinit(allocator)` 释放其内部堆字段。
 3. **`std.json.Parsed` 只 deinit、不逐字段 free**：`parsed.value` 内全部切片借用自所有权域，读完 `defer parsed.deinit()` 即可；逐字段 `free` 会 double free。
 4. **借用切片及时 dupe**：`Cache.get` 返回借用切片（Redis / Memcache 后端任何后续 `get` 即失效），跨写 / 跨迭代持有必须 `allocator.dupe` 后再用。
-5. **单元测试验证**：推荐在你的程序中使用 `std.testing.allocator`，它能帮助你在单元测试阶段发现 100% 的内存泄漏与双重释放问题。
+5. **`create` 出来的对象要配 `deinit` + `destroy`**：`cache.Memory/Redis/Memcache.create`、`Work.newDefaultWork`（`wc.getWork`）
+   都会分配一个 box，释放形态是 `obj.deinit(); allocator.destroy(obj);`（`Work` 则用 `work.deinit(allocator)`）；
+   `HttpClient.init` 走值语义、只需 `client.deinit()`。
+6. **线程安全**：`NotifyVerifier` / `PlatformCertStore` **非线程安全**（回调里请串行化或每线程一个实例）；
+   `HttpClient` 的默认 client 是**线程局部**的；`credential` 各获取器内部有锁，可跨线程共享。
+7. **单元测试验证**：推荐在你的程序中使用 `std.testing.allocator`，它能帮助你在单元测试阶段发现 100% 的内存泄漏与双重释放问题。
 
 ---
 
 ## 9. 开放平台第三方平台授权流程 (OpenPlatform)
 
-> **涉及模块**：`src/openplatform/`（`context`（含 `access_token` / `auth`）/ `account` / `miniprogram`（component））
+> **涉及模块**：`src/openplatform/`（`context`（含 `access_token.zig` / `auth.zig`）/ `account` /
+> `miniprogram`（`component.zig` / `basic.zig`）/ `officialaccount`）
+>
+> 顶层 `OpenPlatform` 的工厂：`getContext()` / `getAccountManager(allocator)` /
+> `getMiniProgram(app_id)`（代小程序）/ `getOfficialAccount(app_id)`（代公众号，骨架）。
 > **API 索引**：`docs/api-reference.md` 第 8 节「openplatform」
 
 第三方平台（代公众号 / 小程序运营）的授权链路是全套 SDK 中最容易踩坑的部分，完整时序如下：
@@ -838,7 +1011,8 @@ try account.unbind(info.appid, open_appid, authr_token);
 
 ## 10. 缓存与凭据配置 (Cache & Credential)
 
-> **涉及模块**：`src/cache/`（`Memory` / `Redis` / `Memcache`）、`src/credential/`（`DefaultAccessToken` / `DefaultJsTicket` / `WorkAccessToken` / `WorkJsTicket`）
+> **涉及模块**：`src/cache/`（`Memory` / `Redis` / `Memcache`）、`src/credential/`
+> （`DefaultAccessToken` / `DefaultJsTicket` / `WorkAccessToken` / `WorkJsTicket` / `tokenTTL` / `Fetcher`）
 > **API 索引**：`docs/api-reference.md` 第 2 节「cache」、第 3 节「credential」
 
 ### 切换 Redis / Memcache 后端
@@ -848,21 +1022,29 @@ try account.unbind(info.appid, open_appid, authr_token);
 ```zig
 const zwechat = @import("zwechat");
 
-// Redis（RESP 协议，单连接 + SpinMutex 串行化整个请求-响应往返）
+// Redis（RESP 协议；默认单连接，由 std.Io.Mutex 串行化整个请求-响应往返）
 const redis = try zwechat.cache.Redis.create(allocator, .{
     .host = "127.0.0.1",
     .port = 6379,
     .password = null, // 或 "your-password"
     .db = 0,
+    .max_connections = 4,        // 默认 1（历史单连接语义）；>1 即连接池
+    .pool_timeout_ms = 30_000,   // 池满时的等待上限，超时 error.PoolTimeout
+    .recv_timeout_ms = 5_000,    // 单次读超时（默认 0 = 不超时）
+    .connect_timeout_ms = 3_000, // 建连超时（默认 0 = 不超时，仅 POSIX 生效）
 });
 defer {
     redis.deinit();
     allocator.destroy(redis);
 }
+// 运行观测：live / idle / in_use / peak_in_use / created / discarded / timeouts
+const stats = redis.poolStats();
 
-// Memcache（文本协议）
+// Memcache（文本协议，单连接由 std.Io.Mutex 串行化整个往返）
 const memcache = try zwechat.cache.Memcache.create(allocator, .{
-    .server = "127.0.0.1:11211",
+    .server = "127.0.0.1:11211", // host 可为 IPv4 / [IPv6] / 域名
+    // .recv_timeout_ms = 5_000,
+    // .connect_timeout_ms = 3_000,
 });
 defer {
     memcache.deinit();
@@ -874,7 +1056,9 @@ var wc = zwechat.wechat.Wechat.init();
 wc.setCache(redis.asCache());
 ```
 
-### credential：自定义 Fetcher 与 forceRefresh
+> 超时后连接一律**丢弃不进池**（半条回复留在连接上会让后续请求协议失步）。
+
+### credential：invalidate / 自定义 Fetcher / forceRefresh
 
 默认 `DefaultAccessToken` 走内置 HTTP 客户端回源；需要走自有 HTTP 栈（代理、mock、可观测性）时注入 `Fetcher`：
 
@@ -901,20 +1085,27 @@ var dat = zwechat.credential.DefaultAccessToken.initWithFetcher(
 const token = try dat.getAccessToken(allocator); // 缓存 miss 时经 fetcher 回源并双检回写
 defer allocator.free(token);
 
-// Token 被判定无效（40001/40014 等）后手动强刷：清缓存 + 立即回源
+// 作废：删缓存条目，使下一次 getAccessToken 必须回源（token 失效码的恢复第一步）
+try dat.invalidate(allocator);
+// 强刷：作废 + 立即回源（等价 invalidate + getAccessToken）
 const fresh = try dat.forceRefresh(allocator);
 defer allocator.free(fresh);
 ```
 
+> 各业务模块的内部调用都已走 `util.retry.callApi`：识别到 token 失效码后**自动**作废并重试一次，
+> 多数场景不需要手工调用 `invalidate` / `forceRefresh`（见第 1 章「凭据失效自愈」）。
+
 ### 多实例部署注意事项
 
-1. **必须共享缓存**：credential 四个获取器（公众号 / 小程序 / 企微 / 企微 js_ticket）都是「缓存 miss → 锁内双检 → 回源 → 回写」；共享 Redis 后，N 个实例只有一个真正回源。
-2. **credential 回源锁不跨 HTTP**（singleflight 式取舍）：锁只护缓存读 / 写，HTTP 回源在锁外，极端并发下接受 N 个幂等回源，避免 N-1 个线程持自旋锁空转烧 CPU。微信对 access_token 回源有频率宽容，此取舍安全。
+1. **必须共享缓存**：credential 四个获取器（公众号 / 小程序 / 企微 access_token / 企微 js_ticket）都是「缓存 miss → 锁内双检 → 回源 → 回写」；共享 Redis 后，N 个实例只有一个真正回源，且 Redis 连接池（`.max_connections`）不会让吞吐被 1/RTT 卡住。
+2. **credential 回源锁不跨 HTTP**（singleflight 式取舍）：锁只护缓存读 / 写，HTTP 回源在锁外，极端并发下接受 N 个幂等回源——锁是 `std.Io.Mutex`（真阻塞 futex），等待者会睡眠而不是空转烧 CPU。微信对 access_token 回源有频率宽容，此取舍安全。
 3. **openplatform token 链路例外**：authorizer 刷新持锁跨 HTTP（见第 9 章），因为 refresh_token 轮换丢失不可逆。
 4. **TTL 钳制**：`credential.tokenTTL(expires_in)` = `expires_in -| 1500`，下限 1 秒——既不会把短寿命 token 缓存成永不过期，也不会因异常 `expires_in` 整数溢出。
 5. **借用切片**：`Cache.get` 返回借用切片，有效期至该实例任何后续写操作 / deinit（Redis / Memcache 后端任何后续 `get` 即失效）；跨写持有必须先 `dupe`。
+6. **失效自愈钩子是可选的**：`AccessTokenHandle.VTable.invalidate` / `JsTicketHandle.VTable.invalidate` 默认 `null`；自定义 handle 未实现时 `invalidateAccessToken` 返回 `error.InvalidateNotSupported`，`callApi` 会退化为用同一 token 再试一次。
 
 > **常见坑**
 > - 不要把凭据缓存 key 前缀当配置项改来改去——前缀与 Go 版对齐（`gowechat_officialaccount_` 等），已有线上缓存数据依赖同一前缀。
-> - `DefaultAccessToken` 里的 `SpinMutex` 不适合长临界区：不要在持锁回调里做慢操作，`Fetcher` 内部应保持轻量。
+> - credential 内部锁的临界区只做缓存**双检**读 / 写；`Fetcher` 是在锁外调用的，但仍应保持轻量（它决定回源延迟）。
 > - `Memory` 缓存是**进程内**的：进程重启后所有 token 重新回源一次属正常现象，不要在启动路径上并发打满微信接口。
+> - `Redis.Options` / `Memcache.Options` 的 `recv_timeout_ms` / `connect_timeout_ms` **默认都是 `0`（不超时）**，与 `util.http.HttpClient` 默认 10s / 30s 的策略不同；对端黑洞时请显式设置，否则线程会被占住。

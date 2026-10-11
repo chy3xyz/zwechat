@@ -188,6 +188,8 @@ pub const Order = struct {
         defer client.deinit();
         if (self.transport) |t| client.setTransport(t, self.transport_ctx);
         const body = try client.postXML("https://api.mch.weixin.qq.com/pay/unifiedorder", xml_body);
+        // 解析失败时 `body` 的所有权尚未转移给返回值，必须在此释放（否则畸形响应泄漏）。
+        errdefer allocator.free(body);
 
         var doc = try util_xml.parse(allocator, body);
         defer doc.deinit();
@@ -239,6 +241,7 @@ pub const Order = struct {
         defer client.deinit();
         if (self.transport) |t| client.setTransport(t, self.transport_ctx);
         const body = try client.postXML("https://api.mch.weixin.qq.com/pay/orderquery", xml_body);
+        errdefer allocator.free(body);
 
         var doc = try util_xml.parse(allocator, body);
         defer doc.deinit();
@@ -285,6 +288,7 @@ pub const Order = struct {
         defer client.deinit();
         if (self.transport) |t| client.setTransport(t, self.transport_ctx);
         const body = try client.postXML("https://api.mch.weixin.qq.com/pay/closeorder", xml_body);
+        errdefer allocator.free(body);
 
         var doc = try util_xml.parse(allocator, body);
         defer doc.deinit();
@@ -930,4 +934,26 @@ test "closeOrder 真实请求：POST /pay/closeorder、body 字段与响应解�
     try std.testing.expectEqualStrings("FAIL", result.result_code);
     try std.testing.expectEqualStrings("ORDERCLOSED", result.err_code);
     try std.testing.expectEqualStrings("订单已关闭", result.err_code_des);
+}
+
+test "prePayOrder / queryOrder / closeOrder 畸形 XML 响应返回 MalformedXml" {
+    const allocator = std.testing.allocator;
+    // 上游返回的不是 XML（网关错误页 / 被截断的响应）：`util_xml.parse` 抛 MalformedXml。
+    var cap = RequestCaptureTransport{ .allocator = allocator, .response = "{" };
+    defer cap.deinit();
+
+    var o = Order.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "test_key" });
+    o.setTransport(RequestCaptureTransport.dispatch, &cap);
+
+    try std.testing.expectError(error.MalformedXml, o.prePayOrder(allocator, .{
+        .total_fee = "100",
+        .create_ip = "127.0.0.1",
+        .body = "test",
+        .out_trade_no = "t-bad-xml",
+        .open_id = "ox",
+        .trade_type = "JSAPI",
+        .notify_url = "https://example.com/cb",
+    }));
+    try std.testing.expectError(error.MalformedXml, o.queryOrder(allocator, "t-bad-xml"));
+    try std.testing.expectError(error.MalformedXml, o.closeOrder(allocator, "t-bad-xml"));
 }

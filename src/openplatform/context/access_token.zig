@@ -68,7 +68,7 @@ fn postJSON(
 ) Error![]u8 {
     if (ctx.transport) |t| {
         const tctx = ctx.transport_ctx orelse
-            @panic("Context.transport 已设置但 transport_ctx 为空：请同时传入两者");
+            return util_error.WechatError.TransportMisconfigured;
         var client = util_http.HttpClient.init(allocator);
         defer client.deinit();
         client.setTransport(t, tctx);
@@ -187,6 +187,27 @@ const RecordingTransport = struct {
         return allocator.dupe(u8, self.response);
     }
 };
+
+test "只设 transport 不设 transport_ctx 时返回 TransportMisconfigured（不再 abort 进程）" {
+    const allocator = std.testing.allocator;
+
+    const memory = try @import("../../cache/memory.zig").Memory.create(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-op", .app_secret = "sec", .cache = memory.asCache() },
+        .transport = RecordingTransport.dispatch,
+        .transport_ctx = null,
+    };
+
+    try std.testing.expectError(
+        error.TransportMisconfigured,
+        getComponentAccessToken(&ctx, allocator, "verify-ticket"),
+    );
+}
 
 test "getComponentAccessToken：verify_ticket 含引号/换行时请求体仍是合法 JSON 且值原样回传" {
     const allocator = std.testing.allocator;
@@ -635,4 +656,38 @@ test "getCachedComponentAccessToken 命中 / 未命中 / 空值三条路径，�
 
     // 全程零 HTTP。
     try std.testing.expectEqual(@as(usize, 0), mock.history.items.len);
+}
+
+test "getComponentAccessToken / refreshAuthrAccessToken 畸形 JSON 返回 DecodeError" {
+    const allocator = std.testing.allocator;
+
+    const memory = try @import("../../cache/memory.zig").Memory.create(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+
+    // 上游返回截断 JSON（不是错误码 JSON，故 `check` 类逻辑不会先命中 ApiError）。
+    var rec = RecordingTransport{ .allocator = allocator, .response = "{" };
+    defer rec.deinit();
+
+    var ctx: Context = .{
+        .config = .{ .app_id = "wx-op", .app_secret = "sec", .cache = memory.asCache() },
+        .transport = RecordingTransport.dispatch,
+        .transport_ctx = @ptrCast(&rec),
+    };
+
+    try std.testing.expectError(
+        util_error.WechatError.DecodeError,
+        getComponentAccessToken(&ctx, allocator, "verify-ticket"),
+    );
+
+    // authorizer 刷新路径：先预置 component token 缓存，让 `getCachedComponentAccessToken`
+    // 命中（不再触网取 component token），随后 refresh 接口同样返回畸形 JSON。
+    const ckey = try allocator.print("openplatform_component_access_token_{s}", .{"wx-op"});
+    defer allocator.free(ckey);
+    try memory.asCache().set(ckey, "comp-tok", 7000);
+
+    const refreshed = refreshAuthrAccessToken(&ctx, allocator, "", "wx-mp-1", "refresh-tok");
+    try std.testing.expectError(util_error.WechatError.DecodeError, refreshed);
 }

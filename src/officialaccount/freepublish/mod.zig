@@ -93,10 +93,33 @@ pub const FreePublish = struct {
         return util_retry.callApi(self.ctx, self.allocator, "FreePublishSubmit", Req{ .media_id = media_id });
     }
 
-    /// 撤回发布。
+    /// 撤回发布：删除该图文消息中的**全部**文章。
+    ///
+    /// 对应官方 `freepublish/delete` 不传 `index` 的用法，请求体为
+    /// `{"article_id":"..."}`（与旧版字节完全一致）。要删指定一篇请用
+    /// `deleteWithIndex`。
     pub fn delete(self: *Self, article_id: []const u8) !void {
+        return self.deleteImpl(article_id, null);
+    }
+
+    /// 删除已发布图文消息中指定位置的一篇（官方 `index` 参数）。
+    ///
+    /// `index` 是文章在图文消息中的位置，**第一篇编号为 1**。官方语义是
+    /// 「该字段不填或填 0 会删除全部文章」——删全部请直接用 `delete`（不写该键），
+    /// 本方法按调用方给的值原样写出 `index`。
+    ///
+    /// Zig 0.17 的函数参数不支持默认值（`= null` 只在结构体字段上合法），
+    /// 因此「可选 index」以独立入口的形式提供：既有 `delete(article_id)`
+    /// 调用点与签名都不受影响。
+    pub fn deleteWithIndex(self: *Self, article_id: []const u8, index: i64) !void {
+        return self.deleteImpl(article_id, index);
+    }
+
+    /// `delete` / `deleteWithIndex` 的共同实现：`index` 为 `null` 时不写该键。
+    fn deleteImpl(self: *Self, article_id: []const u8, index: ?i64) !void {
         const Req = struct {
             article_id: []const u8,
+            index: ?i64,
 
             pub fn send(c: @This(), a: std.mem.Allocator, token: []const u8) anyerror![]u8 {
                 const uri = try a.print(
@@ -105,7 +128,7 @@ pub const FreePublish = struct {
                 );
                 defer a.free(uri);
 
-                const body = try util_json.stringFieldObject(a, "article_id", c.article_id);
+                const body = try buildDeleteBody(a, c.article_id, c.index);
                 defer a.free(body);
 
                 const client = util_http.getDefaultClient(a);
@@ -113,7 +136,10 @@ pub const FreePublish = struct {
             }
         };
 
-        const resp = try util_retry.callApi(self.ctx, self.allocator, "FreePublishDelete", Req{ .article_id = article_id });
+        const resp = try util_retry.callApi(self.ctx, self.allocator, "FreePublishDelete", Req{
+            .article_id = article_id,
+            .index = index,
+        });
         self.allocator.free(resp);
     }
 
@@ -150,8 +176,11 @@ pub const FreePublish = struct {
 
     /// 获取成功发布列表。
     ///
-    /// `count_n` 为返回数量，`no_content` 为 true 时不返回正文内容
-    /// （微信侧为布尔字段，与 Go 参考一致）。
+    /// `count_n` 为返回数量，`no_content` 为 true 时不返回正文内容。
+    ///
+    /// 官方契约（`freepublish_batchget`）里 `no_content` 是 **number** 而不是布尔：
+    /// `1` = 不返回 content，`0` = 正常返回，默认 `0`。对外保留 `bool`，序列化时
+    /// 转成 `0`/`1`（Go 参考此处发 `true`/`false`，是错的）。
     ///
     /// 返回微信原始响应字节，由本结构体的 allocator 分配，**调用方负责 `free`**。
     pub fn list(self: *Self, offset: i64, count_n: i64, no_content: bool) ![]u8 {
@@ -168,8 +197,8 @@ pub const FreePublish = struct {
                 defer a.free(uri);
 
                 const body = try a.print(
-                    "{{\"offset\":{d},\"count\":{d},\"no_content\":{}}}",
-                    .{ c.offset, c.count_n, c.no_content },
+                    "{{\"offset\":{d},\"count\":{d},\"no_content\":{d}}}",
+                    .{ c.offset, c.count_n, @intFromBool(c.no_content) },
                 );
                 defer a.free(body);
 
@@ -185,6 +214,31 @@ pub const FreePublish = struct {
         });
     }
 };
+
+/// 组装 `freepublish/delete` 请求体：`{"article_id":"..."}`，`index` 非 null 时
+/// 追加 `,"index":N`（官方语义：不填或填 0 = 删除全部文章）。纯函数，便于单测。
+///
+/// `article_id` 按 JSON 字符串规则转义：此前用 `stringFieldObject` 已如此，
+/// 这里换手写拼接必须保持同样的转义（裸插值会拼出非法 JSON）。
+fn buildDeleteBody(
+    allocator: std.mem.Allocator,
+    article_id: []const u8,
+    index: ?i64,
+) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "{\"article_id\":\"");
+    try util_json.appendEscapedString(allocator, &buf, article_id);
+    try buf.append(allocator, '"');
+    if (index) |idx| {
+        try buf.appendSlice(allocator, ",\"index\":");
+        var num_buf: [24]u8 = undefined;
+        const num = std.mem.print(&num_buf, "{d}", .{idx}) catch unreachable;
+        try buf.appendSlice(allocator, num);
+    }
+    try buf.append(allocator, '}');
+    return buf.toOwnedSlice(allocator);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 测试辅助：与 draft/mod.zig 同款的假 AccessTokenHandle + capture transport。
@@ -288,7 +342,7 @@ test "PublishStatus 枚举值与 Go 参考一致" {
     try std.testing.expectEqual(@as(i32, 6), @backingInt(PublishStatus.system_banned));
 }
 
-test "FreePublish.list 走 batchget 端点且 no_content 序列化为布尔" {
+test "FreePublish.list 走 batchget 端点且 no_content=true 序列化为数字 1" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -306,8 +360,25 @@ test "FreePublish.list 走 batchget 端点且 no_content 序列化为布尔" {
         "https://api.weixin.qq.com/cgi-bin/freepublish/batchget?access_token=stub-ak",
         cap.uri,
     );
-    try std.testing.expectEqualStrings("{\"offset\":0,\"count\":10,\"no_content\":true}", cap.payload);
+    try std.testing.expectEqualStrings("{\"offset\":0,\"count\":10,\"no_content\":1}", cap.payload);
     try std.testing.expect(std.mem.find(u8, resp, "\"total_count\":1") != null);
+}
+
+test "FreePublish.list no_content=false 序列化为数字 0（不发 JSON 布尔）" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{ .allocator = alloc, .response = "{\"total_count\":0,\"item_count\":0,\"item\":[]}" };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var fp = FreePublish.init(&ctx, alloc);
+
+    _ = try fp.list(20, 5, false);
+    try std.testing.expectEqualStrings("{\"offset\":20,\"count\":5,\"no_content\":0}", cap.payload);
 }
 
 test "FreePublish.selectStatus 解析发布状态" {
@@ -355,6 +426,76 @@ test "FreePublish.delete errcode 非 0 返回 ApiError" {
     var fp = FreePublish.init(&ctx, alloc);
 
     try std.testing.expectError(util_error.WechatError.ApiError, fp.delete("AID"));
+}
+
+test "FreePublish.deleteWithIndex 带 index 时请求体写入 index（第一篇编号为 1）" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{ .allocator = alloc, .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var fp = FreePublish.init(&ctx, alloc);
+
+    try fp.deleteWithIndex("ARTICLE_ID", 2);
+    try std.testing.expectEqualStrings(
+        "https://api.weixin.qq.com/cgi-bin/freepublish/delete?access_token=stub-ak",
+        cap.uri,
+    );
+    try std.testing.expectEqualStrings("{\"article_id\":\"ARTICLE_ID\",\"index\":2}", cap.payload);
+
+    // 请求体必须是合法 JSON，且 index 是 number（不是字符串 "2"）。
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, cap.payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(i64, 2), parsed.value.object.get("index").?.integer);
+}
+
+test "FreePublish.delete 不带 index 时不写该键（官方语义 = 删除全部）" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{ .allocator = alloc, .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var fp = FreePublish.init(&ctx, alloc);
+
+    // 与旧用法逐字一致：既有调用点无需改动。
+    try fp.delete("ARTICLE_ID");
+    try std.testing.expectEqualStrings("{\"article_id\":\"ARTICLE_ID\"}", cap.payload);
+    try std.testing.expect(std.mem.find(u8, cap.payload, "index") == null);
+}
+
+test "FreePublish.deleteWithIndex article_id 含引号/控制字符时产出合法 JSON" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var cap = TestCapture{ .allocator = alloc, .response = "{\"errcode\":0,\"errmsg\":\"ok\"}" };
+    setupTestClient(alloc, &cap);
+    defer releaseTestClient();
+
+    var state = TestTokenState{ .token = "stub-ak" };
+    var ctx = Context{ .config = .{}, .access_token_handle = makeFakeTokenHandle(&state) };
+    var fp = FreePublish.init(&ctx, alloc);
+
+    const article_id = "A\"ID\\1\x01";
+    try fp.deleteWithIndex(article_id, 0);
+
+    const parsed = try std.json.parseFromSlice(struct {
+        article_id: []const u8,
+        index: i64,
+    }, alloc, cap.payload, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(article_id, parsed.value.article_id);
+    try std.testing.expectEqual(@as(i64, 0), parsed.value.index);
 }
 
 test "FreePublish token 失效自愈：40001 → 作废缓存 → 新 token 重试成功" {

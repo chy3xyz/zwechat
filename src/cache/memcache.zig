@@ -5,10 +5,24 @@
 //! 提供 `Cache` vtable 兼容的 get / set / isExist / delete / deinit。
 //!
 //! 设计取舍：
-//! - 仅实现单连接（无连接池），满足 access_token / js_ticket 共享缓存场景。
-//!   单连接由 `std.Io.Mutex`（真阻塞的 futex 锁）串行化整个请求-响应往返，
-//!   多线程并发安全；等待者阻塞在内核 futex 上，不再空转烧 CPU。
-//! - `get` 返回的切片借用自 `Memcache.last_value`，调用方应在下一次缓存操作前使用。
+//! - **默认单连接，可选连接池**（`Options.max_connections`，默认 `1`）。默认值等价于
+//!   历史行为：一条连接由 `std.Io.Mutex`（真阻塞的 futex 锁）串行化整个请求-响应
+//!   往返，多线程并发安全，等待者阻塞在内核 futex 上而不空转烧 CPU。设为 `N > 1`
+//!   时启用连接池，形状与 `redis.zig` 一致（`max_connections` / `pool_timeout_ms` /
+//!   `PoolStats` / `poolStats`）：最多 N 条连接并行服务 N 个并发调用，吞吐不再被
+//!   1/RTT 卡住。
+//! - **单连接模式的字段与代码路径保持原样**：`max_connections == 1`（默认）时仍然
+//!   使用 `stream` / `reader` / `timeout_reader` / `writer` / `mutex` 这组字段与原来
+//!   的实现，行为逐字一致；池只在 `max_connections > 1` 时启用。因此 `poolStats()`
+//!   在单连接模式下恒为零 —— 那个模式里没有池。
+//! - **池锁只保护空闲表与计数器**：建连、请求-响应往返、`close` 全部在池锁之外。
+//! - **等待有上界**：池已满时调用方在锁外「短自旋 + 小睡」等待归还，超过
+//!   `Options.pool_timeout_ms` 返回 `error.PoolTimeout`（vtable 边界映射为
+//!   `CacheError.StorageError`，并计入 `poolStats().timeouts`）。永远不挂死。
+//! - **坏连接不进池**：读写失败 / 协议解析失败的连接已经失步，直接关闭丢弃，
+//!   下次取连接时重建，绝不会污染后续请求。
+//! - `get` 返回的切片借用自当前连接的值缓冲（单连接模式即 `Memcache.last_value`），
+//!   调用方应在下一次缓存操作（含其它线程的）之前使用；跨操作持有必须 `dupe`。
 //! - 连接按需建立，遇到网络错误时下次操作自动重连。
 //! - **可选读超时**（`Options.recv_timeout_ms`，默认 `0` = 不超时）：配置后每次
 //!   socket 读取都受 deadline 约束，服务端 accept 后不回包也不会把共享的那条
@@ -41,6 +55,14 @@ const log = std.log.scoped(.zwechat_memcache);
 /// 建连超时路径只在 POSIX 上实现（Windows / WASI 退化为阻塞 connect）。
 const native_os = @import("builtin").os.tag;
 
+/// 等待可用连接时的退避参数（与 `redis.zig` 的同名常量取值一致）：先自旋
+/// `WaitSpinRounds` 轮（低延迟路径），之后每轮小睡 `WaitSleepNs`（避免烧 CPU）。
+const WaitSpinRounds: usize = 512;
+const WaitSleepNs: i96 = 200_000;
+
+/// 取连接可能返回的错误（仅池模式）。
+const PoolError = error{ PoolTimeout, OutOfMemory, StorageError };
+
 /// Memcache 连接选项。
 pub const Options = struct {
     /// 服务器地址，格式 `host:port`。
@@ -68,7 +90,8 @@ pub const Options = struct {
     /// **与 `recv_timeout_ms` 的分工**：
     /// - 本项管「连上之前」：对端 SYN 被丢弃（黑洞 / 防火墙 DROP / 对端过载）时，
     ///   阻塞 connect 会一直卡到内核上限（Linux 默认 ≈ 127s、macOS ≈ 75s）。
-    ///   本实现持锁跨整次往返，所以建连卡住 = 所有调用方一起卡住；
+    ///   默认单连接模式持锁跨整次往返，所以建连卡住 = 所有调用方一起卡住；
+    ///   池模式下建连在池锁之外进行，只卡住本次调用（但它占住的槽位仍不可用）；
     /// - `recv_timeout_ms` 管「连上之后」的每一次 socket 读取，**不覆盖建连**；
     /// - 两者独立：只配 `recv_timeout_ms` 时连不上的对端仍会卡住。
     ///
@@ -81,18 +104,66 @@ pub const Options = struct {
     /// - POSIX（Linux / macOS / BSD）上真实生效；**Windows / WASI 退化为阻塞
     ///   connect**（选项仍可配置，但不生效）。
     connect_timeout_ms: u64 = 0,
+
+    /// 连接池上限：同时存活的最大连接数。
+    ///
+    /// - 默认 `1`，与历史单连接实现完全等价（既有调用点无需改动，内部字段
+    ///   `stream` / `reader` / `timeout_reader` / `writer` 与 `mutex` 语义不变）；
+    /// - `0` 会被钳制为 `1`（避免出现永远取不到连接的池）；
+    /// - `N > 1` 时启用连接池（与 `redis.zig` 同一形状），最多 N 个请求并行；
+    ///   超出部分排队等待归还。
+    max_connections: usize = 1,
+
+    /// 等待空闲连接的最长时间（毫秒），默认 30000。
+    ///
+    /// 语义（仅在 `max_connections > 1` 时生效）：
+    /// - 池未达上限时直接新建连接返回，**不等待**；
+    /// - 池已满时在**不持池锁**的前提下自旋 + 小睡重试，直到有连接归还；
+    /// - 超过本时长仍无可用连接则放弃本次操作：`acquire` 返回 `error.PoolTimeout`，
+    ///   vtable 边界映射为 `CacheError.StorageError` 并打印 warn 日志，同时
+    ///   `Memcache.poolStats().timeouts` 自增 —— 等待一定是**有界**的，不会挂死；
+    /// - `0` 表示不等待（池满即刻超时）。
+    pool_timeout_ms: u64 = 30_000,
+};
+
+/// 连接池运行观测数据（用于监控与测试取证）。
+///
+/// 形状与 `redis.zig` 的 `PoolStats` 一致，便于两套后端用同一套监控口径。
+/// **注意**：`max_connections == 1`（默认单连接模式）没有池，`poolStats()` 返回
+/// 全零（详见 `Memcache.poolStats` 的说明）。
+pub const PoolStats = struct {
+    /// 当前存活连接数（空闲 + 借出）。
+    live: usize,
+    /// 当前空闲连接数。
+    idle: usize,
+    /// 当前借出中的连接数（= live - idle）。
+    in_use: usize,
+    /// 历史并发借出峰值（并发度的直接用证据）。
+    peak_in_use: usize,
+    /// 累计新建连接数。
+    created: usize,
+    /// 累计因协议 / IO 错误被丢弃的连接数（不会回到池中）。
+    discarded: usize,
+    /// 累计等待空闲连接超时次数。
+    timeouts: usize,
 };
 
 /// Memcache 缓存实现。
 ///
 /// 调用方通过 `create(allocator, opts)` 构造，使用 `asCache()` 获得 vtable 句柄，
 /// 最终调用 `deinit()` 再 `allocator.destroy(self)` 释放。
+///
+/// `max_connections > 1` 时，池中的每条连接就是一个「单连接实例」
+/// （`max_connections == 1` 的 `Memcache`）：文本协议与建连，因此**只有一份实现**，
+/// 池本身只负责借出 / 归还与计数。
 pub const Memcache = struct {
     allocator: std.mem.Allocator,
     opts: Options,
     io: std.Io,
     /// 当 `opts.io` 未提供时，本字段持有自行创建的 `Io` 实例。
     owned_io: ?std.Io.Threaded,
+    // ---------------- 单连接模式（`max_connections == 1`）的连接状态 ----------------
+    // 池模式下这些字段由各池连接实例自持，外壳的这一份保持 null / 未使用。
     /// 当前 TCP 连接；`null` 表示未连接或已断开。
     stream: ?std.Io.net.Stream = null,
     read_buffer: [4096]u8,
@@ -108,20 +179,45 @@ pub const Memcache = struct {
     last_value: ?[]u8 = null,
     /// 读取文本协议响应行时使用的临时缓冲区。
     line_buffer: [1024]u8 = undefined,
-    /// 单连接互斥：共享 TCP 连接 + 共享 reader/writer/缓冲区，
-    /// 必须串行化整个请求-响应往返，否则多线程并发会交错写 socket（协议损坏）。
+    /// 单连接互斥（**仅在 `max_connections == 1` 的默认模式下使用**）：共享 TCP
+    /// 连接 + 共享 reader/writer/缓冲区，必须串行化整个请求-响应往返，否则多线程
+    /// 并发会交错写 socket（协议损坏）。
     ///
     /// **刻意持锁跨网络 I/O**（含 `ensureConnected` + 写 socket + 读完整个回复，
     /// 一整个 RTT）：共享单连接的文本协议无法把一次往返拆成多段临界区。
     /// 这里用真阻塞的 `std.Io.Mutex`，等待者在 futex 上睡眠而不是自旋，
     /// 锁被占满一个 RTT 时不再浪费 CPU（`self.io` 驱动等待 / 唤醒）。
+    /// 池模式下（`max_connections > 1`）每条连接由借用方独占，用的是另一个锁
+    /// `pool_mutex`（只保护空闲表与计数，不覆盖任何 I/O）。
     mutex: std.Io.Mutex = .init,
+
+    // ---------------- 连接池状态（`max_connections > 1` 时使用） ----------------
+    /// 生效的池上限（`opts.max_connections == 0` 时按 1 处理）。
+    max_connections: usize,
+    /// 池锁。临界区只包含「空闲表操作 + 计数更新」，**绝不包含** connect/close /
+    /// 读写 socket 等任何网络 I/O；否则池会退化回单连接串行。真阻塞的
+    /// `std.Io.Mutex`（`self.io` 驱动 futex 等待 / 唤醒）。
+    pool_mutex: std.Io.Mutex = .init,
+    /// 空闲（已建连、可立即复用）连接。容量在 `create` 时预留到 `max_connections`，
+    /// 因此池锁内的临界区不会发生堆分配。
+    idle: std.ArrayList(*Memcache) = .empty,
+    /// 当前存活连接数 = `idle.len` + 借出中的连接数。
+    live: usize = 0,
+    /// 历史并发借出峰值。
+    peak_in_use: usize = 0,
+    /// 累计新建连接数。
+    created_total: usize = 0,
+    /// 累计丢弃连接数。
+    discarded_total: usize = 0,
+    /// 累计等待连接超时次数。
+    timeout_total: usize = 0,
 
     pub fn create(allocator: std.mem.Allocator, opts: Options) !*Memcache {
         const self = try allocator.create(Memcache);
         errdefer allocator.destroy(self);
 
         var owned_io: ?std.Io.Threaded = null;
+        errdefer if (owned_io) |*t| t.deinit();
         const io = opts.io orelse io: {
             owned_io = std.Io.Threaded.init(allocator, .{});
             break :io owned_io.?.io();
@@ -138,14 +234,34 @@ pub const Memcache = struct {
             .reader = null,
             .writer = null,
             .last_value = null,
+            .max_connections = if (opts.max_connections == 0) 1 else opts.max_connections,
         };
         if (self.owned_io) |*t| {
             self.io = t.io();
         }
+        // 空闲表容量一次预留到位：后续 append 不再分配，池锁内的临界区保持「纯内存」。
+        try self.idle.ensureTotalCapacity(allocator, self.max_connections);
         return self;
     }
 
     pub fn deinit(self: *Memcache) void {
+        // 池模式：关闭所有空闲连接（close 是系统调用，逐个在池锁之外执行）。
+        // 调用方需保证此时没有进行中的操作。
+        while (true) {
+            self.pool_mutex.lockUncancelable(self.io);
+            const conn = self.idle.pop() orelse {
+                self.pool_mutex.unlock(self.io);
+                break;
+            };
+            self.live -= 1;
+            self.pool_mutex.unlock(self.io);
+            self.freeConn(conn);
+        }
+        self.pool_mutex.lockUncancelable(self.io);
+        self.idle.deinit(self.allocator);
+        self.pool_mutex.unlock(self.io);
+
+        // 单连接模式：断开自持的连接并释放借用缓冲（池模式下这两个字段恒为空）。
         self.disconnect();
         if (self.last_value) |v| {
             self.allocator.free(v);
@@ -165,7 +281,33 @@ pub const Memcache = struct {
         };
     }
 
+    /// 连接池运行统计快照（加锁读取，临界区内无 I/O）。
+    ///
+    /// **`max_connections == 1`（默认单连接模式）没有池，恒返回全零**：该模式走的
+    /// 是历史单连接路径（`stream` / `reader` / `mutex` 那组字段），池计数器不参与；
+    /// 也刻意不在池锁之外去读连接状态（那是数据竞争）。需要池级可观测性时把
+    /// `max_connections` 设为 `> 1`。
+    pub fn poolStats(self: *Memcache) PoolStats {
+        self.pool_mutex.lockUncancelable(self.io);
+        defer self.pool_mutex.unlock(self.io);
+        return .{
+            .live = self.live,
+            .idle = self.idle.items.len,
+            .in_use = self.live - self.idle.items.len,
+            .peak_in_use = self.peak_in_use,
+            .created = self.created_total,
+            .discarded = self.discarded_total,
+            .timeouts = self.timeout_total,
+        };
+    }
+
     // ---------------- vtable 实现 ----------------
+    //
+    // 两条路径共用同一份协议实现（`getConn` / `setConn` / `isExistConn` /
+    // `deleteConn`，都只依赖连接字段）：
+    // - `max_connections == 1`（默认）：锁住 `mutex` 后在自持连接上执行（历史行为）；
+    // - `max_connections > 1`：向池借用一条连接（它本身就是一个单连接实例）执行，
+    //   出错即标记 `reusable = false`，由 `release` 丢弃，绝不把坏连接放回池中。
 
     const vtable: Cache.VTable = .{
         .get = getImpl,
@@ -173,12 +315,112 @@ pub const Memcache = struct {
         .isExist = isExistImpl,
         .delete = deleteImpl,
         .deinit = deinitImpl,
+        .getOwned = getOwnedImpl,
     };
 
     fn getImpl(ctx: *anyopaque, key: []const u8) CacheError!?[]const u8 {
         const self: *Memcache = @ptrCast(@alignCast(ctx));
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+        if (!self.pooled()) {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return self.getConn(key);
+        }
+        const conn = try self.acquireForOp();
+        var reusable = true;
+        defer self.release(conn, reusable);
+        const value = conn.getConn(key) catch |err| {
+            reusable = false;
+            return err;
+        };
+        return value;
+    }
+
+    /// `getOwned` 的实现：拷贝在**本后端自己的互斥区**内完成。
+    ///
+    /// - 单连接模式（默认）：整个请求-响应往返都在 `mutex` 临界区内，拷贝也在其中，
+    ///   因此 `last_value` 不可能被别名（其它线程 / 共享本实例的模块）提前释放；
+    /// - 池模式：拷贝发生在**独占借用该连接**的期间，借出方独占该连接的
+    ///   `last_value`，拷贝完成才归还。
+    fn getOwnedImpl(ctx: *anyopaque, allocator: std.mem.Allocator, key: []const u8) CacheError!?[]u8 {
+        const self: *Memcache = @ptrCast(@alignCast(ctx));
+        if (!self.pooled()) {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            const value = try self.getConn(key);
+            const v = value orelse return null;
+            return allocator.dupe(u8, v) catch return error.OutOfMemory;
+        }
+        const conn = try self.acquireForOp();
+        var reusable = true;
+        defer self.release(conn, reusable);
+        const value = conn.getConn(key) catch |err| {
+            reusable = false;
+            return err;
+        };
+        const v = value orelse return null;
+        return allocator.dupe(u8, v) catch return error.OutOfMemory;
+    }
+
+    fn setImpl(ctx: *anyopaque, key: []const u8, val: []const u8, ttl_seconds: i64) CacheError!void {
+        const self: *Memcache = @ptrCast(@alignCast(ctx));
+        if (!self.pooled()) {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return self.setConn(key, val, ttl_seconds);
+        }
+        const conn = try self.acquireForOp();
+        var reusable = true;
+        defer self.release(conn, reusable);
+        conn.setConn(key, val, ttl_seconds) catch |err| {
+            reusable = false;
+            return err;
+        };
+    }
+
+    fn isExistImpl(ctx: *anyopaque, key: []const u8) CacheError!bool {
+        const self: *Memcache = @ptrCast(@alignCast(ctx));
+        if (!self.pooled()) {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return self.isExistConn(key);
+        }
+        const conn = try self.acquireForOp();
+        var reusable = true;
+        defer self.release(conn, reusable);
+        return conn.isExistConn(key) catch |err| {
+            reusable = false;
+            return err;
+        };
+    }
+
+    fn deleteImpl(ctx: *anyopaque, key: []const u8) CacheError!void {
+        const self: *Memcache = @ptrCast(@alignCast(ctx));
+        if (!self.pooled()) {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return self.deleteConn(key);
+        }
+        const conn = try self.acquireForOp();
+        var reusable = true;
+        defer self.release(conn, reusable);
+        conn.deleteConn(key) catch |err| {
+            reusable = false;
+            return err;
+        };
+    }
+
+    fn deinitImpl(ctx: *anyopaque) void {
+        const self: *Memcache = @ptrCast(@alignCast(ctx));
+        self.deinit();
+    }
+
+    // -------- 单连接上的协议操作（互斥 / 池的借还与丢弃由调用方负责） --------
+
+    /// 在**一条连接**上执行 GET。调用方保证该连接此刻由自己独占。
+    ///
+    /// 任何错误都会断开这条连接（`errdefer`）：文本协议无法确认失败后是否留下
+    /// 半条回复，复用比断连危险得多。
+    fn getConn(self: *Memcache, key: []const u8) CacheError!?[]const u8 {
         errdefer self.disconnect();
         self.ensureConnected() catch return error.StorageError;
 
@@ -192,10 +434,7 @@ pub const Memcache = struct {
         return null;
     }
 
-    fn setImpl(ctx: *anyopaque, key: []const u8, val: []const u8, ttl_seconds: i64) CacheError!void {
-        const self: *Memcache = @ptrCast(@alignCast(ctx));
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+    fn setConn(self: *Memcache, key: []const u8, val: []const u8, ttl_seconds: i64) CacheError!void {
         errdefer self.disconnect();
         self.ensureConnected() catch return error.StorageError;
 
@@ -213,10 +452,7 @@ pub const Memcache = struct {
         if (!std.mem.eql(u8, line, "STORED")) return error.StorageError;
     }
 
-    fn isExistImpl(ctx: *anyopaque, key: []const u8) CacheError!bool {
-        const self: *Memcache = @ptrCast(@alignCast(ctx));
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+    fn isExistConn(self: *Memcache, key: []const u8) CacheError!bool {
         errdefer self.disconnect();
         self.ensureConnected() catch return error.StorageError;
 
@@ -229,10 +465,7 @@ pub const Memcache = struct {
         return false;
     }
 
-    fn deleteImpl(ctx: *anyopaque, key: []const u8) CacheError!void {
-        const self: *Memcache = @ptrCast(@alignCast(ctx));
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
+    fn deleteConn(self: *Memcache, key: []const u8) CacheError!void {
         errdefer self.disconnect();
         self.ensureConnected() catch return error.StorageError;
 
@@ -243,9 +476,162 @@ pub const Memcache = struct {
         }
     }
 
-    fn deinitImpl(ctx: *anyopaque) void {
-        const self: *Memcache = @ptrCast(@alignCast(ctx));
-        self.deinit();
+    // ---------------- 连接池（`max_connections > 1`） ----------------
+
+    /// 是否启用连接池。
+    fn pooled(self: *const Memcache) bool {
+        return self.max_connections > 1;
+    }
+
+    /// 借出一条池连接。**不得**在持有 `pool_mutex` 时调用；内部只在极短的临界区里
+    /// 持锁，建连与归还的 `close` 都在锁外。
+    ///
+    /// - 池中有空闲连接：立即借出；
+    /// - 池未达上限：先占槽位（锁内），再在**锁外**建连；
+    /// - 池已满：在**锁外**自旋 + 小睡等待归还，超过 `opts.pool_timeout_ms`
+    ///   返回 `error.PoolTimeout`（等待有界，不会永久挂死）。
+    ///
+    /// 借用方用完必须调用 `release` 归还（或标记为不可用以便丢弃）。
+    fn acquire(self: *Memcache) PoolError!*Memcache {
+        const timeout_ns = self.timeoutNs();
+        const start_ns = self.nowNs();
+        var spin_rounds: usize = 0;
+
+        while (true) {
+            self.pool_mutex.lockUncancelable(self.io);
+            if (self.idle.pop()) |conn| {
+                self.noteBorrowLocked();
+                self.pool_mutex.unlock(self.io);
+                return conn;
+            }
+            if (self.live < self.max_connections) {
+                // 先占槽位，防止并发下超建；建连本身放到锁外。
+                self.live += 1;
+                self.noteBorrowLocked();
+                self.pool_mutex.unlock(self.io);
+
+                const conn = self.createConn() catch |err| {
+                    self.pool_mutex.lockUncancelable(self.io);
+                    self.live -= 1;
+                    self.pool_mutex.unlock(self.io);
+                    return err;
+                };
+                self.pool_mutex.lockUncancelable(self.io);
+                self.created_total += 1;
+                self.pool_mutex.unlock(self.io);
+                return conn;
+            }
+            self.pool_mutex.unlock(self.io);
+
+            // 池已满：锁外等待。短自旋 + 小睡两段式退避（不持锁，归还方能立刻送达）。
+            if (timeout_ns == 0 or self.nowNs() - start_ns >= timeout_ns) {
+                self.pool_mutex.lockUncancelable(self.io);
+                self.timeout_total += 1;
+                self.pool_mutex.unlock(self.io);
+                return error.PoolTimeout;
+            }
+            if (spin_rounds < WaitSpinRounds) {
+                spin_rounds += 1;
+                std.atomic.spinLoopHint();
+            } else {
+                std.Io.sleep(self.io, std.Io.Duration.fromNanoseconds(WaitSleepNs), .awake) catch {};
+            }
+        }
+    }
+
+    /// 归还连接。`reusable == false` 表示这条连接已失步或已断开（协议 / IO 错误），
+    /// 直接关闭丢弃，**不**放回池中 —— 否则一个坏连接会污染后续所有请求。
+    ///
+    /// 归还后调用方**不得**再使用自己从该连接上拿到的借用切片（`get` 的返回值）：
+    /// 其它线程可能立刻复用它。与 `redis.zig` 的生命周期契约一致。
+    fn release(self: *Memcache, conn: *Memcache, reusable: bool) void {
+        if (!reusable) {
+            self.discardConn(conn);
+            return;
+        }
+        self.pool_mutex.lockUncancelable(self.io);
+        self.idle.append(self.allocator, conn) catch {
+            self.pool_mutex.unlock(self.io);
+            self.discardConn(conn);
+            return;
+        };
+        self.pool_mutex.unlock(self.io);
+    }
+
+    /// 丢弃一条不可用连接：先关闭（锁外 I/O），再更新计数，最后释放内存。
+    fn discardConn(self: *Memcache, conn: *Memcache) void {
+        self.freeConn(conn);
+        self.pool_mutex.lockUncancelable(self.io);
+        self.live -= 1;
+        self.discarded_total += 1;
+        self.pool_mutex.unlock(self.io);
+    }
+
+    /// 关闭并释放一条连接（不维护 `live` 计数）。不加池锁。
+    fn freeConn(self: *Memcache, conn: *Memcache) void {
+        conn.deinit();
+        self.allocator.destroy(conn);
+    }
+
+    /// 更新「借出中」峰值。必须在持有 `pool_mutex` 时调用。
+    fn noteBorrowLocked(self: *Memcache) void {
+        const in_use = self.live - self.idle.items.len;
+        if (in_use > self.peak_in_use) self.peak_in_use = in_use;
+    }
+
+    /// `opts.pool_timeout_ms` 换算为纳秒（饱和，避免溢出）。
+    fn timeoutNs(self: *Memcache) i64 {
+        const ms = self.opts.pool_timeout_ms;
+        if (ms == 0) return 0;
+        const ns = ms *| std.time.ns_per_ms;
+        if (ns > @as(u64, @intCast(std.math.maxInt(i64)))) return std.math.maxInt(i64);
+        return @intCast(ns);
+    }
+
+    /// 当前单调时钟纳秒时间戳。
+    ///
+    /// 用 `awake` 时钟（与 `redis.zig` 一致）：它只服务池的**等待耗时**判定
+    /// （`pool_timeout_ms`），要的是「进程实际等了多久」；休眠期间进程不跑，不该
+    /// 算进等待额度。首尾同源，绝不与 `boot` 混用。用实例自己的 `io` 而非全局
+    /// 单例，保证与注入的 Io 一致。
+    fn nowNs(self: *Memcache) i64 {
+        return @intCast(std.Io.Clock.now(.awake, self.io).nanoseconds);
+    }
+
+    /// 创建一条池连接（一个 `max_connections == 1` 的单连接实例）并立即建连。
+    /// **不得**在持有 `pool_mutex` 时调用。
+    ///
+    /// 建连失败的连接既不进池也不计入 `created`（与 `redis.zig` 的池一致）：
+    /// 半开的连接没有任何复用价值。
+    fn createConn(self: *Memcache) PoolError!*Memcache {
+        // 池连接的 opts 与外壳一致，唯一区别是它自己是单连接实例（否则会递归建池），
+        // 并复用外壳的 `io`（避免每条连接各起一个运行时）。
+        var conn_opts = self.opts;
+        conn_opts.max_connections = 1;
+        conn_opts.io = self.io;
+
+        const conn = Memcache.create(self.allocator, conn_opts) catch return error.OutOfMemory;
+        errdefer {
+            conn.deinit();
+            self.allocator.destroy(conn);
+        }
+        conn.ensureConnected() catch return error.StorageError;
+        return conn;
+    }
+
+    /// 借出连接并把池错误映射到 `CacheError`（`PoolTimeout` 会打印 warn 并计数）。
+    fn acquireForOp(self: *Memcache) CacheError!*Memcache {
+        return self.acquire() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.PoolTimeout => {
+                log.warn(
+                    "memcache 连接池等待超时：max_connections={d}, pool_timeout_ms={d}，放弃本次操作",
+                    .{ self.max_connections, self.opts.pool_timeout_ms },
+                );
+                return error.StorageError;
+            },
+            error.StorageError => return error.StorageError,
+        };
     }
 
     // ---------------- 连接管理 ----------------
@@ -582,51 +968,139 @@ fn mockMemcacheServer(allocator: std.mem.Allocator, bind_addr: std.Io.net.IpAddr
             var threaded = std.Io.Threaded.init(alloc, .{});
             defer threaded.deinit();
             const io = threaded.io();
-            var server = try addr.listen(io, .{ .reuse_address = true });
+            var server = try addr.listen(io, .{ .reuse_address = false });
             rdy.store(true, .release);
             defer server.deinit(io);
 
+            var store = Store.init(alloc, io);
+            defer store.deinit();
+
             const conn = try server.accept(io);
             defer conn.close(io);
-            try serveMemcacheConn(alloc, io, conn);
+            try serveMemcacheConn(alloc, io, conn, &store, 0, false);
         }
     }.run, .{ allocator, bind_addr, ready });
 }
 
-/// 按文本协议服务一条连接，直到对端断开（或读到非法帧）。
-fn serveMemcacheConn(alloc: std.mem.Allocator, io: std.Io, conn: std.Io.net.Stream) !void {
-    var store: std.HashMap([]const u8, []const u8, std.hash_map.StringContext, 80) = .init(alloc);
-    defer {
-        var it = store.iterator();
-        while (it.next()) |entry| {
-            alloc.free(entry.key_ptr.*);
-            alloc.free(entry.value_ptr.*);
-        }
-        store.deinit();
+/// mock 服务器共享的 KV。
+///
+/// 多连接并发访问，因此每个操作都在自己的小锁内（临界区纯内存，不含 socket I/O）；
+/// `getCopy` 把值拷进调用方缓冲，让调用方在**不持锁**的情况下写 socket。
+const Store = struct {
+    /// 单条 value 的拷贝缓冲上限（用例里的值都很短）；超限按未命中处理 —— 这是夹具，
+    /// 不为超大值再分配。
+    const max_value_bytes = 256;
+
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    mutex: std.Io.Mutex = .init,
+    map: std.HashMap([]const u8, []u8, std.hash_map.StringContext, 80),
+
+    fn init(allocator: std.mem.Allocator, io: std.Io) Store {
+        return .{ .allocator = allocator, .io = io, .map = .init(allocator) };
     }
 
+    fn deinit(self: *Store) void {
+        var it = self.map.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.map.deinit();
+    }
+
+    /// 写入（覆盖旧值）；键与值都由 Store 自己拷一份持有。
+    fn set(self: *Store, key: []const u8, val: []const u8) !void {
+        // 先拷贝再进锁：锁里不分配，也不会持锁跨越分配失败路径。
+        const k = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(k);
+        const v = try self.allocator.dupe(u8, val);
+        errdefer self.allocator.free(v);
+
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.map.fetchRemove(key)) |old| {
+            self.allocator.free(old.key);
+            self.allocator.free(old.value);
+        }
+        try self.map.put(k, v);
+    }
+
+    /// 把命中的值**拷贝**进 `out` 并返回切片；未命中返回 `null`。
+    fn getCopy(self: *Store, key: []const u8, out: []u8) ?[]const u8 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const val = self.map.get(key) orelse return null;
+        if (val.len > out.len) return null;
+        @memcpy(out[0..val.len], val);
+        return out[0..val.len];
+    }
+
+    /// 删除；返回是否命中。
+    fn delete(self: *Store, key: []const u8) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.map.fetchRemove(key)) |old| {
+            self.allocator.free(old.key);
+            self.allocator.free(old.value);
+            return true;
+        }
+        return false;
+    }
+};
+
+/// 按文本协议服务一条连接，直到对端断开（或读到非法帧）。
+///
+/// - `store`：服务器共享的 KV（多连接并发访问；读写都在 `Store` 自己的小锁内）；
+/// - `delay_ms > 0`：每条命令处理前先睡一会儿 —— 连接池用例用它把连接占住，
+///   制造可观测的并发 / 池耗尽；
+/// - `poison_on_first`：第一条命令（含 `set` 的 value 行）之后回一帧非法响应并断开，
+///   模拟「连得上、但协议坏掉」的连接。
+fn serveMemcacheConn(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    conn: std.Io.net.Stream,
+    store: *Store,
+    delay_ms: u64,
+    poison_on_first: bool,
+) !void {
     var read_buf: [1024]u8 = undefined;
     var write_buf: [1024]u8 = undefined;
     var reader = conn.reader(io, &read_buf);
     var writer = conn.writer(io, &write_buf);
 
+    var first = true;
     while (true) {
         const line = mockReadLine(alloc, &reader) catch break;
         defer alloc.free(line);
         if (line.len == 0) continue;
+
+        if (delay_ms > 0) {
+            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(@intCast(delay_ms)), .awake) catch {};
+        }
 
         var it = std.mem.splitScalar(u8, line, ' ');
         const cmd = it.next().?;
 
         if (std.mem.eql(u8, cmd, "get")) {
             const key = it.next() orelse continue;
-            if (store.get(key)) |val| {
+            if (first) {
+                first = false;
+                if (poison_on_first) {
+                    poisonReply(&writer);
+                    return;
+                }
+            }
+            var val_buf: [Store.max_value_bytes]u8 = undefined;
+            if (store.getCopy(key, &val_buf)) |val| {
                 try writer.interface.print("VALUE {s} 0 {d}\r\n", .{ key, val.len });
                 try writer.interface.writeAll(val);
                 try writer.interface.writeAll("\r\n");
             }
             _ = writer.interface.writeAll("END\r\n") catch break;
         } else if (std.mem.eql(u8, cmd, "set")) {
+            // 先按协议把命令头与 value 行读干净，再决定回什么：留下未读字节会让
+            // 后续交互（以及坏连接用例里的客户端）看到错位的帧。
             const key = it.next() orelse continue;
             _ = it.next(); // flags
             _ = it.next(); // exptime
@@ -636,26 +1110,127 @@ fn serveMemcacheConn(alloc: std.mem.Allocator, io: std.Io, conn: std.Io.net.Stre
             defer alloc.free(raw);
             try reader.interface.readSliceAll(raw);
             if (raw[bytes] != '\r' or raw[bytes + 1] != '\n') continue;
-            if (store.fetchRemove(key)) |old| {
-                alloc.free(old.key);
-                alloc.free(old.value);
+
+            if (first) {
+                first = false;
+                if (poison_on_first) {
+                    poisonReply(&writer);
+                    return;
+                }
             }
-            try store.put(try alloc.dupe(u8, key), try alloc.dupe(u8, raw[0..bytes]));
+            try store.set(key, raw[0..bytes]);
             _ = writer.interface.writeAll("STORED\r\n") catch break;
         } else if (std.mem.eql(u8, cmd, "delete")) {
             const key = it.next() orelse continue;
+            if (first) {
+                first = false;
+                if (poison_on_first) {
+                    poisonReply(&writer);
+                    return;
+                }
+            }
             // 语义修正：删除成功返回 DELETED，键不存在返回 NOT_FOUND。
             // （旧实现先 fetchRemove 再反查 contains，导致永远返回 DELETED。）
-            const resp = if (store.fetchRemove(key)) |old| blk: {
-                alloc.free(old.key);
-                alloc.free(old.value);
-                break :blk "DELETED\r\n";
-            } else "NOT_FOUND\r\n";
+            const resp: []const u8 = if (store.delete(key)) "DELETED\r\n" else "NOT_FOUND\r\n";
             _ = writer.interface.writeAll(resp) catch break;
         }
         try writer.interface.flush();
     }
 }
+
+/// 回一帧不符合文本协议的响应（坏连接夹具）；调用方随后立即退出服务循环。
+fn poisonReply(writer: *std.Io.net.Stream.Writer) void {
+    _ = writer.interface.writeAll("BOGUS\r\n") catch {};
+    writer.interface.flush() catch {};
+}
+
+/// 多连接 mock 服务器：并发接受连接（每条连接一个服务线程）、共享同一份 KV，
+/// 并统计同时打开的连接数峰值与累计连接数，供连接池用例取证。
+///
+/// `stopAndJoin()` 置位 `stop`、主动连一次唤醒阻塞中的 `accept`，再 `join`。
+const MockPoolServer = struct {
+    allocator: std.mem.Allocator,
+    addr: std.Io.net.IpAddress,
+    /// 每条命令处理前的人为延迟（毫秒）：把连接占住，制造可观测的并发 / 池耗尽。
+    delay_ms: u64 = 0,
+    /// 第 N 条（从 1 起）连接在首个命令后回一帧非法响应并断开（坏连接）。
+    poison_conn: ?usize = null,
+
+    ready: std.atomic.Value(bool) = .init(false),
+    stop: std.atomic.Value(bool) = .init(false),
+    /// 当前打开的连接数。
+    active: std.atomic.Value(usize) = .init(0),
+    /// 同时打开的最大连接数（并发峰值）。
+    peak: std.atomic.Value(usize) = .init(0),
+    /// 累计 accept 的连接数。
+    accepted: std.atomic.Value(usize) = .init(0),
+
+    fn start(self: *MockPoolServer) !std.Thread {
+        return std.Thread.spawn(.{}, run, .{self});
+    }
+
+    fn run(self: *MockPoolServer) !void {
+        var threaded = std.Io.Threaded.init(self.allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+
+        // 假 server 刻意不用 `reuse_address`：POSIX 上它同时打开 `SO_REUSEPORT`，
+        // 会让多个测试进程把同一端口分摊掉（其中一个的 accept 永远等不到请求）。
+        var server = try self.addr.listen(io, .{ .reuse_address = false });
+        defer server.deinit(io);
+        self.ready.store(true, .release);
+
+        var store = Store.init(self.allocator, io);
+        defer store.deinit();
+
+        var conn_threads: std.ArrayList(std.Thread) = .empty;
+        defer conn_threads.deinit(self.allocator);
+
+        while (!self.stop.load(.acquire)) {
+            const conn = server.accept(io) catch break;
+            if (self.stop.load(.acquire)) {
+                conn.close(io);
+                break;
+            }
+            const index = self.accepted.fetchAdd(1, .monotonic) + 1;
+            self.notePeak(self.active.fetchAdd(1, .acq_rel) + 1);
+
+            const t = std.Thread.spawn(.{}, serveOne, .{ self, io, conn, index, &store }) catch {
+                _ = self.active.fetchSub(1, .acq_rel);
+                conn.close(io);
+                continue;
+            };
+            try conn_threads.append(self.allocator, t);
+        }
+
+        for (conn_threads.items) |t| t.join();
+    }
+
+    fn serveOne(self: *MockPoolServer, io: std.Io, conn: std.Io.net.Stream, index: usize, store: *Store) void {
+        defer _ = self.active.fetchSub(1, .acq_rel);
+        defer conn.close(io);
+        const poisoned = if (self.poison_conn) |p| p == index else false;
+        serveMemcacheConn(self.allocator, io, conn, store, self.delay_ms, poisoned) catch {};
+    }
+
+    fn notePeak(self: *MockPoolServer, n: usize) void {
+        var cur = self.peak.load(.monotonic);
+        while (n > cur) {
+            if (self.peak.cmpxchgWeak(cur, n, .monotonic, .monotonic)) |observed| {
+                cur = observed;
+            } else break;
+        }
+    }
+
+    fn stopAndJoin(self: *MockPoolServer, thread: std.Thread) void {
+        self.stop.store(true, .release);
+        const io = default_io.io();
+        if (self.addr.connect(io, .{ .mode = .stream })) |wake| {
+            wake.close(io);
+        } else |_| {}
+        thread.join();
+    }
+};
 
 /// 读超时用例专用 mock 服务器：第 1 条连接收下命令后**永不回包**（模拟服务端
 /// 半死），第 2 条连接正常服务。
@@ -683,12 +1258,15 @@ fn mockSilentThenHealthyServer(
             var threaded = std.Io.Threaded.init(alloc, .{});
             defer threaded.deinit();
             const io = threaded.io();
-            var server = try addr.listen(io, .{ .reuse_address = true });
+            var server = try addr.listen(io, .{ .reuse_address = false });
             rdy.store(true, .release);
             defer server.deinit(io);
 
             var handlers: std.ArrayList(std.Thread) = .empty;
             defer handlers.deinit(alloc);
+
+            var store = Store.init(alloc, io);
+            defer store.deinit();
 
             var index: usize = 0;
             while (!stopper.load(.acquire)) {
@@ -698,7 +1276,7 @@ fn mockSilentThenHealthyServer(
                     break;
                 }
                 index += 1;
-                const t = std.Thread.spawn(.{}, handleConn, .{ alloc, io, conn, index, hold_ms, stopper }) catch {
+                const t = std.Thread.spawn(.{}, handleConn, .{ alloc, io, conn, index, hold_ms, stopper, &store }) catch {
                     conn.close(io);
                     continue;
                 };
@@ -714,6 +1292,7 @@ fn mockSilentThenHealthyServer(
             index: usize,
             hold_ms: u64,
             stopper: *std.atomic.Value(bool),
+            store: *Store,
         ) void {
             defer conn.close(io);
 
@@ -729,7 +1308,7 @@ fn mockSilentThenHealthyServer(
                 }
                 return;
             }
-            serveMemcacheConn(alloc, io, conn) catch {};
+            serveMemcacheConn(alloc, io, conn, store, 0, false) catch {};
         }
     }.run, .{ allocator, bind_addr, ready, stop, silent_hold_ms });
 }
@@ -750,25 +1329,9 @@ fn mockReadLine(alloc: std.mem.Allocator, reader: *std.Io.net.Stream.Reader) ![]
     }
 }
 
-fn findFreePort() !u16 {
-    const io = default_io.io();
-    var rng: std.Random.DefaultPrng = .init(@intCast(std.Io.Clock.now(.real, default_io.io()).nanoseconds));
-    for (0..20) |_| {
-        const port: u16 = @intCast(20000 + rng.random().int(u16) % 45000);
-        const addr = std.Io.net.IpAddress{ .ip4 = .{
-            .bytes = .{ 127, 0, 0, 1 },
-            .port = port,
-        } };
-        if (addr.listen(io, .{ .reuse_address = true })) |server| {
-            var s = server;
-            s.deinit(io);
-            return port;
-        } else |err| {
-            if (err != error.AddressInUse) return err;
-        }
-    }
-    return error.AddressInUse;
-}
+// 端口分配夹具已收敛到 `net.findFreePort()`（`net.zig`）：本文件不再持有私有副本 ——
+// 旧的「随机挑端口 + `listen(reuse_address = true)` 探测」既会和其它测试进程撞端口，
+// 又因 `SO_REUSEPORT` 让探测结果失去意义（详见 `net.findFreePort` 的文档）。
 
 /// 有界等待 mock 服务器就绪（最多 2 秒，避免服务器起不来时测试无限挂住）。
 ///
@@ -834,7 +1397,7 @@ fn makeStalledTarget(io: std.Io, port: u16) !?StalledTarget {
     var target = StalledTarget{
         .addr = addr,
         // 只 listen、**永不 accept**：进来的连接会堆在内核的 accept 队列里。
-        .server = try addr.listen(io, .{ .reuse_address = true, .kernel_backlog = 1 }),
+        .server = try addr.listen(io, .{ .reuse_address = false, .kernel_backlog = 1 }),
     };
     errdefer target.deinit(io);
 
@@ -860,7 +1423,7 @@ fn makeStalledTarget(io: std.Io, port: u16) !?StalledTarget {
 
 test "memcache 基本 set/get/exists/delete 往返" {
     const allocator = std.testing.allocator;
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     const addr = std.Io.net.IpAddress{ .ip4 = .{
         .bytes = .{ 127, 0, 0, 1 },
@@ -895,7 +1458,7 @@ test "memcache 基本 set/get/exists/delete 往返" {
 
 test "memcache get 不存在的 key 返回 null" {
     const allocator = std.testing.allocator;
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     const addr = std.Io.net.IpAddress{ .ip4 = .{
         .bytes = .{ 127, 0, 0, 1 },
@@ -928,12 +1491,67 @@ test "memcache 接口公共 API 全部导出" {
     _ = Options;
 }
 
+test "memcache getOwned：单连接与池模式下副本都独立于 last_value" {
+    // 回归（OPEN_ITEMS 第 15 条）：Memcache 的 `get` 返回的切片借用自
+    // `last_value`，**任何**后续 get 都会 free 并覆盖它。`getOwned` 必须在
+    // 本后端的临界区（单连接 = `mutex` 内；池 = 独占借用连接期间）完成拷贝。
+    const allocator = std.testing.allocator;
+
+    for ([_]usize{ 1, 2 }) |max_conns| {
+        const port = try net.findFreePort();
+        const addr = std.Io.net.IpAddress{ .ip4 = .{
+            .bytes = .{ 127, 0, 0, 1 },
+            .port = port,
+        } };
+        var ready = std.atomic.Value(bool).init(false);
+        const thread = try mockMemcacheServer(allocator, addr, &ready);
+        while (!ready.load(.acquire)) {
+            std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+        }
+
+        var server_str_buf: [32]u8 = undefined;
+        const server_str = try std.mem.print(&server_str_buf, "127.0.0.1:{d}", .{port});
+
+        const mc = try Memcache.create(allocator, .{
+            .server = server_str,
+            .max_connections = max_conns,
+            .pool_timeout_ms = 2_000,
+        });
+        const c = mc.asCache();
+
+        try c.set("tok", "original_token_value", 60);
+
+        const copy = (try c.getOwned(allocator, "tok")) orelse return error.TestUnexpectedResult;
+        defer allocator.free(copy);
+        try std.testing.expectEqualStrings("original_token_value", copy);
+
+        // 副本不是连接内部的值缓冲。
+        const borrowed = (try c.get("tok")).?;
+        try std.testing.expect(copy.ptr != borrowed.ptr);
+
+        // 覆盖写、读别的 key（会 free 掉 `last_value`）、删除：副本都必须完好。
+        try c.set("tok", "replaced_token_value_longer_than_the_original", 60);
+        try std.testing.expectEqualStrings("original_token_value", copy);
+        try std.testing.expect((try c.get("unrelated")) == null);
+        try std.testing.expectEqualStrings("original_token_value", copy);
+        try c.delete("tok");
+        try std.testing.expectEqualStrings("original_token_value", copy);
+
+        // 未命中返回 null。
+        try std.testing.expect((try c.getOwned(allocator, "tok")) == null);
+
+        mc.deinit();
+        allocator.destroy(mc);
+        thread.join();
+    }
+}
+
 test "memcache set 超大 TTL 不触发 @intCast panic" {
     // 回归：ttl_seconds 来自外部输入，超过 u32 上限（exptime 字段宽度）时
     // 旧实现 `if (ttl_seconds > 0) @intCast(ttl_seconds)` 在 Debug 下 panic；
     // 修复后钳制到 u32 上限照常写入。
     const allocator = std.testing.allocator;
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     const addr = std.Io.net.IpAddress{ .ip4 = .{
         .bytes = .{ 127, 0, 0, 1 },
@@ -964,7 +1582,7 @@ test "memcache set 超大 TTL 不触发 @intCast panic" {
 
 test "memcache 多线程并发 set/get 不同 key 全部正确" {
     const allocator = std.testing.allocator;
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     const addr = std.Io.net.IpAddress{ .ip4 = .{
         .bytes = .{ 127, 0, 0, 1 },
@@ -1088,7 +1706,7 @@ test "memcache 服务器地址解析：IPv4/IPv6 字面量、域名与非法输�
 
 test "memcache 读超时：服务端不回包 → 有界失败、连接被丢弃、下次请求重建" {
     const allocator = std.testing.allocator;
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     const addr = std.Io.net.IpAddress{ .ip4 = .{
         .bytes = .{ 127, 0, 0, 1 },
@@ -1147,7 +1765,7 @@ test "memcache 读超时：服务端不回包 → 有界失败、连接被丢弃
 test "memcache 建连超时：SYN 被丢弃 → 有界失败、状态干净、同实例随后连正常地址成功" {
     const allocator = std.testing.allocator;
     const io = default_io.io();
-    const port = try findFreePort();
+    const port = try net.findFreePort();
 
     // 黑洞目标（本进程内的本地 listener，队列填满后内核丢 SYN）。
     // 造不出来（队列满即 RST 的环境）就跳过 —— 绝不用「可能永久阻塞」的地址硬测。
@@ -1204,4 +1822,352 @@ test "memcache 建连超时：SYN 被丢弃 → 有界失败、状态干净、�
     mc.deinit();
     allocator.destroy(mc);
     server_thread.join();
+}
+
+test "memcache 畸形文本帧返回 StorageError 并断开连接（不崩溃）" {
+    const allocator = std.testing.allocator;
+
+    // 脚本化服务器：读走客户端命令（`set` 多读一行 value），再回一帧不符合文本协议的
+    // 响应（既不是 `VALUE`/`END`，也不是 `STORED`/`DELETED`）。
+    const MalformedServer = struct {
+        fn run(
+            alloc: std.mem.Allocator,
+            addr: std.Io.net.IpAddress,
+            rdy: *std.atomic.Value(bool),
+            conns: usize,
+            frame: []const u8,
+        ) !void {
+            var threaded = std.Io.Threaded.init(alloc, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var server = try addr.listen(io, .{ .reuse_address = false });
+            rdy.store(true, .release);
+            defer server.deinit(io);
+
+            for (0..conns) |_| {
+                const conn = server.accept(io) catch break;
+                defer conn.close(io);
+
+                var read_buf: [512]u8 = undefined;
+                var write_buf: [64]u8 = undefined;
+                var reader = conn.reader(io, &read_buf);
+                var writer = conn.writer(io, &write_buf);
+
+                const cmd = mockReadLine(alloc, &reader) catch null;
+                if (cmd) |line| {
+                    defer alloc.free(line);
+                    if (std.mem.startsWith(u8, line, "set ")) {
+                        const val = mockReadLine(alloc, &reader) catch null;
+                        if (val) |v| alloc.free(v);
+                    }
+                }
+
+                _ = writer.interface.writeAll(frame) catch break;
+                writer.interface.flush() catch break;
+                std.Io.sleep(io, std.Io.Duration.fromMilliseconds(20), .awake) catch {};
+            }
+        }
+    };
+
+    const port = try net.findFreePort();
+    const addr = std.Io.net.IpAddress{ .ip4 = .{
+        .bytes = .{ 127, 0, 0, 1 },
+        .port = port,
+    } };
+    var ready = std.atomic.Value(bool).init(false);
+    const thread = try std.Thread.spawn(.{}, MalformedServer.run, .{
+        allocator, addr, &ready, 4, "BOGUS\r\n",
+    });
+    waitReady(&ready);
+
+    var server_str_buf: [32]u8 = undefined;
+    const server_str = try std.mem.print(&server_str_buf, "127.0.0.1:{d}", .{port});
+    const mc = try Memcache.create(allocator, .{ .server = server_str });
+    const c = mc.asCache();
+
+    // `get` / `isExist` 走 readGetReply，`set` 走 readLine，`delete` 走 readLine —— 全部 StorageError。
+    try std.testing.expectError(error.StorageError, c.get("k"));
+    try std.testing.expectError(error.StorageError, c.isExist("k"));
+    try std.testing.expectError(error.StorageError, c.set("k", "v", 60));
+    try std.testing.expectError(error.StorageError, c.delete("k"));
+
+    // 每次失败都断开连接，下一次操作重新建连（状态干净，不崩溃）。
+    try std.testing.expect(mc.stream == null);
+
+    mc.deinit();
+    allocator.destroy(mc);
+    thread.join();
+}
+
+test "memcache 连接池：默认上限为 1、显式 0 也按 1 处理，单连接模式池统计恒为零" {
+    const allocator = std.testing.allocator;
+
+    const defaults: Options = .{};
+    try std.testing.expectEqual(@as(usize, 1), defaults.max_connections);
+    try std.testing.expectEqual(@as(u64, 30_000), defaults.pool_timeout_ms);
+
+    const port = try net.findFreePort();
+    const addr = std.Io.net.IpAddress{ .ip4 = .{
+        .bytes = .{ 127, 0, 0, 1 },
+        .port = port,
+    } };
+    var ready = std.atomic.Value(bool).init(false);
+    const thread = try mockMemcacheServer(allocator, addr, &ready);
+    waitReady(&ready);
+
+    var server_str_buf: [32]u8 = undefined;
+    const server_str = try std.mem.print(&server_str_buf, "127.0.0.1:{d}", .{port});
+
+    // 显式 0 会被钳制为 1：这一档走的是历史单连接路径（`stream` / `mutex` 那组字段，
+    // 既有断言原样成立）。
+    const mc = try Memcache.create(allocator, .{ .server = server_str, .max_connections = 0 });
+    errdefer allocator.destroy(mc);
+    errdefer mc.deinit();
+    try std.testing.expectEqual(@as(usize, 1), mc.max_connections);
+
+    const c = mc.asCache();
+    try c.set("clamp", "v", 60);
+    const got = try c.get("clamp");
+    try std.testing.expect(got != null);
+    try std.testing.expectEqualStrings("v", got.?);
+
+    // 连接由实例自持（历史字段语义），池里没有连接，池统计恒为零。
+    try std.testing.expect(mc.stream != null);
+    const stats = mc.poolStats();
+    try std.testing.expectEqual(@as(usize, 0), stats.live);
+    try std.testing.expectEqual(@as(usize, 0), stats.idle);
+    try std.testing.expectEqual(@as(usize, 0), stats.in_use);
+    try std.testing.expectEqual(@as(usize, 0), stats.peak_in_use);
+    try std.testing.expectEqual(@as(usize, 0), stats.created);
+    try std.testing.expectEqual(@as(usize, 0), stats.discarded);
+    try std.testing.expectEqual(@as(usize, 0), stats.timeouts);
+
+    mc.deinit();
+    allocator.destroy(mc);
+    thread.join();
+}
+
+test "memcache 连接池：max_connections>1 时多线程真并发（服务端观测峰值 > 1）" {
+    const allocator = std.testing.allocator;
+    const port = try net.findFreePort();
+
+    var srv: MockPoolServer = .{
+        .allocator = allocator,
+        .addr = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = port } },
+        // 每条命令延迟 40ms：单连接串行时 4 个线程无法重叠，连接池下必然重叠。
+        .delay_ms = 40,
+    };
+    const server_thread = try srv.start();
+    waitReady(&srv.ready);
+    try std.testing.expect(srv.ready.load(.acquire));
+
+    const MAX_CONNS: usize = 4;
+    var server_str_buf: [32]u8 = undefined;
+    const server_str = try std.mem.print(&server_str_buf, "127.0.0.1:{d}", .{port});
+    const mc = try Memcache.create(allocator, .{
+        .server = server_str,
+        .max_connections = MAX_CONNS,
+        .pool_timeout_ms = 5_000,
+    });
+    errdefer allocator.destroy(mc);
+    errdefer mc.deinit();
+
+    const THREADS = MAX_CONNS;
+    const OPS = 3;
+
+    var go = std.atomic.Value(bool).init(false);
+    var bad = std.atomic.Value(bool).init(false);
+
+    const Worker = struct {
+        /// 签名必须是 `void` —— `std.Thread.spawn` 对返回 error union 的线程函数只
+        /// 打印错误名然后丢弃，`join()` 观察不到失败，因此走原子标志。
+        fn run(client: *Memcache, tid: usize, go_flag: *std.atomic.Value(bool), failed: *std.atomic.Value(bool)) void {
+            while (!go_flag.load(.acquire)) std.atomic.spinLoopHint();
+            var i: usize = 0;
+            while (i < OPS) : (i += 1) {
+                var key_buf: [32]u8 = undefined;
+                var val_buf: [32]u8 = undefined;
+                const key = std.mem.print(&key_buf, "pk_{d}_{d}", .{ tid, i }) catch {
+                    failed.store(true, .release);
+                    return;
+                };
+                const val = std.mem.print(&val_buf, "pv_{d}_{d}", .{ tid, i }) catch {
+                    failed.store(true, .release);
+                    return;
+                };
+                const c = client.asCache();
+                c.set(key, val, 60) catch {
+                    failed.store(true, .release);
+                    return;
+                };
+                const got_opt = c.get(key) catch {
+                    failed.store(true, .release);
+                    return;
+                };
+                const got = got_opt orelse {
+                    failed.store(true, .release);
+                    return;
+                };
+                // get 返回借用切片，必须在下一次缓存操作前比较。
+                if (!std.mem.eql(u8, got, val)) {
+                    failed.store(true, .release);
+                    return;
+                }
+            }
+        }
+    };
+
+    const threads = try allocator.alloc(std.Thread, THREADS);
+    defer allocator.free(threads);
+    for (threads, 0..) |*t, tid| t.* = try std.Thread.spawn(.{}, Worker.run, .{ mc, tid, &go, &bad });
+    go.store(true, .release);
+    for (threads) |t| t.join();
+
+    try std.testing.expect(!bad.load(.acquire));
+
+    const stats = mc.poolStats();
+    const server_peak = srv.peak.load(.acquire);
+    std.debug.print(
+        "[memcache pool] max_connections={d} server_peak_conns={d} client_peak_in_use={d} accepted={d}\n",
+        .{ MAX_CONNS, server_peak, stats.peak_in_use, srv.accepted.load(.acquire) },
+    );
+
+    try std.testing.expect(server_peak > 1);
+    try std.testing.expect(server_peak <= MAX_CONNS);
+    try std.testing.expect(stats.peak_in_use > 1);
+    try std.testing.expect(stats.peak_in_use <= MAX_CONNS);
+    try std.testing.expectEqual(@as(usize, 0), stats.timeouts);
+    // 空闲连接都还留在池里，全程没丢连接。
+    try std.testing.expectEqual(stats.live, stats.idle);
+    try std.testing.expectEqual(@as(usize, 0), stats.discarded);
+
+    mc.deinit();
+    allocator.destroy(mc);
+    srv.stopAndJoin(server_thread);
+}
+
+test "memcache 连接池：池满等待超时返回 PoolTimeout 而非挂死" {
+    const allocator = std.testing.allocator;
+    const port = try net.findFreePort();
+
+    var srv: MockPoolServer = .{
+        .allocator = allocator,
+        .addr = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = port } },
+        // 单条命令 2000ms，远大于下面的等待超时（余量刻意放大：并发负载下线程调度
+        // 可能延迟数百毫秒，不能让断言依赖紧边界）。
+        .delay_ms = 2_000,
+    };
+    const server_thread = try srv.start();
+    waitReady(&srv.ready);
+    try std.testing.expect(srv.ready.load(.acquire));
+
+    const MAX_CONNS: usize = 2;
+    var server_str_buf: [32]u8 = undefined;
+    const server_str = try std.mem.print(&server_str_buf, "127.0.0.1:{d}", .{port});
+    const mc = try Memcache.create(allocator, .{
+        .server = server_str,
+        .max_connections = MAX_CONNS,
+        .pool_timeout_ms = 150,
+    });
+    errdefer allocator.destroy(mc);
+    errdefer mc.deinit();
+
+    // 两个 holder 各占住一条连接（每条都要等 2000ms 的命令延迟才归还）。
+    var holders_done = std.atomic.Value(bool).init(false);
+    var holder_ok = std.atomic.Value(bool).init(true);
+    const Holder = struct {
+        fn run(client: *Memcache, done: *std.atomic.Value(bool), ok: *std.atomic.Value(bool)) void {
+            const c = client.asCache();
+            c.set("holder", "v", 60) catch ok.store(false, .release);
+            done.store(true, .release);
+        }
+    };
+    const holders = try allocator.alloc(std.Thread, MAX_CONNS);
+    defer allocator.free(holders);
+    for (holders) |*h| h.* = try std.Thread.spawn(.{}, Holder.run, .{ mc, &holders_done, &holder_ok });
+
+    // 等两条连接都被占住：`live` 在池锁内先占槽位，因此占住后立刻为 MAX_CONNS。
+    // 上界给足 5s：并发负载下 holder 线程可能迟迟排不上 CPU。
+    var waited: usize = 0;
+    while (mc.poolStats().live < MAX_CONNS) {
+        if (waited > 1000) break;
+        waited += 1;
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(5), .awake) catch {};
+    }
+    try std.testing.expectEqual(@as(usize, MAX_CONNS), mc.poolStats().live);
+
+    const start_ns = std.Io.Clock.now(.awake, std.testing.io).nanoseconds;
+    const c = mc.asCache();
+    try std.testing.expectError(error.StorageError, c.get("holder"));
+    const elapsed_ms = @divTrunc(std.Io.Clock.now(.awake, std.testing.io).nanoseconds - start_ns, std.time.ns_per_ms);
+
+    // 超时是有界的：既真的等了（≥ 100ms，容调度误差），又没有等到 holder 跑完（2000ms）。
+    try std.testing.expect(elapsed_ms >= 100);
+    try std.testing.expect(elapsed_ms < 1500);
+    try std.testing.expect(!holders_done.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), mc.poolStats().timeouts);
+
+    for (holders) |h| h.join();
+    try std.testing.expect(holder_ok.load(.acquire));
+
+    // 连接归还后可继续复用。
+    const got = try c.get("holder");
+    try std.testing.expect(got != null);
+    try std.testing.expectEqualStrings("v", got.?);
+    const stats = mc.poolStats();
+    try std.testing.expectEqual(@as(usize, MAX_CONNS), stats.live);
+    try std.testing.expectEqual(@as(usize, 0), stats.discarded);
+
+    mc.deinit();
+    allocator.destroy(mc);
+    srv.stopAndJoin(server_thread);
+}
+
+test "memcache 连接池：坏连接丢弃不进池，后续请求重建连接" {
+    const allocator = std.testing.allocator;
+    const port = try net.findFreePort();
+
+    var srv: MockPoolServer = .{
+        .allocator = allocator,
+        .addr = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = port } },
+        // 第 1 条连接在首个命令后回一帧非法文本协议响应：连得上、但协议坏掉。
+        .poison_conn = 1,
+    };
+    const server_thread = try srv.start();
+    waitReady(&srv.ready);
+    try std.testing.expect(srv.ready.load(.acquire));
+
+    var server_str_buf: [32]u8 = undefined;
+    const server_str = try std.mem.print(&server_str_buf, "127.0.0.1:{d}", .{port});
+    const mc = try Memcache.create(allocator, .{
+        .server = server_str,
+        .max_connections = 2,
+        .pool_timeout_ms = 2_000,
+    });
+    errdefer allocator.destroy(mc);
+    errdefer mc.deinit();
+
+    const c = mc.asCache();
+
+    // 首个请求撞上坏连接：必须失败，且该连接不能留在池中。
+    try std.testing.expectError(error.StorageError, c.set("poisoned", "v", 60));
+    const after_bad = mc.poolStats();
+    try std.testing.expectEqual(@as(usize, 1), after_bad.discarded);
+    try std.testing.expectEqual(@as(usize, 0), after_bad.idle);
+    try std.testing.expectEqual(@as(usize, 0), after_bad.live);
+
+    // 后续请求自动重建连接并成功（坏连接若被复用，这里会再次失败）。
+    try c.set("poisoned", "v", 60);
+    const got = try c.get("poisoned");
+    try std.testing.expect(got != null);
+    try std.testing.expectEqualStrings("v", got.?);
+    try std.testing.expect(try c.isExist("poisoned"));
+
+    // 全程只应建立 2 条连接：坏的那条 + 之后一直复用的那条。
+    try std.testing.expectEqual(@as(usize, 2), srv.accepted.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), mc.poolStats().live);
+
+    mc.deinit();
+    allocator.destroy(mc);
+    srv.stopAndJoin(server_thread);
 }

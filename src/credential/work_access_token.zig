@@ -100,21 +100,24 @@ pub const WorkAccessToken = struct {
         );
     }
 
-    /// 持锁读缓存并返回**深拷贝**（`null` = 未命中或值为空）。
+    /// 持锁读缓存并返回**所有权副本**（`null` = 未命中或值为空）。
     ///
-    /// **深拷贝必须在锁内完成**：`Cache.get` 返回的是**借用**切片，其有效期只到该 Cache
-    /// 实例的下一次写操作（见 `src/cache/mod.zig` 的生命周期契约）。本模块此前先在锁外
-    /// `get` 再 `dupe`，而"加锁双检"分支也是**先 `unlock` 再 `dupe`** —— 两条路径都留了窗口：
-    /// 并发的 `invalidate` / 回源回写若落在窗口内，`dupe` 就是读已释放内存。
-    /// 现在"取借用 + 深拷贝"整体在临界区内完成（与 `DefaultAccessToken.readCachedCopy` 同）。
+    /// 副本由 cache 后端在**它自己的临界区**内拷出（`Cache.getOwned`），因此即使
+    /// 另一个凭据对象 / 宿主模块共享同一个 `Cache` 实例并在并发写同一 key，
+    /// 拿到的也是独立内存（`Cache.get` 返回的借用切片只到本实例下一次写操作为止）。
+    /// 本对象的 `lock` 仍保留：它串行化本实例自己的缓存操作。
     fn readCachedCopy(self: *Self, allocator: std.mem.Allocator, key: []const u8) credential.CredentialError!?[]u8 {
         self.lock.lockUncancelable(self.io);
         defer self.lock.unlock(self.io);
 
-        const hit = try self.cache.get(key);
-        const val = hit orelse return null;
-        if (val.len == 0) return null;
-        return try allocator.dupe(u8, val);
+        const owned = try self.cache.getOwned(allocator, key);
+        const val = owned orelse return null;
+        if (val.len == 0) {
+            // 空值视为未命中；副本的所有权已在调用方，必须归还。
+            allocator.free(val);
+            return null;
+        }
+        return val;
     }
 
     /// 获取 access_token（singleflight 风格：加锁双检缓存 → 锁外回源 →
@@ -123,7 +126,7 @@ pub const WorkAccessToken = struct {
         const key = try self.cacheKey(allocator);
         defer allocator.free(key);
 
-        // 加锁双检：命中则直接用现成值（深拷贝在锁内完成）
+        // 加锁双检：命中则直接用现成值（副本由 cache 后端在自己的临界区拷出）
         if (try self.readCachedCopy(allocator, key)) |tok| return tok;
 
         // 锁外从服务端拉取（锁不跨网络 I/O）
@@ -141,11 +144,13 @@ pub const WorkAccessToken = struct {
         if (parsed.value.errcode != 0) return credential.CredentialError.ApiError;
 
         // 重新加锁双检：回源期间可能已被其他线程回写，命中直接用现成的。
-        // `defer unlock` 持锁到函数返回，故下面的 `dupe` 与 `set` 都在临界区内。
+        // 读取走 `getOwned`（副本由 cache 后端在自己的临界区拷出），共享同一
+        // Cache 实例的其它对象并发写同一 key 时也不会读到已释放内存。
         self.lock.lockUncancelable(self.io);
         defer self.lock.unlock(self.io);
-        if (try self.cache.get(key)) |val| {
-            if (val.len > 0) return allocator.dupe(u8, val);
+        if (try self.cache.getOwned(allocator, key)) |existing| {
+            if (existing.len > 0) return existing;
+            allocator.free(existing);
         }
 
         try self.cache.set(key, parsed.value.access_token, credential.tokenTTL(parsed.value.expires_in));

@@ -62,15 +62,23 @@ pub fn main() !void {
         .token = "your_token",
         .cache = mem.asCache(),
     };
+    // ⚠️ `asHandle()` 取的是 `*DefaultAccessToken`，必须先把获取器放进具名变量，
+    // 不能写成 `.init(...).asHandle()` —— 链式调用作用在临时值（`*const`）上，编译不过。
+    var default_token = zwechat.credential.DefaultAccessToken.init(
+        cfg.app_id,
+        cfg.app_secret,
+        zwechat.credential.CacheKeyOfficialAccountPrefix,
+        mem.asCache(),
+    );
     const ctx = zwechat.officialaccount.Context{
         .config = cfg,
-        .access_token_handle = zwechat.credential.DefaultAccessToken
-            .init(cfg.app_id, cfg.app_secret, zwechat.credential.CacheKeyOfficialAccountPrefix, mem.asCache())
-            .asHandle(),
+        .access_token_handle = default_token.asHandle(),
     };
 
     // 3. 构造 OfficialAccount 实例
-    const oa = zwechat.officialaccount.OfficialAccount.init(ctx);
+    // ⚠️ 必须是 `var`：`getContext()` / 各子模块工厂都取 `*OfficialAccount`；
+    // 且实例地址一旦派生子模块就不能再移动（子模块持 `&oa.ctx`）。
+    var oa = zwechat.officialaccount.OfficialAccount.init(ctx);
 
     // 4. 调用任意子模块（这里以 menu 为例）
     var fbabuf: [4096]u8 = undefined;
@@ -82,12 +90,17 @@ pub fn main() !void {
 }
 ```
 
+> 更省事的一步到位写法是用顶层工厂 `wc.getOfficialAccount(allocator, cfg, factory)`
+> （`var wc = zwechat.wechat.Wechat.init();` 见 `src/wechat.zig`），它会替你解析
+> `cfg.cache` 并调用 token 工厂。
+
 运行：`zig build run`
 
 ## 4. 企业微信（一行工厂）
 
 ```zig
-const w = try zwechat.work.Work.newDefaultWork(
+// ⚠️ `var`：`getAccessToken` / `getJsTicket` / `setDefaultTicketType` 都取 `*Work`。
+var w = try zwechat.work.Work.newDefaultWork(
     .{
         .corp_id = "ww_your_corp_id",
         .corp_secret = "your_corp_secret",
@@ -148,7 +161,7 @@ test "用 mock 拉取 access_token 并验证调用历史" {
 
 ## 6. 服务端：MessageHandler 路由
 
-完整代码见 [`examples/server.zig`](../examples/server.zig)（暂未提供）—— 公众号 URL 握手 + 加密消息解密 + handler 路由分发，单文件即可启动一个 Zig HTTP 服务对接微信服务器。
+完整代码见 [`examples/officialaccount_server.zig`](../examples/officialaccount_server.zig)（`zig build run-oa-server`）—— 公众号 URL 握手 + 加密消息解密 + handler 路由分发。接入真实 Web 框架时更推荐用 `src/middleware/` 的 `parseCallbackQuery` / `verifyURL` / `verifyServerSignature` / `handleServerMessage`（对 `zfinal` / `zigmodu` 友好）。
 
 简化版核心：
 
@@ -166,6 +179,7 @@ const response = try s.serve(.{
     .echostr = q.get("echostr") orelse "",
     .msg_signature = q.get("msg_signature") orelse "",
 });
+// `serve` 返回的 body 归调用方所有，写入 HTTP 响应后记得 allocator.free(response)。
 
 fn myHandler(_: *anyopaque, msg: *zwechat.officialaccount.message.MixMessage) anyerror!?zwechat.officialaccount.message.Reply {
     return .{
@@ -177,7 +191,7 @@ fn myHandler(_: *anyopaque, msg: *zwechat.officialaccount.message.MixMessage) an
 
 ## 7. 下一步
 
-- 阅读 [`architecture.md`](architecture.md) 了解模块依赖与接口设计
+- 阅读 [`architecture.md`](architecture.md) 了解模块依赖与接口设计（含 Cache 后端与 `getOwned` 所有权契约、`std.Io.Mutex` 并发模型、测试/CI 门禁）
 - 阅读 [`migration-from-go.md`](migration-from-go.md) 把现有 Go 代码迁移到 Zig
 - 阅读 [`api-reference.md`](api-reference.md) 查看完整公共 API
 - 对照[上游 Go 接口清单](https://github.com/silenceper/wechat/tree/master/doc/api)找具体业务接口（本地 `_ref/wechat/doc/api/` 为开发期对照，不入库）

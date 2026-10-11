@@ -352,11 +352,20 @@ pub const HttpClient = struct {
     allocator: std.mem.Allocator,
 
     /// 自定义 transport（用于 mock）。`null` 时使用默认的 std.http.Client。
+    ///
+    /// **必须与 `transport_ctx` 成对设置**：只设本字段而 `transport_ctx == null` 时，
+    /// 任意一次请求都会返回 `error.TransportMisconfigured`（不会 abort 进程）。
+    /// 请用 `setTransport(t, ctx)` 成对注入。
     transport: ?Transport = null,
     /// 自定义 transport 的不透明上下文（`transport` 被调用时透传）。
+    ///
+    /// 与 `transport` / `header_transport` **成对**设置；`transport != null` 而本字段为
+    /// `null` 时请求返回 `error.TransportMisconfigured`。
     transport_ctx: ?*anyopaque = null,
     /// 带请求头的自定义 transport（用于 mock）。设置后优先于 `transport`；
     /// 两者互斥（任一 setter 都会清掉另一个），避免「重置」后旧的 mock 仍生效。
+    ///
+    /// 与 `transport_ctx` **成对**设置（未成对时请求返回 `error.TransportMisconfigured`）。
     header_transport: ?HeaderTransport = null,
 
     /// 响应体硬上限（字节）。超过时返回 `error.ResponseTooLarge`；`0` = 不限量。
@@ -400,6 +409,10 @@ pub const HttpClient = struct {
     ///
     /// 与 `setHeaderTransport` 互斥：本函数会清掉已注入的 `HeaderTransport`
     /// （`setTransport(null, null)` 因此是「彻底恢复真实 HTTP」）。
+    ///
+    /// **`t` 与 `ctx` 必须成对**：只设 `t` 而 `ctx == null` 时，任意请求都会返回
+    /// `error.TransportMisconfigured`。公开字段 `transport` / `transport_ctx` 直接赋值
+    /// 时同样受此约束。
     pub fn setTransport(self: *HttpClient, t: ?Transport, ctx: ?*anyopaque) void {
         self.transport = t;
         self.header_transport = null;
@@ -410,6 +423,9 @@ pub const HttpClient = struct {
     ///
     /// 与 `setTransport` 互斥（本函数会清掉 `transport`）。用于断言签名头
     /// （`Authorization` / `Wechatpay-Serial` 等）确实被发出。
+    ///
+    /// **`t` 与 `ctx` 必须成对**：只设 `t` 而 `ctx == null` 时，任意请求都会返回
+    /// `error.TransportMisconfigured`。
     pub fn setHeaderTransport(self: *HttpClient, t: ?HeaderTransport, ctx: ?*anyopaque) void {
         self.header_transport = t;
         self.transport = null;
@@ -679,8 +695,7 @@ pub const HttpClient = struct {
         headers: []const std.http.Header,
     ) !?[]u8 {
         if (!self.hasTransport()) return null;
-        const tctx = self.transport_ctx orelse
-            @panic("HttpClient.transport 已设置但 transport_ctx 为空：请用 setTransport/setHeaderTransport 同时传入两者");
+        const tctx = self.transport_ctx orelse return util_error.WechatError.TransportMisconfigured;
         if (self.header_transport) |t| {
             return try t(tctx, self.allocator, effective_uri, method, payload, content_type, headers);
         }
@@ -1594,6 +1609,11 @@ pub const MockTransport = struct {
     routes: std.HashMap([]const u8, Response, std.hash_map.StringContext, 80),
     /// 调用历史（uri 列表），用于断言。
     history: std.ArrayList([]const u8),
+    /// 调用历史（**请求体**列表，与 `history` 一一对应），用于断言"实际发出了什么"。
+    ///
+    /// 每项是本实例 `allocator` 分配的独立副本（`deinit` 统一释放）；只读，
+    /// 取用请走 `payloadAt`。GET 等无请求体的调用对应空切片。
+    payloads: std.ArrayList([]const u8),
 
     pub const Response = struct {
         body: []const u8,
@@ -1605,13 +1625,24 @@ pub const MockTransport = struct {
             .allocator = allocator,
             .routes = .init(allocator),
             .history = .empty,
+            .payloads = .empty,
         };
     }
 
     pub fn deinit(self: *MockTransport) void {
         for (self.history.items) |item| self.allocator.free(item);
         self.history.deinit(self.allocator);
+        for (self.payloads.items) |item| self.allocator.free(item);
+        self.payloads.deinit(self.allocator);
         self.routes.deinit();
+    }
+
+    /// 取第 `idx` 次调用记录的请求体（借用，有效期至本实例 `deinit`）。
+    ///
+    /// 与 `history.items[idx]` 同一序号（第 `idx` 次调用）；越界即测试写错
+    /// （越界索引在安全检查构建下 panic）。无请求体的调用返回空切片。
+    pub fn payloadAt(self: *const MockTransport, idx: usize) []const u8 {
+        return self.payloads.items[idx];
     }
 
     /// 注册一个 URI → 响应的映射。
@@ -1633,10 +1664,17 @@ pub const MockTransport = struct {
         content_type: ?[]const u8,
     ) anyerror![]u8 {
         _ = method;
-        _ = payload;
         _ = content_type;
         const self: *MockTransport = @ptrCast(@alignCast(ctx));
         try self.history.append(self.allocator, try self.allocator.dupe(u8, uri));
+        // 请求体同样 dupe 一份（用本实例的 allocator，与 deinit 对称）。这里不能用
+        // errdefer：函数尾部的 `return ... catch return error.OutOfMemory` 会让已入列的
+        // 副本被二次释放。
+        const payload_dup = try self.allocator.dupe(u8, payload);
+        self.payloads.append(self.allocator, payload_dup) catch |e| {
+            self.allocator.free(payload_dup);
+            return e;
+        };
         const gop = self.routes.getEntry(uri) orelse return error.MockNoRoute;
         return allocator.dupe(u8, gop.value_ptr.body) catch return error.OutOfMemory;
     }
@@ -1946,6 +1984,34 @@ test "MockTransport 截获 URI 并返回预设响应" {
     defer allocator.free(resp);
     try std.testing.expectEqualStrings("{\"ok\":true}", resp);
     try std.testing.expectEqual(@as(usize, 1), mock.history.items.len);
+}
+
+test "MockTransport 记录请求体（payloads / payloadAt 与 history 同序）" {
+    const allocator = std.testing.allocator;
+    var mock = MockTransport.init(allocator);
+    defer mock.deinit();
+
+    try mock.addRoute("https://example.com/post", .{ .body = "{\"ok\":true}" });
+    try mock.addRoute("https://example.com/get", .{ .body = "{\"ok\":true}" });
+
+    var client = HttpClient.init(allocator);
+    defer client.deinit();
+    client.setTransport(MockTransport.dispatch, @ptrCast(&mock));
+
+    // POST 带请求体；GET 无请求体（记为空切片）。
+    const r1 = try client.postJSON("https://example.com/post", "{\"a\":1}");
+    defer allocator.free(r1);
+    const r2 = try client.get("https://example.com/get");
+    defer allocator.free(r2);
+
+    try std.testing.expectEqual(@as(usize, 2), mock.history.items.len);
+    try std.testing.expectEqual(@as(usize, 2), mock.payloads.items.len);
+
+    // 核心断言：**实际发出**的请求体逐字被记录，且与 history 同序对应。
+    try std.testing.expectEqualStrings("{\"a\":1}", mock.payloadAt(0));
+    try std.testing.expectEqualStrings("", mock.payloadAt(1));
+    try std.testing.expectEqualStrings("https://example.com/post", mock.history.items[0]);
+    try std.testing.expectEqualStrings("https://example.com/get", mock.history.items[1]);
 }
 
 test "MockTransport 未注册 URI 返回 MockNoRoute" {
@@ -3031,13 +3097,44 @@ test "setTransport(null, null) 与 setHeaderTransport(null, null) 互相清空�
     try std.testing.expect(!client.hasTransport());
 }
 
-test "注入 transport 但 transport_ctx 为空时 panic 提示（既有契约未变）" {
-    // 只断言字段默认值：panic 路径需要 catch panic，代价大于价值。
-    var client = HttpClient.init(std.testing.allocator);
+test "只设 transport / header_transport 不设 transport_ctx 时返回 TransportMisconfigured（不再 panic）" {
+    const allocator = std.testing.allocator;
+    var mock = MockTransport.init(allocator);
+    defer mock.deinit();
+    try mock.addRoute("https://example.com/misconfig", .{ .body = "{}" });
+
+    var client = HttpClient.init(allocator);
     defer client.deinit();
+
+    // 1) 普通 transport：只设 transport（公开字段），transport_ctx 保持 null。
+    client.setTransport(MockTransport.dispatch, null);
+    try std.testing.expect(client.transport != null);
     try std.testing.expect(client.transport_ctx == null);
-    try std.testing.expect(client.transport == null);
-    try std.testing.expect(client.header_transport == null);
+    try std.testing.expectError(
+        error.TransportMisconfigured,
+        client.postJSON("https://example.com/misconfig", "{}"),
+    );
+    // 错误发生在派发之前：transport 一次都没被调用（未记录任何 URI）。
+    try std.testing.expectEqual(@as(usize, 0), mock.history.items.len);
+
+    // 2) header transport 走同一条校验。
+    var cap = HeaderCapture.init(allocator, "{}");
+    defer cap.deinit();
+    client.setHeaderTransport(HeaderCapture.dispatch, null);
+    try std.testing.expect(client.header_transport != null);
+    try std.testing.expect(client.transport_ctx == null);
+    try std.testing.expectError(
+        error.TransportMisconfigured,
+        client.postJSON("https://example.com/misconfig", "{}"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), cap.payload.len);
+
+    // 3) 成对设置后恢复正常（证明只是半配置被拦，未破坏正常路径）。
+    client.setTransport(MockTransport.dispatch, @ptrCast(&mock));
+    const ok = try client.postJSON("https://example.com/misconfig", "{}");
+    defer allocator.free(ok);
+    try std.testing.expectEqualStrings("{}", ok);
+    try std.testing.expectEqual(@as(usize, 1), mock.history.items.len);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

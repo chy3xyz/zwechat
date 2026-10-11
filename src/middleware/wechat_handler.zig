@@ -74,7 +74,7 @@ pub fn verifyServerSignature(
     const params = [_][]const u8{ token, query.timestamp, query.nonce };
     const computed = signature.signature(allocator, &params) catch return false;
     defer allocator.free(computed);
-    return std.mem.eql(u8, computed, query.signature);
+    return crypto.timingSafeEqlSlices(computed, query.signature);
 }
 
 /// URL 验证（GET 握手）便捷入口。

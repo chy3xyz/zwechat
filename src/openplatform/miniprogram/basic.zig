@@ -123,7 +123,7 @@ pub const Basic = struct {
         const ctx = self.ctx;
         if (ctx.transport) |t| {
             const tctx = ctx.transport_ctx orelse
-                @panic("Context.transport 已设置但 transport_ctx 为空：请同时传入两者");
+                return util_error.WechatError.TransportMisconfigured;
             var client = util_http.HttpClient.init(allocator);
             defer client.deinit();
             client.setTransport(t, tctx);
@@ -143,7 +143,7 @@ pub const Basic = struct {
         const ctx = self.ctx;
         if (ctx.transport) |t| {
             const tctx = ctx.transport_ctx orelse
-                @panic("Context.transport 已设置但 transport_ctx 为空：请同时传入两者");
+                return util_error.WechatError.TransportMisconfigured;
             var client = util_http.HttpClient.init(allocator);
             defer client.deinit();
             client.setTransport(t, tctx);
@@ -484,6 +484,27 @@ fn createMemory(allocator: std.mem.Allocator) !*@import("../../cache/memory.zig"
     return @import("../../cache/memory.zig").Memory.create(allocator);
 }
 
+test "只设 transport 不设 transport_ctx 时 GET 与 POST 均返回 TransportMisconfigured（不再 abort 进程）" {
+    const allocator = std.testing.allocator;
+
+    const memory = try createMemory(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+
+    // testCtx 预置了 authorizer token：确保失败只可能来自 transport 半配置。
+    var ctx = try testCtx(allocator, memory);
+    ctx.transport = RecordingTransport.dispatch;
+    ctx.transport_ctx = null;
+
+    var basic = Basic.init(&ctx, "wx-mp-1");
+    // `get` 出口。
+    try std.testing.expectError(error.TransportMisconfigured, basic.getAccountBasicInfo(allocator));
+    // `postJSON` 出口。
+    try std.testing.expectError(error.TransportMisconfigured, basic.checkNickName(allocator, "新昵称"));
+}
+
 test "getAccountBasicInfo mock：GET 正确 URL 并解析响应" {
     const allocator = std.testing.allocator;
 
@@ -788,4 +809,27 @@ test "basic 方法 authorizer token 缓存未命中返回 RefreshTokenRequired" 
     var basic = Basic.init(&ctx, "wx-mp-1");
     const result = basic.getSearchStatus(allocator);
     try std.testing.expectError(error.RefreshTokenRequired, result);
+}
+
+test "basic 四个入口畸形 JSON 返回 DecodeError" {
+    const allocator = std.testing.allocator;
+
+    const memory = try createMemory(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+
+    // 上游返回截断 JSON；authorizer token 由 testCtx 预置，失败只可能来自解析。
+    var rec = RecordingTransport.init(allocator, "{");
+    defer rec.deinit();
+    var ctx = try testCtx(allocator, memory);
+    ctx.transport = RecordingTransport.dispatch;
+    ctx.transport_ctx = @ptrCast(&rec);
+
+    var basic = Basic.init(&ctx, "wx-mp-1");
+    try std.testing.expectError(util_error.WechatError.DecodeError, basic.getAccountBasicInfo(allocator));
+    try std.testing.expectError(util_error.WechatError.DecodeError, basic.getSearchStatus(allocator));
+    try std.testing.expectError(util_error.WechatError.DecodeError, basic.checkNickName(allocator, "新昵称"));
+    try std.testing.expectError(util_error.WechatError.DecodeError, basic.setSearchStatus(allocator, 0));
 }

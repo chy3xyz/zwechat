@@ -561,7 +561,13 @@ test "getMenu 解析 type 字段（回归：type_ 与 JSON 键 type 不匹配）
     defer mt.deinit();
     try mt.addRoute("https://api.weixin.qq.com/cgi-bin/menu/get?access_token=token-abc", .{
         .body =
-        \\{"menu":{"button":[{"type":"click","name":"今日歌曲","key":"V1001_TODAY_MUSIC"}],"menuid":208396938}}
+        \\{"errcode":0,"errmsg":"ok","menu":{"button":[
+        \\{"type":"click","name":"今日歌曲","key":"V1001_TODAY_MUSIC"},
+        \\{"type":"view","name":"官网","url":"https://example.com"},
+        \\{"name":"父菜单","sub_button":[{"type":"click","name":"子菜单","key":"SUB1"}]}
+        \\],"menuid":208396938},"conditionalmenu":[
+        \\{"button":[{"type":"view","name":"个性官网","url":"https://example.com/c"}],"matchrule":{"country":"中国","province":"广东"},"menuid":555}
+        \\]}
         ,
     });
 
@@ -571,9 +577,25 @@ test "getMenu 解析 type 字段（回归：type_ 与 JSON 键 type 不匹配）
 
     var parsed = try m.getMenu();
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.menu.button.len);
-    try std.testing.expectEqualStrings("click", parsed.value.menu.button[0].type);
-    try std.testing.expectEqualStrings("今日歌曲", parsed.value.menu.button[0].name);
+
+    // 整体比较：一次覆盖 ResMenu 全部字段（含 key / url / sub_button / menuid / matchrule）。
+    var sub_buttons = [_]Button{Button{ .type = "click", .name = "子菜单", .key = "SUB1" }};
+    var buttons = [_]Button{
+        Button{ .type = "click", .name = "今日歌曲", .key = "V1001_TODAY_MUSIC" },
+        Button{ .type = "view", .name = "官网", .url = "https://example.com" },
+        Button{ .name = "父菜单", .sub_button = &sub_buttons },
+    };
+    var cond_buttons = [_]Button{Button{ .type = "view", .name = "个性官网", .url = "https://example.com/c" }};
+    var conditional = [_]ResMenu.ConditionalMenu{.{
+        .button = &cond_buttons,
+        .matchrule = .{ .country = "中国", .province = "广东" },
+        .menuid = 555,
+    }};
+    try std.testing.expectEqualDeep(ResMenu{
+        .errmsg = "ok",
+        .menu = .{ .button = &buttons, .menuid = 208396938 },
+        .conditionalmenu = &conditional,
+    }, parsed.value);
 }
 
 test "deleteConditional 请求 menuid" {
@@ -725,7 +747,11 @@ test "getCurrentSelfMenuInfo 解析 selfmenu_info" {
     defer mt.deinit();
     try mt.addRoute("https://api.weixin.qq.com/cgi-bin/get_current_selfmenu_info?access_token=token-abc", .{
         .body =
-        \\{"is_menu_open":1,"selfmenu_info":{"button":[{"type":"click","name":"今日歌曲","key":"V1001"}]}}
+        \\{"errcode":0,"errmsg":"ok","is_menu_open":1,"selfmenu_info":{"button":[
+        \\{"type":"click","name":"今日歌曲","key":"V1001","value":"V1"},
+        \\{"name":"父菜单","sub_button":{"list":[{"type":"view","name":"子菜单","url":"https://example.com/sub"}]}},
+        \\{"type":"view","name":"图文","news_info":{"list":[{"title":"标题","author":"作者","digest":"摘要","show_cover":1,"cover_url":"https://example.com/c.jpg","content_url":"https://example.com/ct","source_url":"https://example.com/src"}]}}
+        \\]}}
         ,
     });
 
@@ -735,9 +761,28 @@ test "getCurrentSelfMenuInfo 解析 selfmenu_info" {
 
     var parsed = try m.getCurrentSelfMenuInfo();
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(i32, 1), parsed.value.is_menu_open);
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.selfmenu_info.button.len);
-    try std.testing.expectEqualStrings("click", parsed.value.selfmenu_info.button[0].type);
+
+    // 整体比较：一次覆盖 ResSelfMenuInfo 全部字段（含 sub_button.list / news_info.list 全字段）。
+    var sub_list = [_]SelfMenuButton{SelfMenuButton{ .type = "view", .name = "子菜单", .url = "https://example.com/sub" }};
+    var news_list = [_]ButtonNew{.{
+        .title = "标题",
+        .author = "作者",
+        .digest = "摘要",
+        .show_cover = 1,
+        .cover_url = "https://example.com/c.jpg",
+        .content_url = "https://example.com/ct",
+        .source_url = "https://example.com/src",
+    }};
+    var buttons = [_]SelfMenuButton{
+        SelfMenuButton{ .type = "click", .name = "今日歌曲", .key = "V1001", .value = "V1" },
+        SelfMenuButton{ .name = "父菜单", .sub_button = .{ .list = &sub_list } },
+        SelfMenuButton{ .type = "view", .name = "图文", .news_info = .{ .list = &news_list } },
+    };
+    try std.testing.expectEqualDeep(ResSelfMenuInfo{
+        .errmsg = "ok",
+        .is_menu_open = 1,
+        .selfmenu_info = .{ .button = &buttons },
+    }, parsed.value);
 }
 
 test "menuTryMatch 返回 button 列表" {
@@ -745,7 +790,12 @@ test "menuTryMatch 返回 button 列表" {
     var mt = util_http.MockTransport.init(allocator);
     defer mt.deinit();
     try mt.addRoute("https://api.weixin.qq.com/cgi-bin/menu/trymatch?access_token=token-abc", .{
-        .body = "{\"button\":[{\"type\":\"view\",\"name\":\"官网\",\"url\":\"https://example.com\"}]}",
+        .body =
+        \\{"errcode":0,"errmsg":"ok","button":[
+        \\{"type":"view","name":"官网","url":"https://example.com"},
+        \\{"name":"父菜单","sub_button":[{"type":"click","name":"子菜单","key":"K1"}]}
+        \\]}
+        ,
     });
 
     var ctx = makeCtx();
@@ -754,8 +804,17 @@ test "menuTryMatch 返回 button 列表" {
 
     var parsed = try m.menuTryMatch("openid-1");
     defer parsed.deinit();
-    try std.testing.expectEqual(@as(usize, 1), parsed.value.button.len);
-    try std.testing.expectEqualStrings("view", parsed.value.button[0].type);
+
+    // 整体比较：覆盖 TryMatchResult 全部字段（含嵌套 sub_button）。
+    var sub_buttons = [_]Button{Button{ .type = "click", .name = "子菜单", .key = "K1" }};
+    var buttons = [_]Button{
+        Button{ .type = "view", .name = "官网", .url = "https://example.com" },
+        Button{ .name = "父菜单", .sub_button = &sub_buttons },
+    };
+    try std.testing.expectEqualDeep(TryMatchResult{
+        .errmsg = "ok",
+        .button = &buttons,
+    }, parsed.value);
 }
 
 test "menuTryMatch 对含引号/控制字符的 user_id 转义（回归：手写 JSON 拼接）" {

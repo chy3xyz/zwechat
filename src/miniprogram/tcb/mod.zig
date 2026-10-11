@@ -776,7 +776,7 @@ test "invokeCloudFunction 的 env/name 进 query 前转义（正常输入逐字�
     var t = Tcb.init(&ctx, alloc);
     var parsed = try t.invokeCloudFunction("prod&x=1", "fn name", "{}");
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("{}", parsed.value.resp_data);
+    try std.testing.expectEqualDeep(InvokeCloudFunctionRes{ .errmsg = "ok", .resp_data = "{}" }, parsed.value);
 
     try std.testing.expectEqualStrings(
         "https://api.weixin.qq.com/tcb/invokecloudfunction?access_token=stub-ak&env=prod%26x%3D1&name=fn+name",
@@ -889,7 +889,11 @@ test "databaseMigrateQueryInfo 请求体对 env 中的引号、反斜杠与控�
     defer body.deinit();
     try std.testing.expectEqualStrings(env, body.value.env);
     try std.testing.expectEqual(@as(i64, 42), body.value.job_id);
-    try std.testing.expectEqual(@as(i64, 3), parsed.value.record_success);
+    try std.testing.expectEqualDeep(DatabaseMigrateQueryInfoRes{
+        .errmsg = "ok",
+        .status = "success",
+        .record_success = 3,
+    }, parsed.value);
 }
 
 // ── token 失效自愈（util_retry.callApi）──────────────────────────────────────
@@ -1029,8 +1033,17 @@ test "batchDownloadFile：历史写法 file_id 仍可解析（不破坏既有自
     var parsed = try t.batchDownloadFile("env-1", &.{.{ .fileid = "x", .max_age = 1 }});
     defer parsed.deinit();
 
-    try std.testing.expectEqualStrings("cloud://env/legacy.png", parsed.value.file_list[0].file_id);
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.file_list[0].status);
+    // 整体比较：fileid / download_url / status / errmsg 四个字段一并进入断言范围。
+    var want_files = [_]DownloadedFile{.{
+        .file_id = "cloud://env/legacy.png",
+        .download_url = "u",
+        .status = 1,
+        .errmsg = "",
+    }};
+    try std.testing.expectEqualDeep(BatchDownloadFileRes{
+        .errmsg = "ok",
+        .file_list = &want_files,
+    }, parsed.value);
 }
 
 test "batchDeleteFile：POST tcb/batchdeletefile，fileid_list 为字符串数组" {
@@ -1064,8 +1077,11 @@ test "batchDeleteFile：POST tcb/batchdeletefile，fileid_list 为字符串数�
     try std.testing.expectEqualStrings("cloud://env/A.png", ids[0].string);
     try std.testing.expectEqualStrings("cloud://env/B.png", ids[1].string);
 
-    try std.testing.expectEqualStrings("cloud://env/A.png", parsed.value.delete_list[0].fileid);
-    try std.testing.expectEqual(@as(i64, 0), parsed.value.delete_list[0].status);
+    var want_deleted = [_]DeletedFile{.{ .fileid = "cloud://env/A.png", .status = 0, .errmsg = "ok" }};
+    try std.testing.expectEqualDeep(BatchDeleteFileRes{
+        .errmsg = "ok",
+        .delete_list = &want_deleted,
+    }, parsed.value);
 }
 
 test "databaseMigrateImport：POST tcb/databasemigrateimport，枚举序列化为数字" {
@@ -1109,7 +1125,7 @@ test "databaseMigrateImport：POST tcb/databasemigrateimport，枚举序列化�
     try std.testing.expectEqual(@as(i64, 2), fieldInt(body, "conflict_mode"));
     try std.testing.expect(body.object.get("stop_on_error").?.bool);
 
-    try std.testing.expectEqual(@as(i64, 88), parsed.value.job_id);
+    try std.testing.expectEqualDeep(DatabaseMigrateImportRes{ .errmsg = "ok", .job_id = 88 }, parsed.value);
 }
 
 test "databaseMigrateExport：POST tcb/databasemigrateexport，query 作为字符串字段转义" {
@@ -1149,7 +1165,7 @@ test "databaseMigrateExport：POST tcb/databasemigrateexport，query 作为字�
     // query 是一段 JSON 文本，必须整体作为字符串字段（含双引号也能完整还原）。
     try std.testing.expectEqualStrings(query, fieldStr(body, "query"));
 
-    try std.testing.expectEqual(@as(i64, 7), parsed.value.job_id);
+    try std.testing.expectEqualDeep(DatabaseMigrateExportRes{ .errmsg = "ok", .job_id = 7 }, parsed.value);
 }
 
 test "updateIndex：POST tcb/updateindex，create/drop 索引嵌套结构完整" {
@@ -1304,9 +1320,8 @@ test "databaseAdd：POST tcb/databaseadd，query 作为字符串字段且 id_lis
     try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
     try std.testing.expectEqualStrings(query, fieldStr(body, "query"));
 
-    try std.testing.expectEqual(@as(usize, 2), parsed.value.id_list.len);
-    try std.testing.expectEqualStrings("id-1", parsed.value.id_list[0]);
-    try std.testing.expectEqualStrings("id-2", parsed.value.id_list[1]);
+    var want_ids = [_][]const u8{ "id-1", "id-2" };
+    try std.testing.expectEqualDeep(DatabaseAddRes{ .errmsg = "ok", .id_list = &want_ids }, parsed.value);
 }
 
 test "databaseDelete：POST tcb/databasedelete，deleted 可解析" {
@@ -1335,7 +1350,7 @@ test "databaseDelete：POST tcb/databasedelete，deleted 可解析" {
 
     const body = try capturedBody(alloc, cap.payload);
     try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
-    try std.testing.expectEqual(@as(i64, 3), parsed.value.deleted);
+    try std.testing.expectEqualDeep(DatabaseDeleteRes{ .errmsg = "ok", .deleted = 3 }, parsed.value);
 }
 
 test "databaseUpdate：POST tcb/databaseupdate，matched/modified/id 可解析" {
@@ -1365,9 +1380,12 @@ test "databaseUpdate：POST tcb/databaseupdate，matched/modified/id 可解析" 
     const body = try capturedBody(alloc, cap.payload);
     try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
 
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.matched);
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.modified);
-    try std.testing.expectEqualStrings("doc-1", parsed.value.id);
+    try std.testing.expectEqualDeep(DatabaseUpdateRes{
+        .errmsg = "ok",
+        .matched = 1,
+        .modified = 1,
+        .id = "doc-1",
+    }, parsed.value);
 }
 
 test "databaseCount：POST tcb/databasecount，count 可解析" {
@@ -1397,5 +1415,5 @@ test "databaseCount：POST tcb/databasecount，count 可解析" {
     const body = try capturedBody(alloc, cap.payload);
     try std.testing.expectEqualStrings("env-1", fieldStr(body, "env"));
 
-    try std.testing.expectEqual(@as(i64, 42), parsed.value.count);
+    try std.testing.expectEqualDeep(DatabaseCountRes{ .errmsg = "ok", .count = 42 }, parsed.value);
 }

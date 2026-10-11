@@ -62,6 +62,27 @@ pub fn calculateSign(
     return allocator.dupe(u8, &std.fmt.bytesToHex(&digest, .upper));
 }
 
+/// 恒定时间比较两段**签名 / 摘要**切片，语义等价于 `std.mem.eql(u8, a, b)`。
+///
+/// 用于比较微信回调签名（MD5 / HMAC-SHA256 / SHA1 的 hex 串）等由密钥派生出的
+/// 数据：`std.mem.eql` 长度不同即返回、长度相同则逐字节短路，攻击者可借响应时间
+/// 差异逐字节猜出正确签名（时序攻击）。本函数对长度相等的输入始终读完两个切片、
+/// 用 `|`/`&` 位运算累积差异，不做数据相关分支。
+///
+/// **长度不是秘密**：长度不同直接返回 `false`（与 `std.mem.eql` 的可见行为一致）。
+/// 两个空切片视为相等（返回 `true`）。
+///
+/// 为什么不用 `std.crypto.timing_safe.eql`：该函数只接受**定长数组 / 向量**
+/// （`[N]u8`），对 `[]const u8` 会 `@compileError("Only arrays and vectors can be
+/// compared")`；微信签名长度随 `encoding_aes_key` / hex 大小写等场景并不统一为
+/// 编译期常量，故这里为切片单独实现。
+pub fn timingSafeEqlSlices(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var diff: u8 = 0;
+    for (a, b) |x, y| diff |= x ^ y;
+    return diff == 0;
+}
+
 // -----------------------------------------------------------------------------
 // AES-256-CBC（仅暴露给 `AESEncryptMsg` / `AESDecryptMsg` 使用）
 // -----------------------------------------------------------------------------
@@ -294,6 +315,57 @@ fn decodeNetworkByteOrder(in: []const u8) u32 {
 // tests
 // -----------------------------------------------------------------------------
 
+test "timingSafeEqlSlices 与 std.crypto.timing_safe.eql 语义一致（相同/差一字节/长度不同）" {
+    // 定长数组路径：与 std 的定长实现逐例对照，证明切片版语义等价。
+    var fixed_a: [32]u8 = undefined;
+    var fixed_b: [32]u8 = undefined;
+    std.testing.io.random(&fixed_a);
+    fixed_b = fixed_a;
+
+    try std.testing.expect(std.crypto.timing_safe.eql([32]u8, fixed_a, fixed_b));
+    try std.testing.expect(timingSafeEqlSlices(&fixed_a, &fixed_b));
+
+    // 差一个字节（含差在最后一字节）→ false。
+    var differ_last = fixed_b;
+    differ_last[31] ^= 0x01;
+    try std.testing.expect(!std.crypto.timing_safe.eql([32]u8, fixed_a, differ_last));
+    try std.testing.expect(!timingSafeEqlSlices(&fixed_a, &differ_last));
+
+    var differ_first = fixed_b;
+    differ_first[0] ^= 0xFF;
+    try std.testing.expect(!std.crypto.timing_safe.eql([32]u8, fixed_a, differ_first));
+    try std.testing.expect(!timingSafeEqlSlices(&fixed_a, &differ_first));
+}
+
+test "timingSafeEqlSlices 覆盖空串、长度不等与切片前缀" {
+    // 空 vs 空 → true（与 std.mem.eql 行为一致）。
+    try std.testing.expect(timingSafeEqlSlices("", ""));
+    // 空 vs 非空 / 长度不等 → false（长度不是秘密，允许早退）。
+    try std.testing.expect(!timingSafeEqlSlices("", "a"));
+    try std.testing.expect(!timingSafeEqlSlices("a", ""));
+    try std.testing.expect(!timingSafeEqlSlices("abc", "abcd"));
+    // 前缀相同但更短的切片必须判 false（证明比较了长度，而非只看公共前缀）。
+    try std.testing.expect(!timingSafeEqlSlices("abcd"[0..3], "abcd"));
+
+    // 32 字节 hex 形态（MD5）与 64 字节 hex 形态（HMAC-SHA256）正向用例。
+    const md5_hex = "5D41402ABC4B2A76B9719D911017C592";
+    try std.testing.expect(timingSafeEqlSlices(md5_hex, "5D41402ABC4B2A76B9719D911017C592"));
+    try std.testing.expect(!timingSafeEqlSlices(md5_hex, "5D41402ABC4B2A76B9719D911017C593"));
+    const sha_len = 64;
+    var big_a = repeatHex(sha_len, 'a');
+    var big_b = repeatHex(sha_len, 'a');
+    try std.testing.expect(timingSafeEqlSlices(&big_a, &big_b));
+    big_b[sha_len - 1] = 'b';
+    try std.testing.expect(!timingSafeEqlSlices(&big_a, &big_b));
+}
+
+/// 测试辅助：构造 `n` 个 `byte` 的定长缓冲（本工具链移除了 `**` 数组重复运算符）。
+fn repeatHex(comptime n: usize, byte: u8) [n]u8 {
+    var out: [n]u8 = undefined;
+    @memset(&out, byte);
+    return out;
+}
+
 test "CalculateSign MD5 of 'hello' = 5d41402abc4b2a76b9719d911017c592" {
     const allocator = std.testing.allocator;
     const got = try calculateSign(allocator, "hello", SignTypeMD5, "");
@@ -490,4 +562,156 @@ test "pkcs5Unpad 对非法补位不报错而是原样返回（既有契约，无
         pkcs7Unpad("abc\x05\x05\x05\x05\x05"),
         pkcs5Unpad("abc\x05\x05\x05\x05\x05"),
     );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// fuzz（`zig build test --fuzz=<N>` 才真正变异；普通 `zig build test` 会先跑 corpus
+// 里的真实密文、再跑一次空输入冒烟 —— 见文件末尾的 `fuzz_corpus`）
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// 固定的 32 字节 AES key。攻击者控制的是回调密文（`AESDecryptMsg` 的 `ciphertext`），
+/// key 是商户配置；把它固定住，迭代才不会被 `InvalidArgument` 挡住。
+const fuzz_aes_key: [32]u8 = "0123456789abcdef0123456789abcdef".*;
+
+/// 变异时各字节的权重：末条覆盖整个字节域，保证 corpus 里的真实密文被**原样**保留；
+/// 其余权重偏向 `0x00`（补位字节）、`0x20`（空格，PKCS#7 的常见 pad 值）与块边界值
+/// （`0x01` / `0x10` / `0x1f`），让变异更容易撞上"末字节恰好构成合法补位"的路径。
+const fuzz_byte_weights = [_]std.testing.Smith.Weight{
+    .rangeAtMost(u8, 0x00, 0xff, 4),
+    .value(u8, 0x00, 3),
+    .value(u8, 0x20, 3),
+    .value(u8, 0x01, 2),
+    .value(u8, 0x10, 2),
+    .value(u8, 0x1f, 2),
+};
+
+/// 输入长度上限。
+const fuzz_max_len: usize = 2048;
+
+/// 长度分布：`0..31` 打 `ciphertext.len < BlockSize` 守卫，`31` / `16` 打
+/// `len % 32 != 0` 守卫；其余给 32 的整数倍（真正的 CBC 解密 + 去 PKCS#7 路径），
+/// 其中 64 是下面语料的长度；末条兜底覆盖任意长度（含非 32 倍数）。
+const fuzz_len_weights = [_]std.testing.Smith.Weight{
+    .value(u32, 0, 4),
+    .value(u32, 16, 4),
+    .value(u32, 31, 4),
+    .value(u32, 32, 25),
+    .value(u32, 64, 20),
+    .value(u32, 96, 10),
+    .value(u32, 160, 8),
+    .value(u32, 320, 6),
+    .value(u32, 1024, 3),
+    .rangeAtMost(u32, 0, fuzz_max_len, 3),
+};
+
+/// 性质：任意密文都必须
+/// 1. 不 panic / 不越界（CBC 无认证，畸形输入是常态）：`len < BlockSize`、
+///    `len % BlockSize != 0`、去补位后 `unpadded_len <= 20` / `app_id_offset` 越界
+///    等守卫都必须安全返回；
+/// 2. 失败只能是 `InvalidArgument` / `DecodeError` / `OutOfMemory`；
+/// 3. 成功时 `random` 恰为 16 字节，且三段（random + 4 字节长度字段 + raw_xml_msg +
+///    app_id）总长受密文长度约束：`ciphertext.len - 32 <= 20 + raw + app <= ciphertext.len - 1`
+///    （pad ∈ [1, 32]）——越界读 / 长度算错会在这里暴露；
+/// 4. 成功结果再经 `aesEncryptMsg` 加密、`aesDecryptMsg` 解密后三段必须完全一致。
+///
+/// 注意**不**断言"重新加密逐字节等于输入密文"：`aesDecryptMsg` 的去补位只校验最后
+/// 一个字节（与 Go 参考一致），pad 值合法但前面填充字节不为 pad 的畸形密文会被接受，
+/// 此时重加密的结果本就不同——那是既有的宽松契约，不是内存安全问题。
+/// 逐字节还原只对**由本库加密出来**的语料成立，放在下面的哨兵测试里断言。
+fn testAesDecryptMsgInvariants(allocator: std.mem.Allocator, smith: *std.testing.Smith) anyerror!void {
+    var buf: [fuzz_max_len]u8 = undefined;
+    const len = smith.sliceWeighted(&buf, &fuzz_len_weights, &fuzz_byte_weights);
+    const ciphertext = buf[0..len];
+
+    const r = aesDecryptMsg(allocator, ciphertext, &fuzz_aes_key) catch |err| switch (err) {
+        WechatError.InvalidArgument,
+        WechatError.DecodeError,
+        error.OutOfMemory,
+        => return,
+        else => return error.UnexpectedAesDecryptError,
+    };
+    defer {
+        allocator.free(r.random);
+        allocator.free(r.raw_xml_msg);
+        allocator.free(r.app_id);
+    }
+
+    try std.testing.expectEqual(@as(usize, 16), r.random.len);
+
+    const content_len: usize = 20 + r.raw_xml_msg.len + r.app_id.len;
+    try std.testing.expect(content_len + 1 <= ciphertext.len);
+    try std.testing.expect(content_len + BlockSize >= ciphertext.len);
+
+    // 三段必须自洽：重新加密再解密，拿到的还是同样三段。
+    const again = try aesEncryptMsg(allocator, r.random, r.raw_xml_msg, r.app_id, &fuzz_aes_key);
+    defer allocator.free(again);
+    const r2 = try aesDecryptMsg(allocator, again, &fuzz_aes_key);
+    defer {
+        allocator.free(r2.random);
+        allocator.free(r2.raw_xml_msg);
+        allocator.free(r2.app_id);
+    }
+    try std.testing.expectEqualSlices(u8, r.random, r2.random);
+    try std.testing.expectEqualSlices(u8, r.raw_xml_msg, r2.raw_xml_msg);
+    try std.testing.expectEqualSlices(u8, r.app_id, r2.app_id);
+}
+
+test "fuzz: aesDecryptMsg 不 panic / 失败即明确错误 / 成功三段自洽" {
+    try std.testing.fuzz(std.testing.allocator, testAesDecryptMsgInvariants, .{
+        .corpus = &fuzz_corpus,
+    });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// corpus（真实输入种子）
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// corpus 种子 = `AESEncryptMsg` 真实产出的 64 字节密文
+/// （random = `1234567890abcdef`，raw_xml_msg = `<xml><a>hello</a></xml>`，
+/// app_id = `wx_test_appid`，key = 上面的 `fuzz_aes_key`），
+/// 布局 = `Smith` 输入流要求的 `[u32 小端长度][密文字节]`。长度前缀不能省。
+const fuzz_corpus = [_][]const u8{&fuzz_corpus_seed};
+
+const fuzz_corpus_seed = fuzzCorpusSeed(&fuzz_corpus_cipher);
+
+fn fuzzCorpusSeed(comptime cipher: []const u8) [4 + cipher.len]u8 {
+    var seed: [4 + cipher.len]u8 = undefined;
+    std.mem.writeInt(u32, seed[0..4], cipher.len, .little);
+    @memcpy(seed[4..], cipher);
+    return seed;
+}
+
+const fuzz_corpus_cipher = [_]u8{
+    0x11, 0x95, 0xb2, 0x4a, 0xca, 0x49, 0x17, 0x3f, 0x25, 0xd8, 0xdd, 0xc0, 0x4a, 0x78, 0x94, 0x7d,
+    0x45, 0xca, 0xdc, 0x66, 0xed, 0x4a, 0x57, 0x40, 0x7a, 0x42, 0x6f, 0x23, 0x46, 0x9b, 0x95, 0x0b,
+    0x53, 0x05, 0x72, 0xa2, 0x2d, 0x81, 0x7b, 0x33, 0xb9, 0xa4, 0xf1, 0x0f, 0x49, 0x85, 0xe3, 0x3e,
+    0x8e, 0xf7, 0x66, 0xba, 0x60, 0x15, 0x34, 0x4e, 0x57, 0x7f, 0x41, 0x2b, 0xd7, 0xbf, 0xb7, 0xb3,
+};
+
+// corpus 是「先过一遍断言」的，但 body 的断言只要求「失败必须是声明的错误变体」——
+// 一份错位的种子会原地解密失败、断言照旧全绿，语料却已退化成垃圾输入
+// （p12 / xml 那边都踩过一次）。这个测试用**和 body 完全相同的 Smith 读取顺序与
+// 权重表**回放种子，钉住：取出的就是那段真实密文、解出的三段与预期逐字节一致，
+// 且重加密能**逐字节**还原密文（body 因宽松补位契约不能断言的那条）。
+test "fuzz corpus 布局：种子还原出真实密文、三段正确且可逐字节重加密" {
+    const allocator = std.testing.allocator;
+    var smith: std.testing.Smith = .{ .in = &fuzz_corpus_seed };
+
+    var buf: [fuzz_max_len]u8 = undefined;
+    const len = smith.sliceWeighted(&buf, &fuzz_len_weights, &fuzz_byte_weights);
+    try std.testing.expectEqualSlices(u8, &fuzz_corpus_cipher, buf[0..len]);
+
+    const r = try aesDecryptMsg(allocator, buf[0..len], &fuzz_aes_key);
+    defer {
+        allocator.free(r.random);
+        allocator.free(r.raw_xml_msg);
+        allocator.free(r.app_id);
+    }
+    try std.testing.expectEqualStrings("1234567890abcdef", r.random);
+    try std.testing.expectEqualStrings("<xml><a>hello</a></xml>", r.raw_xml_msg);
+    try std.testing.expectEqualStrings("wx_test_appid", r.app_id);
+
+    const again = try aesEncryptMsg(allocator, r.random, r.raw_xml_msg, r.app_id, &fuzz_aes_key);
+    defer allocator.free(again);
+    try std.testing.expectEqualSlices(u8, buf[0..len], again);
 }

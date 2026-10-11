@@ -118,6 +118,8 @@ pub const Refund = struct {
             try client.postXMLWithTLS(url, xml_body, self.cfg.root_ca, self.cfg.mch_id)
         else
             try client.postXML(url, xml_body);
+        // 解析失败时 `body` 的所有权尚未转移给 `RefundResult`，必须在此释放。
+        errdefer allocator.free(body);
 
         var doc = try util_xml.parse(allocator, body);
         defer doc.deinit();
@@ -273,4 +275,24 @@ test "refund 的 nonce_str 取自注入的 io（确定性随机源 → 可复现
     try std.testing.expectEqual(@as(usize, 32), n1.len);
     // 注入的确定性 `io.random` 保证可复现；若改走全局单例（真实熵源）两次结果不会相同。
     try std.testing.expectEqualStrings(n1, n2);
+}
+
+test "refund 畸形 XML 响应返回 MalformedXml（错误路径不泄漏响应缓冲）" {
+    const allocator = std.testing.allocator;
+
+    var mt = util_http.MockTransport.init(allocator);
+    defer mt.deinit();
+    // 上游返回截断的 XML：`util_xml.parse` 抛 MalformedXml；此前该路径会泄漏 body。
+    try mt.addRoute("https://api.mch.weixin.qq.com/secapi/pay/refund", .{ .body = "<xml><return_code>" });
+
+    var r = Refund.init(.{ .app_id = "wx-app", .mch_id = "mch", .key = "test_key" });
+    r.setTransport(util_http.MockTransport.dispatch, &mt);
+
+    try std.testing.expectError(error.MalformedXml, r.refund(allocator, .{
+        .out_trade_no = "t-bad-xml",
+        .out_refund_no = "r-bad-xml",
+        .total_fee = "100",
+        .refund_fee = "100",
+        .notify_url = "https://example.com/cb",
+    }));
 }

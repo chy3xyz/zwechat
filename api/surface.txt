@@ -13,30 +13,50 @@ src/aispeech/mod.zig: pub const AiSpeech
 src/aispeech/mod.zig: pub fn AiSpeech.init
 src/aispeech/mod.zig: sig AiSpeech.init() Self
 src/cache/memcache.zig: field Memcache.allocator: std.mem.Allocator
+src/cache/memcache.zig: field Memcache.created_total: usize
+src/cache/memcache.zig: field Memcache.discarded_total: usize
+src/cache/memcache.zig: field Memcache.idle: std.ArrayList(*Memcache)
 src/cache/memcache.zig: field Memcache.io: std.Io
 src/cache/memcache.zig: field Memcache.last_value: ?[]u8
 src/cache/memcache.zig: field Memcache.line_buffer: [1024]u8
+src/cache/memcache.zig: field Memcache.live: usize
+src/cache/memcache.zig: field Memcache.max_connections: usize
 src/cache/memcache.zig: field Memcache.mutex: std.Io.Mutex
 src/cache/memcache.zig: field Memcache.opts: Options
 src/cache/memcache.zig: field Memcache.owned_io: ?std.Io.Threaded
+src/cache/memcache.zig: field Memcache.peak_in_use: usize
+src/cache/memcache.zig: field Memcache.pool_mutex: std.Io.Mutex
 src/cache/memcache.zig: field Memcache.read_buffer: [4096]u8
 src/cache/memcache.zig: field Memcache.reader: ?std.Io.net.Stream.Reader
 src/cache/memcache.zig: field Memcache.stream: ?std.Io.net.Stream
 src/cache/memcache.zig: field Memcache.timeout_reader: ?net.SocketReader(.memcache)
+src/cache/memcache.zig: field Memcache.timeout_total: usize
 src/cache/memcache.zig: field Memcache.write_buffer: [4096]u8
 src/cache/memcache.zig: field Memcache.writer: ?std.Io.net.Stream.Writer
 src/cache/memcache.zig: field Options.connect_timeout_ms: u64
 src/cache/memcache.zig: field Options.io: ?std.Io
+src/cache/memcache.zig: field Options.max_connections: usize
+src/cache/memcache.zig: field Options.pool_timeout_ms: u64
 src/cache/memcache.zig: field Options.recv_timeout_ms: u64
 src/cache/memcache.zig: field Options.server: []const u8
+src/cache/memcache.zig: field PoolStats.created: usize
+src/cache/memcache.zig: field PoolStats.discarded: usize
+src/cache/memcache.zig: field PoolStats.idle: usize
+src/cache/memcache.zig: field PoolStats.in_use: usize
+src/cache/memcache.zig: field PoolStats.live: usize
+src/cache/memcache.zig: field PoolStats.peak_in_use: usize
+src/cache/memcache.zig: field PoolStats.timeouts: usize
 src/cache/memcache.zig: pub const Memcache
 src/cache/memcache.zig: pub const Options
+src/cache/memcache.zig: pub const PoolStats
 src/cache/memcache.zig: pub fn Memcache.asCache
 src/cache/memcache.zig: pub fn Memcache.create
 src/cache/memcache.zig: pub fn Memcache.deinit
+src/cache/memcache.zig: pub fn Memcache.poolStats
 src/cache/memcache.zig: sig Memcache.asCache(*Memcache) Cache
 src/cache/memcache.zig: sig Memcache.create(std.mem.Allocator, Options) *Memcache
 src/cache/memcache.zig: sig Memcache.deinit(*Memcache) void
+src/cache/memcache.zig: sig Memcache.poolStats(*Memcache) PoolStats
 src/cache/memory.zig: field Memory.allocator: std.mem.Allocator
 src/cache/memory.zig: field Memory.data: std.HashMap([]const u8, Entry, std.hash_map.StringContext, 80)
 src/cache/memory.zig: field Memory.io: std.Io
@@ -53,6 +73,7 @@ src/cache/memory.zig: sig Memory.deinit(*Memory) void
 src/cache/mod.zig: field Cache.VTable.deinit: *const fn (ctx: *anyopaque) void
 src/cache/mod.zig: field Cache.VTable.delete: *const fn (ctx: *anyopaque, key: []const u8) CacheError!void
 src/cache/mod.zig: field Cache.VTable.get: *const fn (ctx: *anyopaque, key: []const u8) CacheError!?[]const u8
+src/cache/mod.zig: field Cache.VTable.getOwned: ?*const fn (ctx: *anyopaque, allocator: std.mem.Allocator, key: []const u8) CacheError!?[]u8
 src/cache/mod.zig: field Cache.VTable.isExist: *const fn (ctx: *anyopaque, key: []const u8) CacheError!bool
 src/cache/mod.zig: field Cache.VTable.set: *const fn (ctx: *anyopaque, key: []const u8, val: []const u8, ttl_seconds: i64) CacheError!void
 src/cache/mod.zig: field Cache.ctx: *anyopaque
@@ -66,19 +87,23 @@ src/cache/mod.zig: pub const Redis
 src/cache/mod.zig: pub fn Cache.deinit
 src/cache/mod.zig: pub fn Cache.delete
 src/cache/mod.zig: pub fn Cache.get
+src/cache/mod.zig: pub fn Cache.getOwned
 src/cache/mod.zig: pub fn Cache.isExist
 src/cache/mod.zig: pub fn Cache.set
 src/cache/mod.zig: sig Cache.deinit(Cache) void
 src/cache/mod.zig: sig Cache.delete(Cache, []const u8) CacheError!void
 src/cache/mod.zig: sig Cache.get(Cache, []const u8) CacheError!?[]const u8
+src/cache/mod.zig: sig Cache.getOwned(Cache, std.mem.Allocator, []const u8) CacheError!?[]u8
 src/cache/mod.zig: sig Cache.isExist(Cache, []const u8) CacheError!bool
 src/cache/mod.zig: sig Cache.set(Cache, []const u8, []const u8, i64) CacheError!void
 src/cache/net.zig: field Backend.memcache
 src/cache/net.zig: field Backend.redis
 src/cache/net.zig: pub const Backend
 src/cache/net.zig: pub fn SocketReader
+src/cache/net.zig: pub fn findFreePort
 src/cache/net.zig: pub fn resolveHost
 src/cache/net.zig: sig SocketReader(Backend) type
+src/cache/net.zig: sig findFreePort() u16
 src/cache/net.zig: sig resolveHost(std.Io, []const u8, u16) std.Io.net.IpAddress
 src/cache/redis.zig: field Options.connect_timeout_ms: u64
 src/cache/redis.zig: field Options.db: i32
@@ -2926,11 +2951,13 @@ src/officialaccount/freepublish/mod.zig: pub const PublishArticleItem
 src/officialaccount/freepublish/mod.zig: pub const PublishStatus
 src/officialaccount/freepublish/mod.zig: pub const PublishStatusList
 src/officialaccount/freepublish/mod.zig: pub fn FreePublish.delete
+src/officialaccount/freepublish/mod.zig: pub fn FreePublish.deleteWithIndex
 src/officialaccount/freepublish/mod.zig: pub fn FreePublish.init
 src/officialaccount/freepublish/mod.zig: pub fn FreePublish.list
 src/officialaccount/freepublish/mod.zig: pub fn FreePublish.publish
 src/officialaccount/freepublish/mod.zig: pub fn FreePublish.selectStatus
 src/officialaccount/freepublish/mod.zig: sig FreePublish.delete(*Self, []const u8) void
+src/officialaccount/freepublish/mod.zig: sig FreePublish.deleteWithIndex(*Self, []const u8, i64) void
 src/officialaccount/freepublish/mod.zig: sig FreePublish.init(*Context, std.mem.Allocator) Self
 src/officialaccount/freepublish/mod.zig: sig FreePublish.list(*Self, i64, i64, bool) []u8
 src/officialaccount/freepublish/mod.zig: sig FreePublish.publish(*Self, []const u8) []u8
@@ -3933,6 +3960,7 @@ src/pay/mod.zig: pub const Notify
 src/pay/mod.zig: pub const Order
 src/pay/mod.zig: pub const OrderParams
 src/pay/mod.zig: pub const PaidNotify
+src/pay/mod.zig: pub const PaidNotifyResult
 src/pay/mod.zig: pub const Pay
 src/pay/mod.zig: pub const PreOrder
 src/pay/mod.zig: pub const QueryOrderResult
@@ -3946,6 +3974,8 @@ src/pay/mod.zig: pub const Transfer
 src/pay/mod.zig: pub const TransferWalletParams
 src/pay/mod.zig: pub const TransferWalletResult
 src/pay/mod.zig: pub const v3
+src/pay/mod.zig: pub const verifyPaidNotify
+src/pay/mod.zig: pub const verifyPaidNotifyDetail
 src/pay/notify/mod.zig: field Notify.cfg: Config
 src/pay/notify/mod.zig: field PaidNotify.appid: []const u8
 src/pay/notify/mod.zig: field PaidNotify.mch_id: []const u8
@@ -3955,14 +3985,23 @@ src/pay/notify/mod.zig: field PaidNotify.return_code: []const u8
 src/pay/notify/mod.zig: field PaidNotify.return_msg: []const u8
 src/pay/notify/mod.zig: field PaidNotify.total_fee: []const u8
 src/pay/notify/mod.zig: field PaidNotify.transaction_id: []const u8
+src/pay/notify/mod.zig: field PaidNotifyResult.err_code: []const u8
+src/pay/notify/mod.zig: field PaidNotifyResult.err_code_des: []const u8
+src/pay/notify/mod.zig: field PaidNotifyResult.result_code: []const u8
+src/pay/notify/mod.zig: field PaidNotifyResult.return_code: []const u8
+src/pay/notify/mod.zig: field PaidNotifyResult.return_msg: []const u8
+src/pay/notify/mod.zig: field PaidNotifyResult.sign_verified: bool
 src/pay/notify/mod.zig: pub const Notify
 src/pay/notify/mod.zig: pub const PaidNotify
+src/pay/notify/mod.zig: pub const PaidNotifyResult
 src/pay/notify/mod.zig: pub fn Notify.decryptRefund
 src/pay/notify/mod.zig: pub fn Notify.init
 src/pay/notify/mod.zig: pub fn verifyPaidNotify
+src/pay/notify/mod.zig: pub fn verifyPaidNotifyDetail
 src/pay/notify/mod.zig: sig Notify.decryptRefund(*Self, std.mem.Allocator, []const u8) []u8
 src/pay/notify/mod.zig: sig Notify.init(Config) Self
 src/pay/notify/mod.zig: sig verifyPaidNotify(std.mem.Allocator, Config, []const u8) bool
+src/pay/notify/mod.zig: sig verifyPaidNotifyDetail(std.mem.Allocator, Config, []const u8) PaidNotifyResult
 src/pay/order/mod.zig: field AppConfig.appid: []const u8
 src/pay/order/mod.zig: field AppConfig.nonce_str: []const u8
 src/pay/order/mod.zig: field AppConfig.package: []const u8
@@ -4587,6 +4626,7 @@ src/util/crypto.zig: pub fn pkcs5Pad
 src/util/crypto.zig: pub fn pkcs5Unpad
 src/util/crypto.zig: pub fn pkcs7Pad
 src/util/crypto.zig: pub fn pkcs7Unpad
+src/util/crypto.zig: pub fn timingSafeEqlSlices
 src/util/crypto.zig: sig aesDecryptMsg(Allocator, []const u8, []const u8) (Allocator.Error || WechatError)!DecryptedMessage
 src/util/crypto.zig: sig aesECBDecrypt(Allocator, []const u8, []const u8) (Allocator.Error || WechatError)![]u8
 src/util/crypto.zig: sig aesEncryptMsg(Allocator, []const u8, []const u8, []const u8, []const u8) (Allocator.Error || WechatError)![]u8
@@ -4596,6 +4636,7 @@ src/util/crypto.zig: sig pkcs5Pad(Allocator, []const u8) Allocator.Error![]u8
 src/util/crypto.zig: sig pkcs5Unpad([]const u8) []const u8
 src/util/crypto.zig: sig pkcs7Pad(Allocator, []const u8, usize) (Allocator.Error || error{InvalidArgument})![]u8
 src/util/crypto.zig: sig pkcs7Unpad([]const u8) []const u8
+src/util/crypto.zig: sig timingSafeEqlSlices([]const u8, []const u8) bool
 src/util/default_io.zig: pub fn io
 src/util/default_io.zig: sig io() std.Io
 src/util/error.zig: field CommonError._allocator: ?std.mem.Allocator
@@ -4644,6 +4685,7 @@ src/util/http.zig: field MockTransport.Response.body: []const u8
 src/util/http.zig: field MockTransport.Response.status: u16
 src/util/http.zig: field MockTransport.allocator: std.mem.Allocator
 src/util/http.zig: field MockTransport.history: std.ArrayList([]const u8)
+src/util/http.zig: field MockTransport.payloads: std.ArrayList([]const u8)
 src/util/http.zig: field MockTransport.routes: std.HashMap([]const u8, Response, std.hash_map.StringContext, 80)
 src/util/http.zig: field MultipartField.data: []const u8
 src/util/http.zig: field MultipartField.field_name: []const u8
@@ -4687,6 +4729,7 @@ src/util/http.zig: pub fn MockTransport.addRoute
 src/util/http.zig: pub fn MockTransport.deinit
 src/util/http.zig: pub fn MockTransport.dispatch
 src/util/http.zig: pub fn MockTransport.init
+src/util/http.zig: pub fn MockTransport.payloadAt
 src/util/http.zig: pub fn defaultClientAllocatorMatches
 src/util/http.zig: pub fn deinitDefaultClient
 src/util/http.zig: pub fn getDefaultClient
@@ -4716,6 +4759,7 @@ src/util/http.zig: sig MockTransport.addRoute(*MockTransport, []const u8, Respon
 src/util/http.zig: sig MockTransport.deinit(*MockTransport) void
 src/util/http.zig: sig MockTransport.dispatch(*anyopaque, std.mem.Allocator, []const u8, std.http.Method, []const u8, ?[]const u8) anyerror![]u8
 src/util/http.zig: sig MockTransport.init(std.mem.Allocator) MockTransport
+src/util/http.zig: sig MockTransport.payloadAt(*const MockTransport, usize) []const u8
 src/util/http.zig: sig defaultClientAllocatorMatches(std.mem.Allocator) bool
 src/util/http.zig: sig deinitDefaultClient() void
 src/util/http.zig: sig getDefaultClient(std.mem.Allocator) *HttpClient
@@ -6732,6 +6776,7 @@ src/work/invoice/mod.zig: field UserInfo.fee: i64
 src/work/invoice/mod.zig: field UserInfo.fee_without_tax: i64
 src/work/invoice/mod.zig: field UserInfo.info: []Info
 src/work/invoice/mod.zig: field UserInfo.maker: []const u8
+src/work/invoice/mod.zig: field UserInfo.order_id: []const u8
 src/work/invoice/mod.zig: field UserInfo.pdf_url: []const u8
 src/work/invoice/mod.zig: field UserInfo.reimburse_status: []const u8
 src/work/invoice/mod.zig: field UserInfo.remarks: []const u8
@@ -6875,6 +6920,7 @@ src/work/kf/mod.zig: field IntentSimilarQuestions.items: []const IntentQuestion
 src/work/kf/mod.zig: field IntentText.content: []const u8
 src/work/kf/mod.zig: field Kf.allocator: std.mem.Allocator
 src/work/kf/mod.zig: field Kf.ctx: *Context
+src/work/kf/mod.zig: field Kf.keep_origin_data: bool
 src/work/kf/mod.zig: field KnowledgeGroup.group_id: []const u8
 src/work/kf/mod.zig: field KnowledgeGroup.is_default: i64
 src/work/kf/mod.zig: field KnowledgeGroup.name: []const u8
@@ -7270,6 +7316,7 @@ src/work/kf/mod.zig: pub fn Kf.modKnowledgeIntent
 src/work/kf/mod.zig: pub fn Kf.sendMsg
 src/work/kf/mod.zig: pub fn Kf.sendMsgOnEvent
 src/work/kf/mod.zig: pub fn Kf.sendMsgRich
+src/work/kf/mod.zig: pub fn Kf.setKeepOriginData
 src/work/kf/mod.zig: pub fn Kf.syncMsg
 src/work/kf/mod.zig: pub fn Kf.transServiceState
 src/work/kf/mod.zig: pub fn Kf.updateAccount
@@ -7308,6 +7355,7 @@ src/work/kf/mod.zig: sig Kf.modKnowledgeIntent(*Self, KnowledgeIntentModRequest)
 src/work/kf/mod.zig: sig Kf.sendMsg(*Self, TextMessage) std.json.Parsed(SendMsgResponse)
 src/work/kf/mod.zig: sig Kf.sendMsgOnEvent(*Self, TextEventMessage) std.json.Parsed(SendMsgResponse)
 src/work/kf/mod.zig: sig Kf.sendMsgRich(*Self, SendMessage) std.json.Parsed(SendMsgResponse)
+src/work/kf/mod.zig: sig Kf.setKeepOriginData(*Self, bool) void
 src/work/kf/mod.zig: sig Kf.syncMsg(*Self, SyncMsgRequest) std.json.Parsed(SyncMsgResponse)
 src/work/kf/mod.zig: sig Kf.transServiceState(*Self, ServiceStateTransRequest) std.json.Parsed(ServiceStateTransResponse)
 src/work/kf/mod.zig: sig Kf.updateAccount(*Self, AccountUpdateRequest) std.json.Parsed(CommonResponse)

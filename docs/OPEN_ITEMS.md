@@ -92,7 +92,7 @@ CHANGELOG `[0.4.4] → Fixed` 记录本批次统一了 **41 个解析站点**。
 
 ---
 
-## 3. `cache/memcache` 单连接串行化；`cache/redis` 已提供可选连接池
+## 3. ~~`cache/memcache` 单连接串行化~~（**已解决**：已加可选连接池）
 
 ### 3a. `cache/memcache`：单连接 + 全往返串行化（无池）
 
@@ -304,7 +304,7 @@ grep -rn "不依赖「用别的 allocator" src/ | cut -d: -f1 | sort -u
 
 ---
 
-## 6. `work/kf` 的 `OriginData` 用 `std.json` 的 `jsonParse` 钩子实现
+## 6. ~~`work/kf` 的 `OriginData`~~（**已解决**：已加默认关闭的省内存开关）
 
 **决策**
 Go 版 `syncmsg` 用 `gjson` 从原始 JSON 里按路径取字段（`OriginData`）。
@@ -340,7 +340,7 @@ Zig 版没有等价的 gjson，改为：为 `SyncMessage` 实现 `jsonParse`
 
 ---
 
-## 7. 微信支付 v2：错误以字段形式内联返回，而不是错误集
+## 7. ~~微信支付 v2：错误以字段形式内联返回~~（**已解决**：v2 回调已提供原始字段入口）
 
 **决策**
 v2 的 XML 应答沿用微信原生语义：**HTTP 200 + `return_code`/`result_code`**，
@@ -573,19 +573,25 @@ access_token 中途失效（微信侧提前作废，如被其他实例刷新）�
 
 **影响**
 - ~~`README.md:10` 与 `README.md:49` 写"**357** 个内联测试"~~ →
-  **已在 v0.4.5 修正为 1004**；此后以实际 `zig build test` 输出与 CHANGELOG 为准（当前 **1331**，见 CHANGELOG `[Unreleased]`）。
+  **已在 v0.4.5 修正为 1004**；此后以实际 `zig build test` 输出与 CHANGELOG 为准（当前 **1408**，见 CHANGELOG `[Unreleased]`）。
 - **2026-10 一轮文档对齐（已修）**：`README.md` 的「业务域覆盖」表原先把 `miniprogram` 写成
   "5 个子模块"（实际 25）、`work` 写成 13（实际 15）、并把只到骨架的 `minigame`/`aispeech`
   与完成域同列 `✅`；`AGENTS.md` 表头写"87 文件 / 15711 行"（实际 134 / 76051）、
   目录树里 `officialaccount` 15 个子模块全挂着 `TODO`、还列着并不存在的 `domain/openapi.zig`、
   并引用不存在的 `getChatInfo`（msgaudit 只有 `getRoomInfo`/`getAgreeInfo`）。以上均已按源码更正，
   业务域表的计数口径改为「实现文件数」并注明。`README.md:5` 的当前版本也从 v0.4.5 更新到 v0.6.0。
-- `docs/api-reference.md` 部分章节早于 v0.4.4：
+- ~~`docs/api-reference.md` 部分章节早于 v0.4.4：
   例如 §5.6 的 `officialaccount/material` 只列了 4 个方法
   （`addNews`/`deleteMaterial`/`getMaterialCount`/`batchGetMaterial`），
   未含 v0.4.4 新增的 `getMedia`/`getMediaWithLimit`/`getMediaToFile*`
-  与 `AddVideo`/`AddMaterial`；§7 的小程序段落也未列出 24 个子模块的全貌。
-  **需要精确签名时以源码为准**（本文与 [`UPGRADING.md`](UPGRADING.md) 都按此口径标注）。
+  与 `AddVideo`/`AddMaterial`；§7 的小程序段落也未列出 24 个子模块的全貌。~~
+  → **已完成一轮与源码的对齐**（657 → 1130 行）：修正多处会误导人写出**编译不过**的错误签名
+  （`menu.getMenu` / `oauth.getUserAccessToken` / `basic.getCallbackIP` 等的返回类型写错）、
+  把"TODO/占位"的过时描述换成真实现状（`util/http` 的 mTLS 门控、`material` 的媒体下载与限额常量、
+  `pay/v3` 整节、`miniprogram` 的 25 个子模块、`work` 的 15 个子模块）、补上各域 barrel 导出与
+  懒加载工厂，并加了「事实来源优先级」声明。章节编号未改（`doc/api_guide.md` 按"第 N 节"引用）。
+  仍需注意：本文是**导航式总览**，长尾方法用"见源码"带过；**需要精确签名时以源码为准**（本文与
+  [`UPGRADING.md`](UPGRADING.md) 都按此口径标注）。
 - ~~工具链版本记录也不完全一致：CI 钉的是 `0.17.0-dev.1567+f0354179a`~~
   → **已在 v0.4.5 统一为 `0.17.0-dev.2151+2ec5523d5`**（旧版缺 `Type.Struct.field_names` 等，实际编译不过）；
   **v0.5.2 起统一为 `0.17.0` 正式版**（`net_read` 载荷改为 `Stream.ReadResult`，dev 快照已编译不过）。
@@ -597,11 +603,12 @@ access_token 中途失效（微信侧提前作废，如被其他实例刷新）�
   就是为了绕过这批文档债。
 
 **触发再评估的条件**
-`docs/api-reference.md` 完成一轮与最新源码的对齐（届时本条可删除）。
+（原条件"`docs/api-reference.md` 完成一轮与最新源码的对齐"**已达成**。）此后若该文档再次落后于源码，
+按同样方式再做一轮；日常改动只需在 CHANGELOG 记录，不必逐次同步该文档。
 
 ---
 
-## 11. 测试套件在极端并发负载下偶发失败（端口探测与绑定的 TOCTOU）
+## 11. ~~测试套件在极端并发负载下偶发失败（端口探测与绑定的 TOCTOU）~~（**已解决**：改为内核分配端口 + 假 server 不再用 `reuse_address`）
 
 **决策（现状）**
 `src/cache/redis.zig` 与 `src/cache/memcache.zig` 的 mock server 测试用
@@ -748,42 +755,61 @@ Zig 工具链升级后；或该行**伴随** `zig build test` 退出码非 0（�
 
 ---
 
-## 15. 凭据缓存的「借用切片」残留竞态（跨实例 / 共享 Cache）
+## 15. ~~凭据缓存的「借用切片」残留竞态（跨实例 / 共享 Cache）~~（**已解决**）
 
-**决策（部分修复；残留面已知并记录）**
+**决策（已修复）**
 `DefaultAccessToken` / `DefaultJsTicket` / `WorkAccessToken` / `WorkJsTicket` 的缓存读取原先有**两条**
 有窗口的路径：① 锁外 `cache.get` 之后才 `dupe`；② "加锁双检"分支**先 `unlock` 再 `dupe`**。
-已在最新 [Unreleased] 修成"**取借用 + 深拷贝整体在临界区内**"（私有 helper `readCachedCopy`）。
+先已把「取借用 + 深拷贝整体在临界区内」修掉（私有 helper `readCachedCopy`），但那只是**同一个凭据
+对象内部**的互斥 —— 锁是每个凭据对象自带的，跨对象仍不安全。
 
-**仍然存在的残留面**
-锁是**每个凭据对象自带**的（`lock: std.Io.Mutex`）。因此若出现下列任一情况，跨对象的写互斥仍然缺失：
-1. 同进程内**两个凭据对象**指向同一个 `Cache` 实例且 appid / 前缀相同（= 同一个 key）；
-2. 宿主其它模块与凭据**共享同一个 `Cache` 实例**，并在凭据 `get` → `dupe` 的窗口内并发写同一 key。
+**最终解法（本轮落地）**
+给 `Cache.VTable` 增加了一个**带默认值 `= null` 的可选槽位** `getOwned`，并新增公开方法
+`Cache.getOwned(allocator, key) CacheError!?[]u8`：命中则返回**调用方拥有所有权**的副本，
+**拷贝在每个实现自己的临界区内完成**（Memory 的互斥区；Redis / Memcache 独占借出连接的期间），
+因此不受后续任何写操作影响 —— 跨对象共享同一个 `Cache` 也就安全了。
 
-依据是 `Cache.get` 的契约："返回**借用**切片，有效期至该 Cache 实例的任何后续写操作"
-（`src/cache/mod.zig`）。`Memory` 后端要精确覆盖同一个 key 才触发；`Redis` / `Memcache` 后端更脆
-——它们复用内部 `last_value` 缓冲区，**任何** key 的后续 `get` 都会 free 掉上一份。
+- **默认 `null`** 这一点是关键：既有与自定义 `Cache` 实现**无需改动即可继续编译**（构造 vtable
+  字面量时可以省略该字段），`Cache.getOwned` 会退化为 `get` + `dupe`（文档已写明"不比现状更安全"）。
+  配了一条 `LegacyCache`（手写实现、故意不写该槽位）的门禁测试钉住"不破坏既有实现者"。
+- 三个内置后端都实现了该槽位；四个凭据的 `readCachedCopy` **以及**「回源后重新加锁双检」分支
+  都改用它（后者原先同样是持自己锁 `get` + `dupe`，跨对象窗口相同）。
 
-**为什么没有一并修掉**
-彻底解法是给 `Cache` 增加一个"返回**所有权副本**"的入口（在实现内部的临界区里完成拷贝），
-但那要改 `Cache.VTable` —— 对任何自定义 `Cache` 实现者都是**破坏性变更**，按本仓"公开面变更必须有
-CHANGELOG 记录 + 快照刷新"的纪律应当单独一拍，而不是夹在别处修复里顺带做掉。
+**残留（后续可迁移，非竞态）**
+`src/openplatform/context/access_token.zig` 仍有 6 处 `cache_inst.get(...)` → `dupe` 的写法
+（部分在 `token_mutex` 内）。改成 `getOwned` 即可获得同样的跨对象安全性；因为它是"另一个对象
+共享同一 Cache"才会咬人的窗口，且该模块的 Cache 多为每 Context 私有，故列为可选的后续清理。
 
-**缓解**
-- 默认用法（一个 `Wechat` 实例、凭据与缓存一一对应）在本次修复后**已无窗口**；
-- 需要 `forceRefresh` / `invalidate` 时，避免与**同一 key 的另一个凭据对象**并发；
-- 后端优先 `Memory`（按条目存储，仅同 key 覆盖写才失效）。
+---
+
+## 16. 公开错误集快照门禁的覆盖范围（**已覆盖全部 19 个公开错误集**）
+
+**决策**
+`src/test/error_set_snapshot.zig`（已接进 `src/test_runner.zig` 的编译门，见 AGENTS.md 的
+「API 面门禁与真实探针」条）现覆盖仓库内**全部 19 个**公开错误集，共 132 条快照条目：
+`util/error.zig` 的 `WechatError`、`credential/mod.zig` 的 `CredentialError`、
+`pay/v3/notify.zig` 的 `NotifyError`、`util/rsa_impl.zig` 的 `Error`、
+`cache.CacheError`、`openplatform/context/{access_token,auth}.Error`、
+`openplatform/miniprogram/{basic,component}.Error`、`util/pkcs12.Error`、`util/asn1.Error`、
+`util/rsa.{RsaError, P12Error, Ed25519Error}`、`util/mtls.NotEnabledError`、
+`wechat.zig` 的 4 个 `Get*Error`。组合集一律按 `@typeInfo(E).error_set` 展开去重后快照
+（例如 `openplatform/context/access_token.Error` 展开为 15 个成员、`auth.Error` 为 17 个）。
+
+**一个注意点（Zig 编译期配额）**
+组合集展开后成员数上来，两两对账会超出 Zig 默认的 1000 逆分支配额
+（`auth.Error` 的 17 个成员即触发 `evaluation exceeded 1000 backwards branches`），
+因此三个 comptime 夹具（`errorSetNames` / `contains` / `diffNames`）加了
+`@setEvalBranchQuota(10_000)` —— 纯抬限、行为不变。**再往快照里加大集合时若报同样的错，
+继续抬这个配额即可**（别去改夹具逻辑）。
+
+**一个固有盲点（集合语义导致）**
+组合错误集里 `OutOfMemory` 同时可能来自 `Allocator.Error` 与 `CacheError`，集合语义下只记一次，
+因此**单独删掉 `CacheError.OutOfMemory` 不会让门禁报 extra/missing**（`Allocator.Error` 仍提供它）。
+这是集合语义的固有盲点，不是实现缺陷；若需要精确到来源，得改成记录「来源集合并集」的更强形状。
 
 **触发再评估的条件**
-出现"多实例共享 Redis 缓存 + 高频 forceRefresh"的真实部署，或有人实现了自定义 `Cache`。
-届时按下面的形状加 vtable 方法（草案）：
-
-```zig
-// src/cache/mod.zig
-/// 命中则返回**调用方拥有**的副本（内部在临界区内完成拷贝），未命中返回 null。
-/// 与 `get` 的区别：`get` 返回借用切片（有效期至本实例下一次写操作）。
-getOwned: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, key: []const u8) CacheError!?[]u8,
-```
+新增公开错误集时（届时在快照文件加一个常量数组 + 一条门禁测试即可，成本很低）；
+或有人需要"错误集成员来源"级别的精度时。
 
 ---
 

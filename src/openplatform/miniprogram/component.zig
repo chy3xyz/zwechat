@@ -69,7 +69,7 @@ pub const Component = struct {
         const ctx = self.ctx;
         if (ctx.transport) |t| {
             const tctx = ctx.transport_ctx orelse
-                @panic("Context.transport 已设置但 transport_ctx 为空：请同时传入两者");
+                return util_error.WechatError.TransportMisconfigured;
             var client = util_http.HttpClient.init(allocator);
             defer client.deinit();
             client.setTransport(t, tctx);
@@ -335,4 +335,32 @@ test "registerMiniProgram component token 缓存未命中返回 VerifyTicketRequ
         .component_phone = "138",
     });
     try std.testing.expectError(error.VerifyTicketRequired, result);
+}
+
+test "只设 transport 不设 transport_ctx 时返回 TransportMisconfigured（不再 abort 进程）" {
+    const allocator = std.testing.allocator;
+    const memory = try @import("../../cache/memory.zig").Memory.create(allocator);
+    defer {
+        memory.deinit();
+        allocator.destroy(memory);
+    }
+    // testCtx 预置了 component token：确保失败只可能来自 transport 半配置。
+    var ctx = try testCtx(allocator, memory);
+    ctx.transport = RecordingTransport.dispatch;
+    ctx.transport_ctx = null;
+
+    var comp = Component.init(&ctx);
+    try std.testing.expectError(error.TransportMisconfigured, comp.registerMiniProgram(allocator, .{
+        .name = "n",
+        .code = "c",
+        .code_type = "1",
+        .legal_persona_wechat = "w",
+        .legal_persona_name = "p",
+        .component_phone = "138",
+    }));
+    try std.testing.expectError(error.TransportMisconfigured, comp.getRegistrationStatus(allocator, .{
+        .name = "n",
+        .legal_persona_wechat = "w",
+        .legal_persona_name = "p",
+    }));
 }
