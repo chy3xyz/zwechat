@@ -1,0 +1,90 @@
+name: Docs
+
+# 用 zdoc（https://github.com/chy3xyz/zdoc）把仓库里的 Markdown 生成文档站点并发布到 GitHub Pages。
+#   - 内容装配与「标题删除线」规避都在 tools/build_docs_site.sh 里（脚本头有详细说明）
+#   - GitHub Pages 的项目站点服务在 /<repo>/ 子路径下，故用 zdoc 的 --url-prefix 加前缀，
+#     否则生成的是根绝对路径（/zdoc.css、/docs/…）会 404
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'AGENTS.md'
+      - 'CONTRIBUTING.md'
+      - 'NOTICE.md'
+      - 'docs/**'
+      - 'doc/**'
+      - 'tools/build_docs_site.sh'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+# Pages 部署所需的最小权限集。
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只跑一个 Pages 部署；不打断进行中的部署（打断会留下半发布状态）。
+concurrency:
+  group: docs-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build docs site
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 直接取 zdoc 的预编译产物（musl 静态链接，在 glibc 环境也能跑），
+      # 并按发布页给出的 SHA256SUMS 校验 —— 比在 CI 里从源码构建（依赖 scripty /
+      # tracy / wuffs 等一堆包）快得多，也不必给本仓引入任何构建依赖。
+      - name: Install zdoc (prebuilt release + checksum)
+        env:
+          ZDOC_VERSION: v0.16.0
+        run: |
+          set -euo pipefail
+          file="x86_64-linux-musl.tar.xz"
+          base="https://github.com/chy3xyz/zdoc/releases/download/${ZDOC_VERSION}"
+          curl -fL --retry 3 --retry-delay 2 -o "$file" "$base/$file"
+          curl -fL --retry 3 --retry-delay 2 -o SHA256SUMS "$base/SHA256SUMS"
+          # SHA256SUMS 里含各平台条目：只校验我们下载的那一个。
+          grep -F " $file" SHA256SUMS > expected.sums
+          sha256sum -c expected.sums
+          tar -xf "$file"
+          chmod +x zdoc
+          ./zdoc version
+          echo "$PWD" >> "$GITHUB_PATH"
+
+      - name: Build docs site
+        run: |
+          set -euo pipefail
+          # 第三个参数是 URL 前缀，必须与 Pages 的访问路径一致。
+          tools/build_docs_site.sh ./zdoc public /zwechat
+          test -f public/index.html
+          test -f public/zdoc.css
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          # 仓库尚未启用 Pages 时自动启用（需要上面的 pages: write 权限）。
+          enablement: true
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

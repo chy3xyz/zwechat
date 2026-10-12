@@ -26,3 +26,6 @@ Thumbs.db
 # 临时
 /tmp/
 *.log
+
+# zdoc 生成的文档站点产物（见 tools/build_docs_site.sh 与 .github/workflows/docs.yml）
+public/
