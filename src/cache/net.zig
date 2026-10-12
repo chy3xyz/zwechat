@@ -14,6 +14,7 @@
 //! 后端，不必整体降 `log_level`。文案逐字保留各后端原有措辞。
 
 const std = @import("std");
+const builtin = @import("builtin");
 const default_io = @import("../util/default_io.zig");
 
 /// 后端标识：只用于决定日志 scope 与读超时告警文案，不影响任何网络行为。
@@ -238,7 +239,13 @@ test "cache/net findFreePort：内核分配的空闲端口可独占重绑，不�
     // 的 bind 必须报 `AddressInUse`。旧实现的探测走 `reuse_address = true` ——
     // 那会同时打开 `SO_REUSEPORT`，于是这里会**成功**，两个进程共享同一端口、
     // 内核把连接分摊给它们，某一方的 `accept` 永远等不到请求（测试挂死的成因）。
-    try std.testing.expectError(error.AddressInUse, addr.listen(io, .{ .reuse_address = false }));
+    //
+    // ⚠ 这条断言只在 **POSIX** 上成立：Windows 的 `SO_REUSEADDR` 语义不同（它允许绑到
+    // 已被占用的端口，且没有 `SO_REUSEPORT` 的对称概念），所以 Windows 上第二次 listen
+    // 会成功。CI 的 windows job 曾经因此变红 —— 这里按平台跳过，别把它当成跨平台不变量。
+    if (builtin.os.tag != .windows) {
+        try std.testing.expectError(error.AddressInUse, addr.listen(io, .{ .reuse_address = false }));
+    }
 }
 
 test "cache/net SocketReader：recv_timeout_ms=0 时与 std 的 Stream.Reader 逐字节等价" {
